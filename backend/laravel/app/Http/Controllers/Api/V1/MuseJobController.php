@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Models\Clip;
 use App\Models\ProcessingJob;
+use App\Models\Project;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -269,6 +270,20 @@ class MuseJobController extends Controller
                 'error' => 'invalid_state',
                 'message' => $e->getMessage(),
             ], 422);
+        }
+
+        // Keep the project in step with its job: the dashboard's Recent
+        // projects list reads project.status, and it used to stay
+        // "processing" forever — a finished job still showed as
+        // "Processing" at 100% (seen live 2026-11-23 on Job #1).
+        $projectStatus = match ($public) {
+            'ready' => Project::STATUS_READY,
+            'failed' => Project::STATUS_FAILED,
+            default => Project::STATUS_PROCESSING,
+        };
+        $project = $job->project;
+        if ($project !== null && $project->status !== $projectStatus) {
+            $project->update(['status' => $projectStatus]);
         }
 
         return response()->json(['job' => $this->toWorkerArray($job->fresh())]);

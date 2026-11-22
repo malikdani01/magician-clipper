@@ -258,6 +258,32 @@ class MuseJobApiTest extends TestCase
         )->assertStatus(422);
     }
 
+    public function test_project_status_follows_job_to_ready(): void
+    {
+        // Regression test (2026-11-23): projects were created as
+        // "processing" and never updated, so a finished job still
+        // showed as "Processing" at 100% in Recent projects.
+        $user = User::factory()->create();
+        $job = $this->createLinkJob($user);
+        $projectId = ProcessingJob::findOrFail($job['id'])->project_id;
+
+        $this->assertDatabaseHas('projects', ['id' => $projectId, 'status' => 'processing']);
+
+        $this->patchJson(
+            "/api/v1/muse/jobs/{$job['id']}/status",
+            ['status' => 'Processing'],
+            $this->museHeaders()
+        )->assertStatus(200);
+        $this->assertDatabaseHas('projects', ['id' => $projectId, 'status' => 'processing']);
+
+        $this->patchJson(
+            "/api/v1/muse/jobs/{$job['id']}/status",
+            ['status' => 'Ready'],
+            $this->museHeaders()
+        )->assertStatus(200);
+        $this->assertDatabaseHas('projects', ['id' => $projectId, 'status' => 'ready']);
+    }
+
     // --- Cancel flow: queued -> cancelled directly; in-flight -> cancelling
     // -> cancelled by the worker; never stuck in 'cancelling' or 'failed'.
 
