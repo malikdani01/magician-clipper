@@ -47,12 +47,16 @@ RUN printf 'upload_max_filesize = 2048M\npost_max_size = 2048M\n' \
 # Composer, from the official image (not installed via apt).
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
-# Apache: mod_rewrite for Laravel's public/.htaccess front controller,
-# and serve from backend/laravel/public instead of /var/www/html.
+# Apache: mod_rewrite for Laravel's public/.htaccess front controller.
+# The VirtualHost is replaced outright (see docker-000-default.conf):
+# literal DocumentRoot /var/www/html/public — the stock ENV + sed
+# pattern that rewrote it to `DocumentRoot ${APACHE_DOCUMENT_ROOT}`
+# silently left Apache serving /var/www/html, so /up 403'd and the
+# Render health check timed out (deploy fdcc6c6, 2026-11-22).
+# apache2.conf is left untouched: its stock <Directory /var/www/>
+# "Require all granted" stays intact.
 RUN a2enmod rewrite
-ENV APACHE_DOCUMENT_ROOT=/var/www/html/public
-RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-available/*.conf \
-    && sed -ri -e 's!/var/www/!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/apache2.conf /etc/apache2/conf-available/*.conf
+COPY docker-000-default.conf /etc/apache2/sites-available/000-default.conf
 
 WORKDIR /var/www/html
 
