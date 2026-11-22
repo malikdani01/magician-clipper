@@ -1,0 +1,1223 @@
+openapi: 3.0.3
+info:
+  title: Magician Clipper API
+  version: 1.0.0
+  description: |
+    Versioned REST API for Magician Clipper (Phase 1 contract).
+
+    - Laravel is the source of truth for users, projects, permissions,
+      settings and job records.
+    - The Python video engine is reached by Laravel, not directly by the
+      browser, except for the engine's own `/health` endpoint.
+    - Auth: Laravel Sanctum bearer token (`Authorization: Bearer <token>`).
+      Admin endpoints additionally require the `admin` role.
+    - All timestamps are ISO 8601 UTC. All IDs are UUIDs unless noted.
+    - Errors use the envelope in `components/schemas/ErrorResponse`.
+    - **Status: Phase 1 contract + Phase 3 Job System (2026-11-22).**
+      User job endpoints (`POST /jobs`, `GET /jobs`, `GET /jobs/{job}`),
+      the Muse Job API (`/muse/jobs*`, `X-Muse-Api-Key` header), clip
+      download, and the public job status (`queued` / `processing` /
+      `ready` / `failed` / `cancelled`) are implemented; do not treat an
+      endpoint as live until verified against a running server.
+  contact:
+    name: Magician Clipper
+servers:
+  - url: http://127.0.0.1:8000/api/v1
+    description: Local Laravel backend (dev)
+  - url: http://127.0.0.1:8001
+    description: Local video engine (health endpoint only)
+tags:
+  - name: Auth
+  - name: Projects
+  - name: Media
+  - name: Jobs
+  - name: Muse Jobs
+  - name: Clips
+  - name: Exports
+  - name: Settings
+  - name: Admin
+  - name: Health
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Backend health check
+      security: []
+      responses:
+        '200':
+          description: Backend reachable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new user account
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password, password_confirmation]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 255 }
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+                password_confirmation: { type: string, minLength: 8 }
+      responses:
+        '201':
+          description: Registered; returns user + token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in and receive a bearer token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        '200':
+          description: Logged in
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke the current token
+      responses:
+        '204': { description: Logged out }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /me:
+    get:
+      tags: [Auth]
+      summary: Current authenticated user
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /projects:
+    post:
+      tags: [Projects]
+      summary: Create a project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 255 }
+                description: { type: string, nullable: true }
+      responses:
+        '201':
+          description: Project created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '422': { $ref: '#/components/responses/ValidationError' }
+    get:
+      tags: [Projects]
+      summary: List my projects (paginated)
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PerPageParam'
+        - name: search
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string, enum: [draft, processing, completed, failed] }
+      responses:
+        '200':
+          description: Paginated projects
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectListResponse'
+  /projects/{project}:
+    get:
+      tags: [Projects]
+      summary: Get one project
+      parameters: [ { $ref: '#/components/parameters/ProjectId' } ]
+      responses:
+        '200':
+          description: Project
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Projects]
+      summary: Rename / update a project
+      parameters: [ { $ref: '#/components/parameters/ProjectId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, minLength: 1, maxLength: 255 }
+                description: { type: string, nullable: true }
+      responses:
+        '200':
+          description: Updated project
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Projects]
+      summary: Delete a project and its derived media (originals deleted only on explicit project delete)
+      parameters: [ { $ref: '#/components/parameters/ProjectId' } ]
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /projects/{project}/upload:
+    post:
+      tags: [Media]
+      summary: Upload a source video to a project
+      description: |
+        Multipart upload. Server validates extension, MIME and the actual
+        FFprobe result, generates a server-side filename, and stores the
+        original under `storage/uploads`. Max size from `MAX_UPLOAD_MB`.
+      parameters: [ { $ref: '#/components/parameters/ProjectId' } ]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Video file (mp4, mov, mkv, webm or any FFmpeg-supported format)
+      responses:
+        '201':
+          description: Media asset created; probe results included when available
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MediaAsset' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /projects/{project}/media:
+    get:
+      tags: [Media]
+      summary: List media assets of a project
+      parameters:
+        - { $ref: '#/components/parameters/ProjectId' }
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PerPageParam'
+      responses:
+        '200':
+          description: Paginated media assets
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MediaAssetListResponse'
+  /projects/{project}/analyze:
+    post:
+      tags: [Jobs]
+      summary: Start an analysis job (transcribe → detect → select clips)
+      description: |
+        Creates a ProcessingJob in state `uploaded` → `queued` and hands it to
+        the queue. Style options follow spec §7 step 2 and §10. The job is
+        polled via GET /jobs/{job}; never animate a fake percentage — progress
+        comes from the job record only.
+      parameters: [ { $ref: '#/components/parameters/ProjectId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnalyzeRequest'
+      responses:
+        '202':
+          description: Job accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProcessingJob' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /jobs:
+    post:
+      tags: [Jobs]
+      summary: Create a job (upload a video file OR a link + dropdown settings)
+      description: |
+        Phase 3 Muse-connected Job System. Source is exactly one of a
+        multipart `file` (mp4/mov/mkv/webm, max 2 GiB, FFprobe-validated)
+        or a `source_url` (YouTube / TikTok / Google Drive / direct video
+        file). Settings come only from dropdowns/toggles (see
+        JobSettings). A project is auto-created when `project_id` is
+        omitted. The job starts `queued`; the Muse worker picks it up.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [platform, aspect_ratio, clip_count, duration_mode, duration_seconds]
+              properties:
+                file: { type: string, format: binary }
+                source_url: { type: string, format: uri }
+                project_id: { type: integer }
+                title: { type: string, maxLength: 255 }
+                platform: { type: string, enum: [tiktok, instagram] }
+                aspect_ratio: { type: string, enum: ["9:16", "16:9", "1:1", "4:5"] }
+                clip_count: { type: integer, minimum: 1, maximum: 10 }
+                duration_mode: { type: string, enum: [exact, minimum, maximum] }
+                duration_seconds: { type: integer, minimum: 5, maximum: 180 }
+                duration_min_seconds: { type: integer, minimum: 5, maximum: 180 }
+                duration_max_seconds: { type: integer, minimum: 5, maximum: 180 }
+                captions_enabled: { type: boolean, default: true }
+                captions_language: { type: string, enum: [english, roman_urdu, hindi, auto], default: auto }
+                on_screen_text: { type: boolean, default: false }
+                job_type: { type: string, enum: [myself, campaign], default: myself }
+                campaign_requirements: { type: string, maxLength: 5000 }
+                layout: { type: string, enum: [center_crop, split], default: center_crop }
+                content_type: { type: string, enum: [podcast, interview, education, gaming, commentary, story, general] }
+                quality: { type: string, enum: [draft, standard, high] }
+          application/json:
+            schema:
+              type: object
+              required: [platform, aspect_ratio, clip_count, duration_mode, duration_seconds]
+              properties:
+                source_url: { type: string, format: uri }
+                project_id: { type: integer }
+                title: { type: string, maxLength: 255 }
+                platform: { type: string, enum: [tiktok, instagram] }
+                aspect_ratio: { type: string, enum: ["9:16", "16:9", "1:1", "4:5"] }
+                clip_count: { type: integer, minimum: 1, maximum: 10 }
+                duration_mode: { type: string, enum: [exact, minimum, maximum] }
+                duration_seconds: { type: integer, minimum: 5, maximum: 180 }
+                duration_min_seconds: { type: integer, minimum: 5, maximum: 180 }
+                duration_max_seconds: { type: integer, minimum: 5, maximum: 180 }
+                captions_enabled: { type: boolean, default: true }
+                captions_language: { type: string, enum: [english, roman_urdu, hindi, auto], default: auto }
+                on_screen_text: { type: boolean, default: false }
+                job_type: { type: string, enum: [myself, campaign], default: myself }
+                campaign_requirements: { type: string, maxLength: 5000 }
+                layout: { type: string, enum: [center_crop, split], default: center_crop }
+                content_type: { type: string, enum: [podcast, interview, education, gaming, commentary, story, general] }
+                quality: { type: string, enum: [draft, standard, high] }
+      responses:
+        '201':
+          description: Job created (status queued)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job: { $ref: '#/components/schemas/UserJob' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    get:
+      tags: [Jobs]
+      summary: List my jobs (filter by public status)
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PerPageParam'
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/PublicJobStatus' }
+      responses:
+        '200':
+          description: Paginated jobs (user view, with clips + download URLs)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/UserJob' }
+                  meta: { $ref: '#/components/schemas/PaginationMeta' }
+  /jobs/{job}:
+    get:
+      tags: [Jobs]
+      summary: Get a job (poll this for status + clips)
+      description: |
+        User view: job + settings + clip list (duration, size, download
+        URL). Public status is `queued` / `processing` / `ready` /
+        `failed` / `cancelled`, derived from the internal state machine.
+      parameters: [ { $ref: '#/components/parameters/JobId' } ]
+      responses:
+        '200':
+          description: Job
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job: { $ref: '#/components/schemas/UserJob' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /muse/jobs:
+    get:
+      tags: [Muse Jobs]
+      summary: List jobs for the Muse worker (oldest first)
+      description: |
+        Secure Job API. Auth: `X-Muse-Api-Key` header (server-side key
+        from `MUSE_JOB_API_KEY`). No user session. The worker polls with
+        `?status=queued`.
+      security:
+        - museApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PerPageParam'
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/PublicJobStatus' }
+      responses:
+        '200':
+          description: Paginated jobs (worker view, full settings + source paths)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/MuseJob' }
+                  meta: { $ref: '#/components/schemas/PaginationMeta' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /muse/jobs/{job}:
+    get:
+      tags: [Muse Jobs]
+      summary: Get one job for the worker (full settings + source path/link)
+      security:
+        - museApiKey: []
+      parameters: [ { $ref: '#/components/parameters/JobId' } ]
+      responses:
+        '200':
+          description: Job (worker view)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job: { $ref: '#/components/schemas/MuseJob' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /muse/jobs/{job}/status:
+    patch:
+      tags: [Muse Jobs]
+      summary: Report a job status (Queued / Processing / Ready / Failed)
+      description: |
+        Walks the internal state machine along valid transitions only;
+        an illegal transition is a 422. Reporting the same public status
+        again only updates `stage`/`progress`. `error_reason` is kept
+        verbatim as the job's `error_message` (max 500 chars).
+      security:
+        - museApiKey: []
+      parameters: [ { $ref: '#/components/parameters/JobId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [Queued, Processing, Ready, Failed] }
+                error_reason: { type: string, maxLength: 500 }
+                stage: { type: string, maxLength: 255 }
+                progress: { type: integer, minimum: 0, maximum: 100 }
+      responses:
+        '200':
+          description: Updated job (worker view)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job: { $ref: '#/components/schemas/MuseJob' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /muse/jobs/{job}/clips:
+    post:
+      tags: [Muse Jobs]
+      summary: Upload one rendered MP4 clip back to the job
+      description: |
+        Multipart upload, only while the job is Processing. The file is
+        ffprobe-validated server-side (must be a playable MP4 with a
+        video stream) before a clip record is created.
+      security:
+        - museApiKey: []
+      parameters: [ { $ref: '#/components/parameters/JobId' } ]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary, description: "Rendered MP4 clip, max 2 GiB" }
+                title: { type: string, maxLength: 255 }
+                start_seconds: { type: number, minimum: 0 }
+                end_seconds: { type: number, minimum: 0 }
+                duration_seconds: { type: number, minimum: 0 }
+                score: { type: number, minimum: 0, maximum: 1 }
+                reason: { type: string, maxLength: 2000 }
+                transcript_excerpt: { type: string, maxLength: 5000 }
+      responses:
+        '201':
+          description: Clip created (validated file)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  clip: { $ref: '#/components/schemas/Clip' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /jobs/{job}/cancel:
+    post:
+      tags: [Jobs]
+      summary: Cancel a running/queued job (state → cancelling → cancelled)
+      parameters: [ { $ref: '#/components/parameters/JobId' } ]
+      responses:
+        '200':
+          description: Job cancellation requested
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProcessingJob' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /jobs/{job}/retry:
+    post:
+      tags: [Jobs]
+      summary: Retry a failed job (preserves source media and project settings)
+      parameters: [ { $ref: '#/components/parameters/JobId' } ]
+      responses:
+        '202':
+          description: Job re-queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProcessingJob' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /projects/{project}/clips:
+    get:
+      tags: [Clips]
+      summary: List clips of a project
+      parameters:
+        - { $ref: '#/components/parameters/ProjectId' }
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PerPageParam'
+      responses:
+        '200':
+          description: Paginated clips
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClipListResponse'
+  /clips/{clip}:
+    get:
+      tags: [Clips]
+      summary: Get one clip (with transcript excerpt + highlight reason)
+      parameters: [ { $ref: '#/components/parameters/ClipId' } ]
+      responses:
+        '200':
+          description: Clip
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Clip' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Clips]
+      summary: Edit a clip (start/end, title, include/exclude, order)
+      parameters: [ { $ref: '#/components/parameters/ClipId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string, maxLength: 255 }
+                start_seconds: { type: number, minimum: 0 }
+                end_seconds: { type: number, minimum: 0 }
+                included: { type: boolean }
+                sort_order: { type: integer, minimum: 0 }
+      responses:
+        '200':
+          description: Updated clip
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Clip' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /clips/{clip}/download:
+    get:
+      tags: [Clips]
+      summary: Download a rendered clip (streams the MP4 file)
+      description: Owner only. 404 when the clip has no rendered file yet.
+      parameters: [ { $ref: '#/components/parameters/ClipId' } ]
+      responses:
+        '200':
+          description: MP4 file stream
+          content:
+            video/mp4:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /clips/{clip}/render:
+    post:
+      tags: [Clips]
+      summary: (Re-)render one clip with current edits/caption settings
+      parameters: [ { $ref: '#/components/parameters/ClipId' } ]
+      responses:
+        '202':
+          description: Render job accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProcessingJob' }
+  /projects/{project}/export:
+    post:
+      tags: [Exports]
+      summary: Export clips (one, selected, or all) as MP4s or a ZIP
+      parameters: [ { $ref: '#/components/parameters/ProjectId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [clip_ids]
+              properties:
+                clip_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+                  description: Clip IDs to export; empty array is invalid — use "all" via scope
+                scope:
+                  type: string
+                  enum: [selected, all]
+                  default: selected
+                format:
+                  type: string
+                  enum: [mp4, zip]
+                  default: mp4
+                burn_captions: { type: boolean, default: true }
+      responses:
+        '202':
+          description: Export accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Export' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /exports:
+    get:
+      tags: [Exports]
+      summary: List my exports (history)
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PerPageParam'
+      responses:
+        '200':
+          description: Paginated exports
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportListResponse'
+  /exports/{export}:
+    get:
+      tags: [Exports]
+      summary: Get one export (includes download URL when ready)
+      parameters: [ { $ref: '#/components/parameters/ExportId' } ]
+      responses:
+        '200':
+          description: Export
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Export' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /settings:
+    get:
+      tags: [Settings]
+      summary: Get my settings (profile defaults, processing mode, export defaults)
+      responses:
+        '200':
+          description: User settings
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserSettings' }
+    patch:
+      tags: [Settings]
+      summary: Update my settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserSettings' }
+      responses:
+        '200':
+          description: Updated settings
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserSettings' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /admin/dashboard:
+    get:
+      tags: [Admin]
+      summary: Admin dashboard metrics (real counts only; billing fields omitted until billing exists)
+      responses:
+        '200':
+          description: Dashboard metrics
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminDashboard' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/users:
+    get:
+      tags: [Admin]
+      summary: List users (search/filter; never returns passwords or hashes)
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PerPageParam'
+        - name: search
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string, enum: [active, suspended] }
+      responses:
+        '200':
+          description: Paginated users
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUserListResponse'
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/projects:
+    get:
+      tags: [Admin]
+      summary: List all projects (admin view)
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PerPageParam'
+        - name: search
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Paginated projects (admin)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectListResponse'
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/jobs:
+    get:
+      tags: [Admin]
+      summary: List all processing jobs (admin view, incl. failed)
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PerPageParam'
+        - name: state
+          in: query
+          schema: { $ref: '#/components/schemas/JobState' }
+      responses:
+        '200':
+          description: Paginated jobs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobListResponse'
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/jobs/{job}/retry:
+    post:
+      tags: [Admin]
+      summary: Admin retry of a failed job
+      parameters: [ { $ref: '#/components/parameters/JobId' } ]
+      responses:
+        '202':
+          description: Job re-queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProcessingJob' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /admin/jobs/{job}/cancel:
+    post:
+      tags: [Admin]
+      summary: Admin cancel of a job
+      parameters: [ { $ref: '#/components/parameters/JobId' } ]
+      responses:
+        '200':
+          description: Cancellation requested
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProcessingJob' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /admin/system/health:
+    get:
+      tags: [Admin]
+      summary: System health (CPU/RAM/disk, worker, FFmpeg version, Whisper model, DB, optional Redis/Ollama)
+      responses:
+        '200':
+          description: System health
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SystemHealth' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/system/logs:
+    get:
+      tags: [Admin]
+      summary: Recent sanitized system logs (secrets redacted)
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PerPageParam'
+        - name: level
+          in: query
+          schema: { type: string, enum: [debug, info, warning, error] }
+      responses:
+        '200':
+          description: Paginated log entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogListResponse'
+        '403': { $ref: '#/components/responses/Forbidden' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Sanctum token
+    museApiKey:
+      type: apiKey
+      in: header
+      name: X-Muse-Api-Key
+      description: |
+        Server-side key for the Muse-connected Job System (Phase 3).
+        Stored only in backend/laravel/.env as MUSE_JOB_API_KEY; never
+        committed, logged or printed.
+  parameters:
+    PageParam:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PerPageParam:
+      name: per_page
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 15 }
+    ProjectId:
+      name: project
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    JobId:
+      name: job
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ClipId:
+      name: clip
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ExportId:
+      name: export
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  responses:
+    ValidationError:
+      description: Validation failed
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unauthorized:
+      description: Unauthenticated
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Forbidden:
+      description: Authenticated but not authorized (e.g. non-admin on admin route)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: Resource not found (or not owned by the caller)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Conflict:
+      description: State conflict (e.g. cancel a completed job, retry a running job)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string, example: "The given data was invalid." }
+        code:
+          type: string
+          description: Stable machine-readable error code, e.g. VALIDATION_FAILED, UNAUTHENTICATED, FORBIDDEN, NOT_FOUND, JOB_STATE_CONFLICT
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items: { type: string }
+          description: Field-level validation errors (422 only)
+    PaginationMeta:
+      type: object
+      properties:
+        current_page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer }
+        last_page: { type: integer }
+    HealthResponse:
+      type: object
+      properties:
+        status: { type: string, enum: [ok, degraded], example: ok }
+        service: { type: string, example: "magician-clipper-backend" }
+        version: { type: string, example: "1.0.0" }
+        timestamp: { type: string, format: date-time }
+    User:
+      type: object
+      required: [id, name, email, role, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string, format: email }
+        role: { type: string, enum: [user, admin] }
+        status: { type: string, enum: [active, suspended] }
+        plan: { type: string, enum: [free, pro], nullable: true, description: "Billing not implemented in Phase 1; plan is informational only" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AuthResponse:
+      type: object
+      required: [user, token]
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        token: { type: string, description: "Sanctum bearer token; send as Authorization: Bearer <token>" }
+        token_type: { type: string, example: Bearer }
+    Project:
+      type: object
+      required: [id, user_id, name, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        status: { type: string, enum: [draft, processing, completed, failed] }
+        source_duration_seconds: { type: number, nullable: true }
+        clip_count: { type: integer, example: 0 }
+        thumbnail_url: { type: string, format: uri, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ProjectListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Project' }
+        meta: { $ref: '#/components/schemas/PaginationMeta' }
+    MediaAsset:
+      type: object
+      required: [id, project_id, original_filename, stored_filename, mime_type, size_bytes, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        original_filename: { type: string, description: "User-supplied name, for display only" }
+        stored_filename: { type: string, description: "Server-generated filename; never trust the upload path" }
+        mime_type: { type: string, example: video/mp4 }
+        size_bytes: { type: integer, minimum: 0 }
+        duration_seconds: { type: number, nullable: true }
+        width: { type: integer, nullable: true }
+        height: { type: integer, nullable: true }
+        frame_rate: { type: number, nullable: true }
+        video_codec: { type: string, nullable: true }
+        audio_codec: { type: string, nullable: true }
+        audio_streams: { type: integer, nullable: true }
+        bitrate: { type: integer, nullable: true }
+        preview_url: { type: string, format: uri, nullable: true }
+        created_at: { type: string, format: date-time }
+    MediaAssetListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/MediaAsset' }
+        meta: { $ref: '#/components/schemas/PaginationMeta' }
+    PublicJobStatus:
+      type: string
+      description: |
+        Public job status (Phase 3 Job System), derived from the internal
+        state machine: uploaded/queued -> queued, completed -> ready,
+        failed -> failed, cancelled -> cancelled, any in-flight state ->
+        processing.
+      enum: [queued, processing, ready, failed, cancelled]
+    JobSettings:
+      type: object
+      description: |
+        Dropdown/toggle-only job spec stored on the job (Phase 3). The
+        only free text is `campaign_requirements` (campaign jobs) and the
+        optional job `title`.
+      required: [platform, aspect_ratio, clip_count, duration_mode, duration_seconds]
+      properties:
+        platform: { type: string, enum: [tiktok, instagram] }
+        aspect_ratio: { type: string, enum: ["9:16", "16:9", "1:1", "4:5"] }
+        clip_count: { type: integer, minimum: 1, maximum: 10 }
+        duration_mode: { type: string, enum: [exact, minimum, maximum] }
+        duration_seconds: { type: integer, minimum: 5, maximum: 180 }
+        duration_min_seconds: { type: integer, minimum: 5, maximum: 180, nullable: true }
+        duration_max_seconds: { type: integer, minimum: 5, maximum: 180, nullable: true }
+        captions_enabled: { type: boolean, default: true }
+        captions_language: { type: string, enum: [english, roman_urdu, hindi, auto], default: auto }
+        on_screen_text: { type: boolean, default: false }
+        job_type: { type: string, enum: [myself, campaign], default: myself }
+        campaign_requirements: { type: string, nullable: true, maxLength: 5000 }
+        layout: { type: string, enum: [center_crop, split], default: center_crop }
+        content_type: { type: string, enum: [podcast, interview, education, gaming, commentary, story, general] }
+        quality: { type: string, enum: [draft, standard, high] }
+        source_type: { type: string, enum: [upload, link] }
+        source_url: { type: string, format: uri, nullable: true }
+        source_path: { type: string, nullable: true, description: "Relative path under Laravel storage/app for uploads" }
+    UserJob:
+      type: object
+      description: User-facing job view (job + settings + clips with download info; no internal paths).
+      required: [id, project_id, status, state, settings]
+      properties:
+        id: { type: integer }
+        project_id: { type: integer }
+        status: { $ref: '#/components/schemas/PublicJobStatus' }
+        state: { $ref: '#/components/schemas/JobState' }
+        stage: { type: string, nullable: true }
+        progress: { type: integer, minimum: 0, maximum: 100, nullable: true }
+        settings: { $ref: '#/components/schemas/JobSettings' }
+        source_type: { type: string, enum: [upload, link] }
+        source_url: { type: string, format: uri, nullable: true }
+        clips:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/Clip'
+              - type: object
+                properties:
+                  file_size_bytes: { type: integer, nullable: true }
+                  download_url: { type: string, format: uri, description: "GET /clips/{clip}/download" }
+        error_code: { type: string, nullable: true }
+        error_message: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    MuseJob:
+      type: object
+      description: Worker-facing job view (full settings + source paths; API-key auth only).
+      allOf:
+        - $ref: '#/components/schemas/UserJob'
+        - type: object
+          properties:
+            user_id: { type: integer }
+            source_path: { type: string, nullable: true }
+            source_local_path: { type: string, nullable: true, description: "Absolute local path (worker runs on the same machine as the backend)" }
+    JobState:
+      type: string
+      description: |
+        Processing job state machine (spec §11). Valid transitions are
+        defined in shared/api-contracts/job-states.json — validate them
+        server-side; the client must never assume a transition is legal.
+      enum: [uploaded, queued, probing, extracting_audio, transcribing, detecting_scenes, analyzing, selecting_clips, rendering, captioning, validating, completed, failed, cancelling, cancelled]
+    ProcessingJob:
+      type: object
+      required: [id, project_id, media_asset_id, state, progress_percent, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        media_asset_id: { type: string, format: uuid }
+        type: { type: string, enum: [analyze, render, export], default: analyze }
+        state: { $ref: '#/components/schemas/JobState' }
+        stage_label:
+          type: string
+          nullable: true
+          description: "Human-readable current stage, e.g. 'Transcribing speech'. Shown instead of a fake percentage when progress is not measurable."
+        progress_percent:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: "Real, measurable progress only. 0 with an indeterminate stage is honest; a fabricated percentage is not allowed."
+        error_code: { type: string, nullable: true }
+        error_message: { type: string, nullable: true, description: "User-facing, sanitized error; internal paths/secrets never included" }
+        attempts: { type: integer, minimum: 0 }
+        started_at: { type: string, format: date-time, nullable: true }
+        finished_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    JobListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/ProcessingJob' }
+        meta: { $ref: '#/components/schemas/PaginationMeta' }
+    AnalyzeRequest:
+      type: object
+      required: [media_asset_id, clip_count, duration_mode, duration_seconds, aspect_ratio]
+      properties:
+        media_asset_id: { type: string, format: uuid }
+        clip_count: { type: integer, minimum: 1, maximum: 10, description: "Presets 1/3/5/10 or custom within limits" }
+        duration_mode: { type: string, enum: [exact, minimum, maximum] }
+        duration_seconds: { type: integer, minimum: 5, maximum: 180, description: "Presets 15/20/30/45/60 or custom" }
+        aspect_ratio: { type: string, enum: ["9:16", "16:9", "1:1", "4:5"] }
+        captions_enabled: { type: boolean, default: true }
+        caption_preset: { type: string, default: "Bold Pop", description: "e.g. Bold Pop, Highlight Box, Bounce, Karaoke, Neon Glow, Word Slam, Modern, Podcast, Cinematic, Minimal" }
+        language: { type: string, nullable: true, description: "ISO 639-1 code, or null for auto-detect" }
+        processing_mode: { type: string, enum: [eco, balanced, fast], default: balanced }
+        content_type: { type: string, enum: [podcast, interview, education, gaming, commentary, story, general], default: general }
+        keywords_include: { type: array, items: { type: string } }
+        keywords_exclude: { type: array, items: { type: string } }
+        quality: { type: string, enum: [draft, standard, high], default: standard }
+    Clip:
+      type: object
+      required: [id, project_id, job_id, start_seconds, end_seconds, duration_seconds, aspect_ratio, included, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        job_id: { type: string, format: uuid }
+        title: { type: string, nullable: true }
+        start_seconds: { type: number, minimum: 0 }
+        end_seconds: { type: number, minimum: 0 }
+        duration_seconds: { type: number, minimum: 0 }
+        aspect_ratio: { type: string, enum: ["9:16", "16:9", "1:1", "4:5"] }
+        score: { type: number, nullable: true, description: "Explainable highlight score (0-1)" }
+        highlight_reason: { type: string, nullable: true, description: "Why this moment was selected, e.g. 'Strong opening statement + scene change'" }
+        signals:
+          type: array
+          items: { type: string }
+          description: "Contributing signals, e.g. speech_activity, question_boundary, scene_change, silence_boundary"
+        transcript_excerpt: { type: string, nullable: true }
+        status: { type: string, enum: [pending, rendering, ready, failed], default: pending }
+        file_path: { type: string, nullable: true, description: "Internal path — never exposed to normal users; use preview_url/download_url" }
+        preview_url: { type: string, format: uri, nullable: true }
+        download_url: { type: string, format: uri, nullable: true }
+        thumbnail_url: { type: string, format: uri, nullable: true }
+        included: { type: boolean, default: true }
+        sort_order: { type: integer, minimum: 0 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ClipListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Clip' }
+        meta: { $ref: '#/components/schemas/PaginationMeta' }
+    Export:
+      type: object
+      required: [id, project_id, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        name: { type: string, example: "Project_001 Clips" }
+        clip_count: { type: integer, minimum: 0 }
+        format: { type: string, enum: [mp4, zip] }
+        status: { type: string, enum: [pending, processing, ready, failed] }
+        file_size_bytes: { type: integer, nullable: true }
+        download_url: { type: string, format: uri, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ExportListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Export' }
+        meta: { $ref: '#/components/schemas/PaginationMeta' }
+    UserSettings:
+      type: object
+      properties:
+        default_processing_mode: { type: string, enum: [eco, balanced, fast] }
+        default_aspect_ratio: { type: string, enum: ["9:16", "16:9", "1:1", "4:5"] }
+        default_caption_preset: { type: string }
+        default_quality: { type: string, enum: [draft, standard, high] }
+        notifications_enabled: { type: boolean }
+    AdminDashboard:
+      type: object
+      description: "Real counts only. Revenue/billing fields are intentionally absent until billing is implemented (spec §8)."
+      properties:
+        total_users: { type: integer }
+        active_users: { type: integer }
+        total_projects: { type: integer }
+        total_clips: { type: integer }
+        jobs_processing: { type: integer }
+        jobs_completed: { type: integer }
+        jobs_failed: { type: integer }
+        storage_used_bytes: { type: integer }
+        queue_depth: { type: integer }
+        worker_healthy: { type: boolean }
+        recent_users:
+          type: array
+          items: { $ref: '#/components/schemas/User' }
+        recent_projects:
+          type: array
+          items: { $ref: '#/components/schemas/Project' }
+    AdminUserListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/User'
+              - type: object
+                properties:
+                  project_count: { type: integer }
+                  job_count: { type: integer }
+                  storage_used_bytes: { type: integer }
+        meta: { $ref: '#/components/schemas/PaginationMeta' }
+    SystemHealth:
+      type: object
+      properties:
+        status: { type: string, enum: [healthy, degraded, down] }
+        cpu_percent: { type: number, nullable: true }
+        ram_percent: { type: number, nullable: true }
+        disk_free_bytes: { type: integer, nullable: true }
+        worker_healthy: { type: boolean }
+        ffmpeg_version: { type: string, nullable: true }
+        whisper_model: { type: string, nullable: true }
+        whisper_model_available: { type: boolean }
+        database_ok: { type: boolean }
+        redis_ok: { type: boolean, nullable: true, description: "null when Redis is not configured (optional)" }
+        ollama_ok: { type: boolean, nullable: true, description: "null when Ollama is disabled" }
+        checked_at: { type: string, format: date-time }
+    LogEntry:
+      type: object
+      properties:
+        id: { type: string }
+        level: { type: string, enum: [debug, info, warning, error] }
+        message: { type: string, description: "Sanitized; secrets and internal paths redacted" }
+        context: { type: object, additionalProperties: true, nullable: true }
+        created_at: { type: string, format: date-time }
+    LogListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/LogEntry' }
+        meta: { $ref: '#/components/schemas/PaginationMeta' }
+security:
+  - bearerAuth: []

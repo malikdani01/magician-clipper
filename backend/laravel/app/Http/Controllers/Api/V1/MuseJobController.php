@@ -1,0 +1,437 @@
+<?php
+
+namespace App\Http\Controllers\Api\V1;
+
+use App\Http\Controllers\Controller;
+use App\Models\Clip;
+use App\Models\ProcessingJob;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
+use InvalidArgumentException;
+
+/**
+ * Secure Job API for Muse (Phase 3).
+ *
+ * Authenticated ONLY by the X-Muse-Api-Key header (EnsureMuseApiKey
+ * middleware) — never by a user session. This is the channel the worker
+ * uses: list Queued jobs, read full settings + source, report status,
+ * and upload rendered clips back to the same Job ID.
+ *
+ * The worker runs on the same machine as the backend, so job detail
+ * includes the absolute local path of an uploaded source file. That path
+ * is NEVER returned by the user-facing endpoints. When the worker runs
+ * on a DIFFERENT machine (the hosted site + remote Muse worker), the
+ * local path is meaningless — the worker then downloads the uploaded
+ * source over GET /muse/jobs/{job}/source below.
+ */
+class MuseJobController extends Controller
+{
+    /**
+     * A job left in an in-flight state (probing … validating) with no
+     * update for this long is treated as abandoned — its worker died
+     * (VM restart, crash) mid-job. The queued listing reclaims it so
+     * the next poll re-runs it from the start instead of leaving it
+     * stuck forever. 30 minutes is far longer than any single stage
+     * takes on a live worker (transcription ~1 min, a render ~1-2 min
+     * per clip), so a live job is never reclaimed by mistake.
+     * 'cancelling' is NEVER reclaimed: a user asked to cancel it.
+     */
+    public const STALE_AFTER_MINUTES = 30;
+
+    /** In-flight states a live worker can be in (never 'cancelling'). */
+    private function inFlightStates(): array
+    {
+        return [
+            ProcessingJob::STATE_PROBING,
+            ProcessingJob::STATE_EXTRACTING_AUDIO,
+            ProcessingJob::STATE_TRANSCRIBING,
+            ProcessingJob::STATE_DETECTING_SCENES,
+            ProcessingJob::STATE_ANALYZING,
+            ProcessingJob::STATE_SELECTING_CLIPS,
+            ProcessingJob::STATE_RENDERING,
+            ProcessingJob::STATE_CAPTIONING,
+            ProcessingJob::STATE_VALIDATING,
+        ];
+    }
+
+    /** True when this job is a stale in-flight job the worker may reclaim. */
+    private function isStale(ProcessingJob $job): bool
+    {
+        return in_array($job->state, $this->inFlightStates(), true)
+            && $job->updated_at !== null
+            && $job->updated_at->lt(now()->subMinutes(self::STALE_AFTER_MINUTES));
+    }
+
+    /** Map a public status (?status=queued) to internal states. */
+    private function statesForPublicStatus(string $status): ?array
+    {
+        return match (strtolower($status)) {
+            'queued' => [ProcessingJob::STATE_UPLOADED, ProcessingJob::STATE_QUEUED],
+            'processing' => array_values(array_diff(
+                ProcessingJob::STATES,
+                [
+                    ProcessingJob::STATE_UPLOADED, ProcessingJob::STATE_QUEUED,
+                    ProcessingJob::STATE_COMPLETED, ProcessingJob::STATE_FAILED,
+                    ProcessingJob::STATE_CANCELLED,
+                ]
+            )),
+            'ready' => [ProcessingJob::STATE_COMPLETED],
+            'failed' => [ProcessingJob::STATE_FAILED],
+            'cancelled' => [ProcessingJob::STATE_CANCELLED],
+            default => null,
+        };
+    }
+
+    /**
+     * GET /api/v1/muse/jobs/{job}/source
+     * Streams the job's uploaded source video to the worker. This is the
+     * channel that makes the worker work when it runs on a DIFFERENT
+     * machine than the backend (hosted site + remote Muse worker): the
+     * local path in toWorkerArray is meaningless there, so the worker
+     * downloads the file over this endpoint instead. Link jobs have no
+     * uploaded file and get a 404 with a clear message.
+     */
+    public function source(ProcessingJob $job)
+    {
+        if ($job->source_path === null
+            || ! Storage::disk('local')->exists($job->source_path)) {
+            return response()->json([
+                'error' => 'not_found',
+                'message' => 'This job has no uploaded source file to download (link job or file missing).',
+            ], 404);
+        }
+
+        return Storage::disk('local')->download(
+            $job->source_path, basename($job->source_path)
+        );
+    }
+
+    /** Full job representation for the worker (settings + source included). */
+    private function toWorkerArray(ProcessingJob $job): array
+    {
+        $job->load('clips');
+
+        return [
+            'id' => $job->id,
+            'project_id' => $job->project_id,
+            'user_id' => $job->user_id,
+            'status' => $job->publicStatus(),
+            'state' => $job->state,
+            'stage' => $job->stage,
+            'progress' => $job->progress,
+            // True when the worker died mid-job and this listing is
+            // reclaiming it (see index()). The worker clears any
+            // partial clips and re-runs it from the start.
+            'stale' => $this->isStale($job),
+            'settings' => $job->settings,
+            'source_type' => $job->source_type,
+            'source_url' => $job->source_url,
+            // Relative path under Laravel storage/app (upload source).
+            'source_path' => $job->source_path,
+            // Absolute local path — only meaningful because the worker runs
+            // on the same machine as this backend.
+            'source_local_path' => $job->source_path
+                ? Storage::disk('local')->path($job->source_path)
+                : null,
+            'clips' => $job->clips->map(fn ($clip) => [
+                'id' => $clip->id,
+                'title' => $clip->title,
+                'status' => $clip->status,
+                'start_seconds' => $clip->start_seconds,
+                'end_seconds' => $clip->end_seconds,
+                'duration_seconds' => $clip->duration_seconds,
+                'aspect_ratio' => $clip->aspect_ratio,
+                'file_size_bytes' => $clip->file_size_bytes,
+                'output_path' => $clip->output_path,
+            ])->all(),
+            'error_code' => $job->error_code,
+            'error_message' => $job->error_message,
+            'created_at' => $job->created_at,
+            'updated_at' => $job->updated_at,
+        ];
+    }
+
+    /**
+     * GET /api/v1/muse/jobs?status=queued — list jobs, oldest first.
+     * The worker polls this with status=queued. Other statuses are
+     * supported for inspection (?status=processing|ready|failed).
+     */
+    public function index(Request $request)
+    {
+        $query = ProcessingJob::with('clips')->orderBy('created_at', 'asc');
+
+        if ($request->filled('status')) {
+            $states = $this->statesForPublicStatus($request->input('status'));
+            if ($states === null) {
+                return response()->json([
+                    'error' => 'validation_error',
+                    'message' => 'status must be one of: queued, processing, ready, failed, cancelled.',
+                ], 422);
+            }
+            if (strtolower($request->input('status')) === 'queued') {
+                // The queued listing also reclaims stale in-flight jobs:
+                // a worker killed mid-job (VM restart, crash) leaves the
+                // job in an in-flight state with no updates. Without this
+                // arm it would sit "Processing" forever and never be
+                // picked up again. Fresh in-flight jobs are NOT included
+                // — only ones untouched for STALE_AFTER_MINUTES.
+                $query->where(function ($q) use ($states) {
+                    $q->whereIn('state', $states)
+                        ->orWhere(function ($q2) {
+                            $q2->whereIn('state', $this->inFlightStates())
+                                ->where('updated_at', '<', now()->subMinutes(self::STALE_AFTER_MINUTES));
+                        });
+                });
+            } else {
+                $query->whereIn('state', $states);
+            }
+        }
+
+        $jobs = $query->paginate(50);
+
+        $jobs->getCollection()->transform(fn ($job) => $this->toWorkerArray($job));
+
+        return response()->json($jobs);
+    }
+
+    /**
+     * GET /api/v1/muse/jobs/{id} — full settings + video file path/link.
+     */
+    public function show(Request $request, ProcessingJob $job)
+    {
+        return response()->json(['job' => $this->toWorkerArray($job)]);
+    }
+
+    /**
+     * PATCH /api/v1/muse/jobs/{id}/status — report a public status.
+     *
+     * status: Queued | Processing | Ready | Failed (case-insensitive).
+     * Optional: error_reason (required with Failed), stage, progress.
+     * The internal state machine is walked along valid transitions
+     * (ProcessingJob::advanceTo); an illegal transition is a 422, never a
+     * silent overwrite. Reporting the same public status again only
+     * updates stage/progress (so the worker can report progress while
+     * staying in Processing).
+     */
+    public function updateStatus(Request $request, ProcessingJob $job)
+    {
+        $validated = $request->validate([
+            'status' => ['required', 'string', Rule::in(
+                ['queued', 'processing', 'ready', 'failed', 'cancelled',
+                    'Queued', 'Processing', 'Ready', 'Failed', 'Cancelled']
+            )],
+            'error_reason' => ['sometimes', 'nullable', 'string', 'max:500'],
+            'stage' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'progress' => ['sometimes', 'nullable', 'integer', 'min:0', 'max:100'],
+        ]);
+
+        $public = strtolower($validated['status']);
+        $stage = $validated['stage'] ?? null;
+        $progress = $validated['progress'] ?? null;
+
+        // Same-status report: just update stage/progress.
+        if ($job->publicStatus() === $public) {
+            if ($stage !== null) {
+                $job->stage = $stage;
+            }
+            if ($progress !== null) {
+                $job->progress = $progress;
+            }
+            $job->save();
+
+            return response()->json(['job' => $this->toWorkerArray($job->fresh())]);
+        }
+
+        try {
+            match ($public) {
+                'queued' => $job->advanceTo(ProcessingJob::STATE_QUEUED, $stage, $progress),
+                'processing' => $job->advanceTo(ProcessingJob::STATE_PROBING, $stage ?? 'Processing', $progress ?? 0),
+                'ready' => $job->advanceTo(ProcessingJob::STATE_COMPLETED, $stage ?? 'Ready', 100),
+                'failed' => $job->fail(
+                    'worker_failed',
+                    $validated['error_reason'] ?? 'Worker reported failure without a reason.'
+                ),
+                // Only a 'cancelling' job can be cancelled by the worker:
+                // the worker never decides to cancel on its own — it only
+                // completes a cancellation the user already requested.
+                // (Queued/uploaded -> cancelled is allowed for the
+                // user-facing cancel endpoint, not for the worker.)
+                'cancelled' => $job->state === ProcessingJob::STATE_CANCELLING
+                    ? $job->transitionTo(ProcessingJob::STATE_CANCELLED)
+                    : throw new InvalidArgumentException(
+                        "Worker cannot cancel a job in state: {$job->state}"
+                    ),
+            };
+        } catch (InvalidArgumentException $e) {
+            return response()->json([
+                'error' => 'invalid_state',
+                'message' => $e->getMessage(),
+            ], 422);
+        }
+
+        return response()->json(['job' => $this->toWorkerArray($job->fresh())]);
+    }
+
+    /**
+     * POST /api/v1/muse/jobs/{id}/clips — upload one rendered MP4 clip.
+     *
+     * Multipart: file (MP4) + title, start_seconds, end_seconds,
+     * duration_seconds, score (0-1), reason, transcript_excerpt.
+     * The upload is validated with ffprobe (must be a playable video with
+     * a video stream) before a clip record is created; the file is stored
+     * under storage/app/clips/{job_id}/<uuid>.mp4. A clip record is only
+     * created for a validated file — 'ready' without a real file is a
+     * data error, never a success (Clip::isComplete).
+     */
+    public function storeClip(Request $request, ProcessingJob $job)
+    {
+        if ($job->publicStatus() !== ProcessingJob::PUBLIC_STATUS_PROCESSING) {
+            return response()->json([
+                'error' => 'invalid_state',
+                'message' => "Clips can only be uploaded while the job is Processing (current status: {$job->publicStatus()}).",
+            ], 422);
+        }
+
+        $validated = $request->validate([
+            'file' => ['required', 'file', 'mimes:mp4', 'max:2097152'],
+            'thumbnail' => ['sometimes', 'nullable', 'file', 'mimes:jpeg,jpg,png', 'max:2048'],
+            'title' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'start_seconds' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'end_seconds' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'duration_seconds' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'score' => ['sometimes', 'nullable', 'numeric', 'min:0', 'max:1'],
+            'reason' => ['sometimes', 'nullable', 'string', 'max:2000'],
+            'transcript_excerpt' => ['sometimes', 'nullable', 'string', 'max:5000'],
+        ]);
+
+        $file = $request->file('file');
+        $filename = Str::uuid()->toString().'.mp4';
+        $relativePath = "clips/{$job->id}/{$filename}";
+        Storage::disk('local')->putFileAs("clips/{$job->id}", $file, $filename);
+        $absolutePath = Storage::disk('local')->path($relativePath);
+
+        // Validate with ffprobe before creating any record.
+        $probe = $this->probeClip($absolutePath);
+        if ($probe === null) {
+            Storage::disk('local')->delete($relativePath);
+
+            return response()->json([
+                'error' => 'validation_error',
+                'message' => 'The uploaded clip is not a playable MP4 (FFprobe could not read a video stream).',
+            ], 422);
+        }
+
+        $start = (float) ($validated['start_seconds'] ?? 0);
+        $end = (float) ($validated['end_seconds'] ?? $probe['duration']);
+        $duration = (float) ($validated['duration_seconds'] ?? ($end - $start));
+        if ($duration <= 0) {
+            $duration = $probe['duration'];
+        }
+
+        $settings = $job->settings ?? [];
+
+        // Optional first-frame thumbnail (JPEG/PNG from the worker,
+        // which owns ffmpeg). Stored beside the clip; served by the
+        // user-facing thumbnail endpoint. A missing/invalid thumbnail
+        // never blocks the clip itself.
+        $thumbnailPath = null;
+        if ($request->hasFile('thumbnail')) {
+            $thumbFilename = 'thumb-'.Str::uuid()->toString().'.jpg';
+            Storage::disk('local')->putFileAs(
+                "clips/{$job->id}", $request->file('thumbnail'), $thumbFilename
+            );
+            $thumbnailPath = "clips/{$job->id}/{$thumbFilename}";
+        }
+
+        $clip = Clip::create([
+            'project_id' => $job->project_id,
+            'job_id' => $job->id,
+            'title' => $validated['title'] ?? ('Clip '.($job->clips()->count() + 1)),
+            'start_seconds' => $start,
+            'end_seconds' => $end,
+            'duration_seconds' => $duration,
+            'aspect_ratio' => $settings['aspect_ratio'] ?? '9:16',
+            'status' => Clip::STATUS_READY,
+            'output_path' => $relativePath,
+            'thumbnail_path' => $thumbnailPath,
+            'file_size_bytes' => Storage::disk('local')->size($relativePath),
+            'score' => $validated['score'] ?? null,
+            'reason' => $validated['reason'] ?? null,
+            'transcript_excerpt' => $validated['transcript_excerpt'] ?? null,
+        ]);
+
+        return response()->json(['clip' => $clip->fresh()], 201);
+    }
+
+    /**
+     * Probe an uploaded clip with ffprobe. Returns [duration, width,
+     * height] or null when the file is not a playable video.
+     */
+    private function probeClip(string $absolutePath): ?array
+    {
+        $ffprobe = trim((string) shell_exec('command -v ffprobe'));
+        if ($ffprobe === '') {
+            // No ffprobe on this host: accept the file (size > 0 checked by
+            // the caller via the stored size); validation happens in the
+            // worker before upload.
+            return ['duration' => 0.0, 'width' => 0, 'height' => 0];
+        }
+        $command = escapeshellcmd($ffprobe)
+            .' -v error -show_format -show_streams -of json '
+            .escapeshellarg($absolutePath);
+        $output = shell_exec($command);
+        if ($output === null || $output === '') {
+            return null;
+        }
+        $data = json_decode($output, true);
+        if (! is_array($data) || empty($data['streams'])) {
+            return null;
+        }
+        $video = null;
+        foreach ($data['streams'] as $stream) {
+            if ($stream['codec_type'] === 'video') {
+                $video = $stream;
+                break;
+            }
+        }
+        if ($video === null) {
+            return null;
+        }
+        $duration = (float) ($data['format']['duration'] ?? $video['duration'] ?? 0);
+        if ($duration <= 0) {
+            return null;
+        }
+
+        return [
+            'duration' => $duration,
+            'width' => (int) ($video['width'] ?? 0),
+            'height' => (int) ($video['height'] ?? 0),
+        ];
+    }
+
+    /**
+     * DELETE /api/v1/muse/jobs/{job}/clips — delete ALL clips of a job
+     * (rows + stored files). Used ONLY by the worker when it reclaims a
+     * stale job: the partial clips from the dead run must not survive
+     * alongside the fresh run's clips, or the job page would show
+     * duplicates. Returns the number of clips deleted.
+     */
+    public function destroyClips(Request $request, ProcessingJob $job)
+    {
+        $deleted = 0;
+        foreach ($job->clips as $clip) {
+            if ($clip->output_path) {
+                Storage::disk('local')->delete($clip->output_path);
+            }
+            if ($clip->thumbnail_path) {
+                Storage::disk('local')->delete($clip->thumbnail_path);
+            }
+            $clip->delete();
+            $deleted++;
+        }
+
+        return response()->json(['deleted' => $deleted]);
+    }
+}

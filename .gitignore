@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+vendor/
+__pycache__/
+*.pyc
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+
+# Environment / secrets — NEVER commit
+.env
+.env.*
+!.env.example
+
+# Databases (local SQLite files)
+*.sqlite
+*.sqlite-journal
+*.db
+
+# Storage contents — local media only, never committed.
+# (Laravel's own backend/laravel/storage/app/.gitignore already covers
+# the API's clips/uploads/exports; these cover the rest.)
+services/video-engine/storage/
+demo/*.mp4
+preview-shots/
+storage/temp/*
+!storage/temp/.gitkeep
+
+# Logs
+*.log
+logs/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+coverage/
+htmlcov/
+
+# Node / PHP caches
+.npm/
+.cache/

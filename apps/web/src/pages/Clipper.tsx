@@ -1,0 +1,1539 @@
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import {
+  AlertTriangle,
+  ArrowLeft,
+  ArrowRight,
+  AudioLines,
+  Check,
+  CheckCircle2,
+  Clock,
+  CloudUpload,
+  Eye,
+  FileVideo,
+  Link2,
+  Loader2,
+  RotateCcw,
+  Send,
+  SlidersHorizontal,
+  Sparkles,
+  Upload,
+  X,
+} from 'lucide-react'
+import { EmptyState } from '../components/EmptyState'
+import { NotImplemented } from '../components/NotImplemented'
+import { PageHeader } from '../components/PageHeader'
+import { ENGINE_URL, extractAudio, probeVideo, type ProbeResult } from '../lib/api'
+import { formatBytes, formatDuration } from '../lib/format'
+import {
+  defaultClipSpec,
+  setProjectFile,
+  useProjects,
+  type ClipSpec,
+  type ProjectRecord,
+} from '../state/projects'
+
+const STEPS = [
+  { id: 1, label: 'Import', icon: Upload },
+  { id: 2, label: 'Style', icon: SlidersHorizontal },
+  { id: 3, label: 'Process', icon: Sparkles },
+  { id: 4, label: 'Review', icon: Eye },
+  { id: 5, label: 'Ship', icon: Send },
+] as const
+
+const VIDEO_EXTENSIONS = ['mp4', 'mov', 'mkv', 'webm', 'm4v']
+
+const ENGINE_START_COMMAND =
+  'cd services/video-engine && uvicorn app.main:app --host 127.0.0.1 --port 8001'
+
+/**
+ * True when this page itself is served from this machine (local dev).
+ * The engine URL alone cannot tell us: on the hosted site
+ * VITE_ENGINE_URL is unset, so it falls back to 127.0.0.1:8001 even
+ * though no engine can run there — the probe-failure message must not
+ * tell a visitor to start a local process they cannot run.
+ */
+const IS_LOCAL_SITE =
+  typeof window !== 'undefined' &&
+  /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname)
+
+/** The 10 caption presets (same ids as the Captions Studio page). */
+const CAPTION_STYLES = [
+  { id: 'bold-pop', label: 'Bold Pop' },
+  { id: 'highlight', label: 'Highlight' },
+  { id: 'bounce', label: 'Bounce' },
+  { id: 'karaoke', label: 'Karaoke' },
+  { id: 'neon-glow', label: 'Neon Glow' },
+  { id: 'word-slam', label: 'Word Slam' },
+  { id: 'modern', label: 'Modern' },
+  { id: 'podcast', label: 'Podcast' },
+  { id: 'cinematic', label: 'Cinematic' },
+  { id: 'minimal', label: 'Minimal' },
+] as const
+
+const CONTENT_TYPES = [
+  { id: 'podcast', label: 'Podcast' },
+  { id: 'interview', label: 'Interview' },
+  { id: 'education', label: 'Education' },
+  { id: 'gaming', label: 'Gaming' },
+  { id: 'commentary', label: 'Commentary' },
+  { id: 'story', label: 'Story' },
+  { id: 'general', label: 'General' },
+] as const
+
+const CLIP_COUNT_PRESETS = [1, 3, 5, 10] as const
+const DURATION_PRESETS = [15, 20, 30, 45, 60] as const
+
+/** The real pipeline stages. Only stages 1–2 can honestly complete in Phase 2. */
+const PIPELINE_STAGES = [
+  'Checking media',
+  'Extracting audio',
+  'Transcribing speech',
+  'Detecting scenes',
+  'Finding candidate moments',
+  'Ranking highlights',
+  'Preparing boundaries',
+  'Rendering clips',
+  'Generating captions',
+  'Validating outputs',
+] as const
+
+type ExtractAudioResult = Awaited<ReturnType<typeof extractAudio>>
+
+/**
+ * Accept video/* MIME types, plus MKV-style files whose browser reports
+ * an empty or generic type — those are judged by extension instead.
+ */
+function isVideoFile(f: File): boolean {
+  if (f.type.startsWith('video/')) return true
+  const ext = f.name.split('.').pop()?.toLowerCase() ?? ''
+  return VIDEO_EXTENSIONS.includes(ext)
+}
+
+/** A failed fetch / TypeError means the engine process is not reachable. */
+function isEngineUnreachable(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return (
+    err instanceof TypeError ||
+    /failed to fetch|networkerror|network request failed|load failed|ECONNREFUSED/i.test(message)
+  )
+}
+
+function ChoiceButton({
+  selected,
+  onClick,
+  children,
+}: {
+  selected: boolean
+  onClick: () => void
+  children: ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={selected}
+      onClick={onClick}
+      className={`rounded-xl border px-3.5 py-2.5 text-sm font-medium transition-colors ${
+        selected
+          ? 'border-brand bg-brand text-white'
+          : 'border-ink-border bg-ink-panel2 text-white hover:border-brand/60'
+      }`}
+    >
+      {children}
+    </button>
+  )
+}
+
+function Toggle({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean
+  onChange: (value: boolean) => void
+  label: string
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+        checked ? 'bg-brand' : 'bg-ink-border'
+      }`}
+    >
+      <span
+        className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${
+          checked ? 'left-[22px]' : 'left-0.5'
+        }`}
+      />
+    </button>
+  )
+}
+
+/**
+ * AI Clipper — 5-step wizard (Import → Style → Process → Review → Ship).
+ *
+ * Step 1 (Import) is REAL in Phase 2: a video file is previewed from an
+ * object URL, then uploaded straight to the local video engine
+ * (http://127.0.0.1:8001) and probed with ffprobe. The engine values are
+ * authoritative; a successful probe creates a draft project in the store.
+ * Audio can be extracted for real (16 kHz mono WAV) as groundwork for
+ * transcription in Phase 3.
+ *
+ * Step 2 (Style) is a REAL form bound to the project's ClipSpec.
+ * The caption preset and keywords-to-avoid have no field on ClipSpec,
+ * so they live in wizard-local state only.
+ *
+ * Steps 3–5 are honest placeholders: the pipeline stages are listed as
+ * pending, Start Processing / export controls stay disabled, and no
+ * percentage, progress bar or fake activity is ever shown. Stages 1–2
+ * of the pipeline show as done only when probe + audio extraction have
+ * really succeeded, with their real engine job ids.
+ *
+ * The Laravel backend is NOT used by this wizard — its upload/analyze
+ * endpoints return "not implemented yet (Phase 3)". Internal engine
+ * paths (source_path / audio_path) are never rendered.
+ */
+export function ClipperPage() {
+  const { addProject, updateProject, getProject } = useProjects()
+
+  const [step, setStep] = useState(1)
+  const [maxStep, setMaxStep] = useState(1)
+
+  // Step 1 — file + browser metadata + engine probe
+  const [file, setFile] = useState<File | null>(null)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const [browserMeta, setBrowserMeta] = useState<{
+    duration: number
+    width: number
+    height: number
+  } | null>(null)
+  const [dragOver, setDragOver] = useState(false)
+  const [fileError, setFileError] = useState<string | null>(null)
+  const [probeStatus, setProbeStatus] = useState<'idle' | 'probing' | 'done' | 'error'>('idle')
+  const [probe, setProbe] = useState<ProbeResult | null>(null)
+  const [probeError, setProbeError] = useState<string | null>(null)
+  const [probeUnreachable, setProbeUnreachable] = useState(false)
+  const [projectId, setProjectId] = useState<string | null>(null)
+
+  // Step 1 — audio extraction (Phase 2 groundwork for transcription)
+  const [audioStatus, setAudioStatus] = useState<'idle' | 'extracting' | 'done' | 'error'>('idle')
+  const [audioResult, setAudioResult] = useState<ExtractAudioResult | null>(null)
+  const [audioError, setAudioError] = useState<string | null>(null)
+
+  // Step 2 — style form (bound to the project's ClipSpec)
+  const [spec, setSpec] = useState<ClipSpec>(() => defaultClipSpec())
+  const [clipCountText, setClipCountText] = useState(() => String(spec.clipCount))
+  const [clipCountError, setClipCountError] = useState<string | null>(null)
+  const [durationText, setDurationText] = useState(() => String(spec.durationSeconds))
+  const [durationError, setDurationError] = useState<string | null>(null)
+  // No captionPreset / keywords-to-avoid field exists on ClipSpec —
+  // these live in wizard-local state only and are shown as selected text.
+  const [captionPreset, setCaptionPreset] = useState<string>('bold-pop')
+  const [keywordsAvoid, setKeywordsAvoid] = useState('')
+
+  const inputRef = useRef<HTMLInputElement>(null)
+  const videoRef = useRef<HTMLVideoElement>(null)
+  // Stale-response guards: a probe/audio call that finishes after a newer
+  // file was picked (or the user navigated away) is ignored.
+  const probeRequestRef = useRef(0)
+  const audioRequestRef = useRef(0)
+
+  const project = projectId ? getProject(projectId) : undefined
+  const specValid = clipCountError === null && durationError === null
+  // Stepper: step 1 is always reachable; later steps need a probed project
+  // and must have been visited (or be the immediate next step, so every
+  // step stays reachable even though Step 4's Continue is disabled).
+  const canGoToStep = (n: number) =>
+    n === 1 || (projectId !== null && n <= maxStep + 1)
+
+  const goTo = (n: number) => {
+    setStep(n)
+    setMaxStep((m) => Math.max(m, n))
+  }
+
+  /** Keep local spec state and the stored project spec in sync. */
+  const updateSpec = (patch: Partial<ClipSpec>) => {
+    const next = { ...spec, ...patch }
+    setSpec(next)
+    if (projectId) {
+      updateProject(projectId, { spec: next })
+    }
+  }
+
+  const applyClipCount = (n: number) => {
+    setClipCountText(String(n))
+    setClipCountError(null)
+    updateSpec({ clipCount: n })
+  }
+
+  const onClipCountText = (value: string) => {
+    setClipCountText(value)
+    const n = Number(value)
+    if (value.trim() === '' || !Number.isInteger(n) || n < 1 || n > 20) {
+      setClipCountError('Enter a whole number between 1 and 20.')
+      return
+    }
+    setClipCountError(null)
+    updateSpec({ clipCount: n })
+  }
+
+  const applyDuration = (n: number) => {
+    setDurationText(String(n))
+    setDurationError(null)
+    updateSpec({ durationSeconds: n })
+  }
+
+  const onDurationText = (value: string) => {
+    setDurationText(value)
+    const n = Number(value)
+    if (value.trim() === '' || !Number.isInteger(n) || n < 5 || n > 300) {
+      setDurationError('Enter a whole number between 5 and 300 seconds.')
+      return
+    }
+    setDurationError(null)
+    updateSpec({ durationSeconds: n })
+  }
+
+  /**
+   * Upload the file to the engine and probe it with ffprobe.
+   * `priorId` is the project to update when re-probing; null creates a
+   * new project (a new file always starts a new project).
+   */
+  const startProbe = (f: File, priorId: string | null) => {
+    const reqId = ++probeRequestRef.current
+    setProbe(null)
+    setProbeError(null)
+    setProbeUnreachable(false)
+    setProbeStatus('probing')
+    setAudioResult(null)
+    setAudioError(null)
+    setAudioStatus('idle')
+    probeVideo(f)
+      .then((result) => {
+        if (reqId !== probeRequestRef.current) return
+        setProbe(result)
+        setProbeStatus('done')
+        const existing = priorId ? getProject(priorId) : undefined
+        const projectSpec = existing?.spec ?? defaultClipSpec()
+        setSpec(projectSpec)
+        setClipCountText(String(projectSpec.clipCount))
+        setDurationText(String(projectSpec.durationSeconds))
+        const title = f.name.replace(/\.[^.]+$/, '') || f.name
+        const record = {
+          title,
+          fileName: f.name,
+          fileSize: result.size_bytes,
+          durationSeconds: result.duration_seconds,
+          width: result.width,
+          height: result.height,
+          fps: result.fps,
+          videoCodec: result.video_codec,
+          audioCodec: result.audio_codec,
+          audioStreams: result.audio_streams,
+          jobId: result.job_id,
+          status: 'draft' as const,
+          spec: projectSpec,
+        }
+        if (priorId && existing) {
+          updateProject(priorId, record)
+          setProjectFile(priorId, f)
+        } else {
+          // addProject returns the created record (or its id); handle both.
+          const created = addProject(record) as unknown as
+            | ProjectRecord
+            | string
+            | undefined
+          const newId = typeof created === 'string' ? created : created?.id
+          if (newId) {
+            setProjectId(newId)
+            setProjectFile(newId, f)
+          }
+        }
+      })
+      .catch((err: unknown) => {
+        if (reqId !== probeRequestRef.current) return
+        setProbeStatus('error')
+        setProbeError(err instanceof Error ? err.message : String(err))
+        setProbeUnreachable(isEngineUnreachable(err))
+      })
+  }
+
+  const startExtractAudio = () => {
+    if (!file) return
+    const reqId = ++audioRequestRef.current
+    setAudioStatus('extracting')
+    setAudioError(null)
+    extractAudio(file)
+      .then((result) => {
+        if (reqId !== audioRequestRef.current) return
+        setAudioResult(result)
+        setAudioStatus('done')
+      })
+      .catch((err: unknown) => {
+        if (reqId !== audioRequestRef.current) return
+        setAudioStatus('error')
+        setAudioError(err instanceof Error ? err.message : String(err))
+      })
+  }
+
+  const handleFile = (f: File | undefined) => {
+    setFileError(null)
+    if (!f) return
+    if (!isVideoFile(f)) {
+      setFileError(
+        `"${f.name}" is not a video file. Please choose an MP4, MOV, MKV or WEBM file.`,
+      )
+      return
+    }
+    // A new file mid-wizard drops all old probe/project state and starts
+    // a new project; any probe already in flight is invalidated.
+    probeRequestRef.current += 1
+    audioRequestRef.current += 1
+    const fresh = defaultClipSpec()
+    setSpec(fresh)
+    setClipCountText(String(fresh.clipCount))
+    setDurationText(String(fresh.durationSeconds))
+    setCaptionPreset('bold-pop')
+    setKeywordsAvoid('')
+    setProbe(null)
+    setProbeError(null)
+    setProbeUnreachable(false)
+    setProbeStatus('idle')
+    setAudioResult(null)
+    setAudioError(null)
+    setAudioStatus('idle')
+    setProjectId(null)
+    setBrowserMeta(null)
+    setMaxStep(1)
+    setStep(1)
+    setFile(f)
+    if (inputRef.current) inputRef.current.value = ''
+    startProbe(f, null)
+  }
+
+  const clearFile = () => {
+    probeRequestRef.current += 1
+    audioRequestRef.current += 1
+    const fresh = defaultClipSpec()
+    setSpec(fresh)
+    setClipCountText(String(fresh.clipCount))
+    setDurationText(String(fresh.durationSeconds))
+    setCaptionPreset('bold-pop')
+    setKeywordsAvoid('')
+    setFile(null)
+    setPreviewUrl(null)
+    setBrowserMeta(null)
+    setProbe(null)
+    setProbeError(null)
+    setProbeUnreachable(false)
+    setProbeStatus('idle')
+    setAudioResult(null)
+    setAudioError(null)
+    setAudioStatus('idle')
+    setProjectId(null)
+    setFileError(null)
+    setMaxStep(1)
+    setStep(1)
+    if (inputRef.current) inputRef.current.value = ''
+  }
+
+  // Playable preview from an object URL + real browser metadata, as soon
+  // as a file is chosen. The engine probe runs in parallel (startProbe).
+  useEffect(() => {
+    if (!file) {
+      setPreviewUrl(null)
+      setBrowserMeta(null)
+      return
+    }
+    const url = URL.createObjectURL(file)
+    setPreviewUrl(url)
+    const video = videoRef.current
+    if (!video) {
+      return () => URL.revokeObjectURL(url)
+    }
+    const onLoaded = () => {
+      setBrowserMeta({
+        duration: video.duration,
+        width: video.videoWidth,
+        height: video.videoHeight,
+      })
+    }
+    const onError = () => {
+      setFileError('Could not read this video file in your browser. Try a different file.')
+    }
+    video.addEventListener('loadedmetadata', onLoaded)
+    video.addEventListener('error', onError)
+    video.src = url
+    return () => {
+      video.removeEventListener('loadedmetadata', onLoaded)
+      video.removeEventListener('error', onError)
+      URL.revokeObjectURL(url)
+    }
+  }, [file])
+
+  // ---- derived values -------------------------------------------------
+
+  const browserDiffers =
+    browserMeta !== null &&
+    probe !== null &&
+    ((probe.duration_seconds != null &&
+      Math.abs(browserMeta.duration - probe.duration_seconds) > 0.5) ||
+      (probe.width != null && probe.width !== browserMeta.width) ||
+      (probe.height != null && probe.height !== browserMeta.height))
+
+  const engineMeta: Array<[string, string]> = probe
+    ? [
+        ['Duration', formatDuration(probe.duration_seconds ?? Number.NaN)],
+        [
+          'Resolution',
+          probe.width != null && probe.height != null
+            ? `${probe.width} × ${probe.height}`
+            : '—',
+        ],
+        [
+          'FPS',
+          probe.fps != null
+            ? Number.isInteger(probe.fps)
+              ? String(probe.fps)
+              : probe.fps.toFixed(2)
+            : '—',
+        ],
+        ['Video codec', probe.video_codec ?? '—'],
+        ['Audio codec', probe.audio_codec ?? '—'],
+        ['Audio streams', String(probe.audio_streams)],
+        [
+          'Bitrate',
+          probe.bitrate != null ? `${Math.round(probe.bitrate / 1000)} kbps` : '—',
+        ],
+        ['Format', probe.format ?? '—'],
+        ['Size', formatBytes(probe.size_bytes)],
+      ]
+    : []
+
+  const durationModeLabel =
+    spec.durationMode === 'exact' ? 'exact' : spec.durationMode === 'minimum' ? 'min' : 'max'
+  const summary = `${spec.clipCount} clip${spec.clipCount === 1 ? '' : 's'} · ${durationModeLabel} ${spec.durationSeconds}s · ${spec.aspect} · ${spec.platform === 'tiktok' ? 'TikTok' : 'Instagram'} · captions ${spec.captions ? 'on' : 'off'}`
+  const captionLabel =
+    CAPTION_STYLES.find((s) => s.id === captionPreset)?.label ?? captionPreset
+  const contentLabel =
+    CONTENT_TYPES.find((c) => c.id === spec.contentType)?.label ?? spec.contentType
+
+  return (
+    <div>
+      <PageHeader
+        title="AI Clipper"
+        subtitle="Let AI find the best moments in your video."
+      />
+
+      {/* Stepper — numbered circles on a connecting line (design reference). */}
+      <ol className="mb-8 flex items-start justify-between gap-1 sm:gap-2">
+        {STEPS.map((s, i) => {
+          const active = step === s.id
+          const done = step > s.id
+          const reachable = canGoToStep(s.id)
+          return (
+            <li key={s.id} className="relative flex flex-1 flex-col items-center">
+              {i > 0 ? (
+                <span
+                  aria-hidden="true"
+                  className={`absolute right-1/2 top-5 h-0.5 w-full ${step > s.id ? 'bg-brand' : 'bg-ink-border'}`}
+                />
+              ) : null}
+              {i < STEPS.length - 1 ? (
+                <span
+                  aria-hidden="true"
+                  className={`absolute left-1/2 top-5 h-0.5 w-full ${step > s.id + 1 ? 'bg-brand' : 'bg-ink-border'}`}
+                />
+              ) : null}
+              <button
+                type="button"
+                onClick={() => goTo(s.id)}
+                disabled={!reachable}
+                aria-current={active ? 'step' : undefined}
+                className={`relative z-10 flex h-10 w-10 items-center justify-center rounded-full border-2 text-sm font-bold transition-colors ${
+                  active
+                    ? 'border-brand bg-brand text-white shadow-glow'
+                    : done
+                      ? 'border-brand bg-brand/20 text-brand-light'
+                      : 'border-ink-border bg-ink-panel text-[var(--color-text-muted)] hover:text-white'
+                } ${!reachable ? 'cursor-not-allowed opacity-50' : ''}`}
+              >
+                {done ? <Check className="h-4 w-4" /> : s.id}
+              </button>
+              <span
+                className={`mt-2 text-center text-xs font-medium sm:text-sm ${
+                  active ? 'text-white' : 'text-[var(--color-text-muted)]'
+                }`}
+              >
+                {s.label}
+              </span>
+            </li>
+          )
+        })}
+      </ol>
+
+      {/* Hidden video element used only to read real file metadata. */}
+      <video ref={videoRef} preload="metadata" className="hidden" aria-hidden="true" />
+
+      {step === 1 ? (
+        <section aria-label="Step 1 — Import">
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
+            <div className="xl:col-span-2">
+          {!file ? (
+            <div
+              role="button"
+              tabIndex={0}
+              aria-label="Drop a video file here or click to browse"
+              onClick={() => inputRef.current?.click()}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') inputRef.current?.click()
+              }}
+              onDragOver={(e) => {
+                e.preventDefault()
+                setDragOver(true)
+              }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(e) => {
+                e.preventDefault()
+                setDragOver(false)
+                handleFile(e.dataTransfer.files?.[0])
+              }}
+              className={`flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-16 text-center transition-colors ${
+                dragOver ? 'border-brand bg-brand/10' : 'border-ink-border bg-ink-panel hover:border-brand/60'
+              }`}
+            >
+              <span className="flex h-16 w-16 items-center justify-center rounded-2xl bg-brand/15 text-brand-light">
+                <CloudUpload className="h-8 w-8" />
+              </span>
+              <h2 className="mt-4 text-lg font-semibold text-white">
+                Drag &amp; drop your video here or click to browse
+              </h2>
+              <p className="mt-1 text-sm text-[var(--color-text-muted)]">
+                Supports: MP4, MOV, MKV, WEBM. The file is uploaded to the local
+                video engine and probed with ffprobe — nothing is sent to any
+                other service.
+              </p>
+              <span className="mt-5 rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white">
+                Choose File
+              </span>
+              <input
+                ref={inputRef}
+                type="file"
+                accept="video/*,.mkv"
+                className="hidden"
+                onChange={(e) => handleFile(e.target.files?.[0])}
+              />
+            </div>
+          ) : (
+            <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-brand/15 text-brand-light">
+                    <FileVideo className="h-6 w-6" />
+                  </span>
+                  <div>
+                    <h2 className="font-semibold text-white">{file.name}</h2>
+                    <p className="text-sm text-[var(--color-text-muted)]">
+                      {probeStatus === 'probing'
+                        ? 'Uploading to the engine…'
+                        : probeStatus === 'done'
+                          ? 'Probed by the engine — metadata below is authoritative'
+                          : probeStatus === 'error'
+                            ? 'Probe failed — see the error below'
+                            : 'Reading metadata…'}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={clearFile}
+                  aria-label="Remove file"
+                  className="flex h-9 w-9 items-center justify-center rounded-lg border border-ink-border text-[var(--color-text-muted)] hover:text-white"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              {previewUrl ? (
+                <video
+                  src={previewUrl}
+                  controls
+                  preload="metadata"
+                  className="mt-5 max-h-80 w-full rounded-xl bg-black"
+                />
+              ) : (
+                <p className="mt-5 text-sm text-[var(--color-text-muted)]">
+                  Preparing preview…
+                </p>
+              )}
+
+              {browserMeta && probeStatus !== 'done' ? (
+                <p className="mt-3 text-xs text-[var(--color-text-muted)]">
+                  Browser reading: {formatDuration(browserMeta.duration)} ·{' '}
+                  {browserMeta.width} × {browserMeta.height}
+                </p>
+              ) : null}
+
+              {probeStatus === 'probing' ? (
+                <div className="mt-5 flex items-start gap-3 rounded-xl bg-ink-panel2 p-4">
+                  <Loader2 className="mt-0.5 h-5 w-5 shrink-0 animate-spin text-brand-light" />
+                  <div>
+                    <p className="text-sm font-medium text-white">Uploading to engine…</p>
+                    <p className="mt-1 text-sm text-[var(--color-text-muted)]">
+                      Probing with ffprobe… follows on the engine once the upload
+                      finishes. No fake progress is shown.
+                    </p>
+                  </div>
+                </div>
+              ) : null}
+
+              {probeStatus === 'error' ? (
+                <div role="alert" className="mt-5 rounded-xl border border-red-500/40 bg-red-500/10 p-4">
+                  <p className="flex items-center gap-2 text-sm font-semibold text-red-300">
+                    <AlertTriangle className="h-4 w-4" /> Probe failed
+                  </p>
+                  <p className="mt-2 break-words text-sm text-red-200/90">{probeError}</p>
+                  {probeUnreachable && IS_LOCAL_SITE ? (
+                    <p className="mt-3 text-sm text-red-200/90">
+                      Video engine is not reachable at {ENGINE_URL} — start it
+                      with:
+                    </p>
+                  ) : null}
+                  {probeUnreachable && IS_LOCAL_SITE ? (
+                    <code className="mt-2 block overflow-x-auto rounded-lg bg-black/40 px-3 py-2 text-xs text-white">
+                      {ENGINE_START_COMMAND}
+                    </code>
+                  ) : null}
+                  {probeUnreachable && !IS_LOCAL_SITE ? (
+                    <p className="mt-3 text-sm text-red-200/90">
+                      Video engine is not reachable at {ENGINE_URL}. This site
+                      processes videos through the connected worker instead —
+                      submit your video as a New Job and the finished clips
+                      will appear on the job page.
+                    </p>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => startProbe(file, projectId)}
+                    className="mt-4 flex items-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
+                  >
+                    <RotateCcw className="h-4 w-4" /> Retry probe
+                  </button>
+                </div>
+              ) : null}
+
+              {probeStatus === 'done' && probe ? (
+                <>
+                  <dl className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3">
+                    {engineMeta.map(([label, value]) => (
+                      <div key={label} className="rounded-xl bg-ink-panel2 p-3">
+                        <dt className="text-xs text-[var(--color-text-muted)]">{label}</dt>
+                        <dd className="mt-1 break-words text-sm font-medium text-white">{value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                  {browserDiffers && browserMeta ? (
+                    <p className="mt-3 text-xs text-[var(--color-text-muted)]">
+                      Engine values are authoritative — they differ from the
+                      browser&apos;s reading (browser: {formatDuration(browserMeta.duration)},{' '}
+                      {browserMeta.width} × {browserMeta.height}).
+                    </p>
+                  ) : null}
+                  {project ? (
+                    <p className="mt-3 text-sm text-[var(--color-text-muted)]">
+                      Saved as project “{project.title}” (draft).
+                    </p>
+                  ) : null}
+
+                  <div className="mt-6 border-t border-ink-border pt-5">
+                    <h3 className="flex items-center gap-2 text-sm font-semibold text-white">
+                      <AudioLines className="h-4 w-4 text-brand-light" />
+                      Audio extraction
+                    </h3>
+                    <p className="mt-1 text-sm text-[var(--color-text-muted)]">
+                      Extract a 16 kHz mono WAV for transcription. Audio extraction
+                      works — transcription arrives in Phase 3.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={startExtractAudio}
+                      disabled={audioStatus === 'extracting'}
+                      className="mt-3 flex items-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-light disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {audioStatus === 'extracting' ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <AudioLines className="h-4 w-4" />
+                      )}
+                      {audioStatus === 'extracting'
+                        ? 'Extracting audio…'
+                        : 'Extract audio (16 kHz mono WAV)'}
+                    </button>
+                    {audioStatus === 'done' && audioResult ? (
+                      <dl className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                        {[
+                          ['Duration', formatDuration(audioResult.duration_seconds ?? Number.NaN)],
+                          ['Sample rate', `${audioResult.sample_rate.toLocaleString()} Hz`],
+                          ['Channels', audioResult.channels === 1 ? '1 (mono)' : String(audioResult.channels)],
+                          ['Size', formatBytes(audioResult.size_bytes)],
+                        ].map(([label, value]) => (
+                          <div key={label} className="rounded-xl bg-ink-panel2 p-3">
+                            <dt className="text-xs text-[var(--color-text-muted)]">{label}</dt>
+                            <dd className="mt-1 break-words text-sm font-medium text-white">{value}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    ) : null}
+                    {audioStatus === 'error' ? (
+                      <p role="alert" className="mt-4 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+                        Audio extraction failed: {audioError}
+                      </p>
+                    ) : null}
+                  </div>
+                </>
+              ) : null}
+
+              <button
+                type="button"
+                onClick={() => inputRef.current?.click()}
+                className="mt-5 rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white hover:bg-ink-border"
+              >
+                Choose a different file
+              </button>
+              <input
+                ref={inputRef}
+                type="file"
+                accept="video/*,.mkv"
+                className="hidden"
+                onChange={(e) => handleFile(e.target.files?.[0])}
+              />
+            </div>
+          )}
+
+          {fileError ? (
+            <p role="alert" className="mt-4 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+              {fileError}
+            </p>
+          ) : null}
+
+          <div className="mt-6 rounded-2xl border border-ink-border bg-ink-panel p-6">
+            <h2 className="flex items-center gap-2 text-base font-semibold text-white">
+              <Link2 className="h-5 w-5 text-brand-light" /> Import from a link
+            </h2>
+            <p className="mt-1 text-sm text-[var(--color-text-muted)]">
+              Paste a YouTube, Google Drive or direct video link. Link import
+              needs the backend.
+            </p>
+            <div className="mt-3">
+              <NotImplemented phase="Phase 3" detail="needs the backend — downloading is not claimed" />
+            </div>
+            <fieldset disabled className="mt-4 flex flex-col gap-3 opacity-60 sm:flex-row">
+              <input
+                type="url"
+                placeholder="Paste a YouTube, Drive or video link…"
+                className="w-full flex-1 rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)]"
+              />
+              <button
+                type="button"
+                disabled
+                className="cursor-not-allowed rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white opacity-40"
+              >
+                Import link
+              </button>
+            </fieldset>
+          </div>
+
+          <div className="mt-6 flex justify-end">
+            <button
+              type="button"
+              disabled={projectId === null}
+              onClick={() => goTo(2)}
+              className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-light disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Continue to Style <ArrowRight className="h-4 w-4" />
+            </button>
+          </div>
+          {projectId === null ? (
+            <p className="mt-2 text-right text-xs text-[var(--color-text-muted)]">
+              {probeStatus === 'probing'
+                ? 'Probing with the engine — please wait.'
+                : probeStatus === 'error'
+                  ? 'Probe failed — retry or choose a different file.'
+                  : 'Choose a video and let the engine probe it to continue.'}
+            </p>
+          ) : null}
+            </div>
+
+            {/* Right rail — design-reference Clipping Options + Why card.
+                The controls below edit the same spec as Step 2 (Style);
+                Step 2 stays the full form. */}
+            <aside className="space-y-4">
+              <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
+                <h2 className="text-lg font-semibold text-white">Clipping Options</h2>
+                <label className="mt-4 block">
+                  <span className="text-sm font-medium text-white">Number of Clips</span>
+                  <select
+                    value={spec.clipCount}
+                    onChange={(e) => applyClipCount(Number(e.target.value))}
+                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none"
+                  >
+                    {[1, 3, 5, 10].map((n) => (
+                      <option key={n} value={n}>
+                        {n} clip{n === 1 ? '' : 's'}
+                      </option>
+                    ))}
+                    {![1, 3, 5, 10].includes(spec.clipCount) ? (
+                      <option value={spec.clipCount}>{spec.clipCount} clips (custom)</option>
+                    ) : null}
+                  </select>
+                </label>
+                <label className="mt-4 block">
+                  <span className="text-sm font-medium text-white">Clip Duration</span>
+                  <select
+                    value={spec.durationSeconds}
+                    onChange={(e) => applyDuration(Number(e.target.value))}
+                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none"
+                  >
+                    {[15, 20, 30, 45, 60].map((n) => (
+                      <option key={n} value={n}>
+                        {n} seconds
+                      </option>
+                    ))}
+                    {![15, 20, 30, 45, 60].includes(spec.durationSeconds) ? (
+                      <option value={spec.durationSeconds}>{spec.durationSeconds} seconds (custom)</option>
+                    ) : null}
+                  </select>
+                </label>
+                <div className="mt-5 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm text-white">Vertical (9:16)</span>
+                    <Toggle
+                      checked={spec.aspect === '9:16'}
+                      onChange={(v) => updateSpec({ aspect: v ? '9:16' : '16:9' })}
+                      label="Vertical 9:16 on or off"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm text-white">Add Animated Captions</span>
+                    <Toggle
+                      checked={spec.captions}
+                      onChange={(v) => updateSpec({ captions: v })}
+                      label="Animated captions on or off"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm text-white">On-screen text</span>
+                    <Toggle
+                      checked={spec.onScreenText}
+                      onChange={(v) => updateSpec({ onScreenText: v })}
+                      label="On-screen text on or off"
+                    />
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={projectId === null}
+                  onClick={() => goTo(2)}
+                  className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-light disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Continue to Style <ArrowRight className="h-4 w-4" />
+                </button>
+                <p className="mt-2 text-center text-xs text-[var(--color-text-muted)]">
+                  {projectId === null
+                    ? 'Choose a video first — options save into its project.'
+                    : `Live summary: ${summary}`}
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
+                <h2 className="text-lg font-semibold text-white">Why Magician Clipper?</h2>
+                <ul className="mt-4 space-y-3 text-sm text-white">
+                  {[
+                    'AI-Powered Moment Detection',
+                    'Smart Captions & Subtitles',
+                    'Professional Video Editor',
+                    'One-Click Export',
+                  ].map((item) => (
+                    <li key={item} className="flex items-start gap-2.5">
+                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
+                      {item}
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-4 text-xs leading-relaxed text-[var(--color-text-muted)]">
+                  Moment detection, caption burn-in and export arrive with the
+                  Phase 3 pipeline. Import, probing and the editor work today.
+                </p>
+              </div>
+            </aside>
+          </div>
+        </section>
+      ) : null}
+
+      {step === 2 ? (
+        <section aria-label="Step 2 — Style">
+          <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
+            <h2 className="text-lg font-semibold text-white">Clipping options</h2>
+            <p className="mt-1 text-sm text-[var(--color-text-muted)]">
+              {file ? `Video: ${file.name} · ${formatBytes(file.size)}` : 'Set the style for this job.'}
+              {project ? ` · Project: ${project.title}` : ''}
+            </p>
+
+            <div className="mt-6 grid grid-cols-1 gap-6 md:grid-cols-2">
+              <fieldset>
+                <legend className="text-sm font-medium text-white">Platform</legend>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <ChoiceButton
+                    selected={spec.platform === 'tiktok'}
+                    onClick={() => updateSpec({ platform: 'tiktok' })}
+                  >
+                    TikTok
+                  </ChoiceButton>
+                  <ChoiceButton
+                    selected={spec.platform === 'instagram'}
+                    onClick={() => updateSpec({ platform: 'instagram' })}
+                  >
+                    Instagram
+                  </ChoiceButton>
+                </div>
+              </fieldset>
+
+              <fieldset>
+                <legend className="text-sm font-medium text-white">Aspect ratio</legend>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {(['9:16', '16:9', '1:1', '4:5'] as const).map((a) => (
+                    <ChoiceButton
+                      key={a}
+                      selected={spec.aspect === a}
+                      onClick={() => updateSpec({ aspect: a })}
+                    >
+                      {a === '9:16'
+                        ? 'Vertical (9:16)'
+                        : a === '16:9'
+                          ? 'Landscape (16:9)'
+                          : a === '1:1'
+                            ? 'Square (1:1)'
+                            : 'Portrait (4:5)'}
+                    </ChoiceButton>
+                  ))}
+                </div>
+              </fieldset>
+
+              <fieldset>
+                <legend className="text-sm font-medium text-white">Number of clips</legend>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {CLIP_COUNT_PRESETS.map((n) => (
+                    <ChoiceButton
+                      key={n}
+                      selected={spec.clipCount === n}
+                      onClick={() => applyClipCount(n)}
+                    >
+                      {n}
+                    </ChoiceButton>
+                  ))}
+                  <label className="flex items-center gap-2">
+                    <span className="text-sm text-[var(--color-text-muted)]">Custom</span>
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={1}
+                      max={20}
+                      value={clipCountText}
+                      onChange={(e) => onClipCountText(e.target.value)}
+                      aria-label="Custom number of clips (1 to 20)"
+                      className="w-20 rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
+                    />
+                  </label>
+                </div>
+                {clipCountError ? (
+                  <p role="alert" className="mt-2 text-xs text-red-300">{clipCountError}</p>
+                ) : (
+                  <p className="mt-2 text-xs text-[var(--color-text-muted)]">Between 1 and 20 clips.</p>
+                )}
+              </fieldset>
+
+              <fieldset>
+                <legend className="text-sm font-medium text-white">Clip duration</legend>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {(['exact', 'minimum', 'maximum'] as const).map((m) => (
+                    <ChoiceButton
+                      key={m}
+                      selected={spec.durationMode === m}
+                      onClick={() => updateSpec({ durationMode: m })}
+                    >
+                      {m === 'exact' ? 'Exact' : m === 'minimum' ? 'Minimum' : 'Maximum'}
+                    </ChoiceButton>
+                  ))}
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {DURATION_PRESETS.map((n) => (
+                    <ChoiceButton
+                      key={n}
+                      selected={spec.durationSeconds === n}
+                      onClick={() => applyDuration(n)}
+                    >
+                      {n}s
+                    </ChoiceButton>
+                  ))}
+                  <label className="flex items-center gap-2">
+                    <span className="text-sm text-[var(--color-text-muted)]">Custom</span>
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={5}
+                      max={300}
+                      value={durationText}
+                      onChange={(e) => onDurationText(e.target.value)}
+                      aria-label="Custom clip duration in seconds (5 to 300)"
+                      className="w-20 rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
+                    />
+                    <span className="text-sm text-[var(--color-text-muted)]">seconds</span>
+                  </label>
+                </div>
+                {durationError ? (
+                  <p role="alert" className="mt-2 text-xs text-red-300">{durationError}</p>
+                ) : (
+                  <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                    {spec.durationMode === 'exact'
+                      ? 'Each clip is exactly this long.'
+                      : spec.durationMode === 'minimum'
+                        ? 'Clips are at least this long.'
+                        : 'Clips are at most this long.'}
+                  </p>
+                )}
+              </fieldset>
+
+              <div>
+                <span className="text-sm font-medium text-white">Captions</span>
+                <div className="mt-2 flex items-center gap-3">
+                  <Toggle
+                    checked={spec.captions}
+                    onChange={(v) => updateSpec({ captions: v })}
+                    label="Captions on or off"
+                  />
+                  <span className="text-sm text-[var(--color-text-muted)]">
+                    {spec.captions ? 'Captions on' : 'Captions off'}
+                  </span>
+                </div>
+                <label className="mt-3 block">
+                  <span className="text-sm font-medium text-white">Caption style</span>
+                  <select
+                    value={captionPreset}
+                    disabled={!spec.captions}
+                    onChange={(e) => setCaptionPreset(e.target.value)}
+                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {CAPTION_STYLES.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                  Selected caption style: <span className="font-medium text-white">{captionLabel}</span>
+                  {' '}— kept with this wizard session; captions are rendered in Phase 3.
+                </p>
+              </div>
+
+              <div>
+                <span className="text-sm font-medium text-white">On-screen text</span>
+                <div className="mt-2 flex items-center gap-3">
+                  <Toggle
+                    checked={spec.onScreenText}
+                    onChange={(v) => updateSpec({ onScreenText: v })}
+                    label="On-screen text on or off"
+                  />
+                  <span className="text-sm text-[var(--color-text-muted)]">
+                    {spec.onScreenText ? 'On-screen text on' : 'On-screen text off'}
+                  </span>
+                </div>
+                <label className="mt-3 block">
+                  <span className="text-sm font-medium text-white">Content type</span>
+                  <select
+                    value={spec.contentType}
+                    onChange={(e) =>
+                      updateSpec({ contentType: e.target.value as ClipSpec['contentType'] })
+                    }
+                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
+                  >
+                    {CONTENT_TYPES.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                  Content type: <span className="font-medium text-white">{contentLabel}</span>
+                </p>
+              </div>
+
+              <label className="block">
+                <span className="text-sm font-medium text-white">Keywords to prioritise</span>
+                <input
+                  type="text"
+                  value={spec.keywords}
+                  onChange={(e) => updateSpec({ keywords: e.target.value })}
+                  placeholder="e.g. funny moment, tutorial, reaction"
+                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)]"
+                />
+                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
+                  Comma-separated — stored in the project spec.
+                </span>
+              </label>
+
+              <label className="block">
+                <span className="text-sm font-medium text-white">Keywords to avoid</span>
+                <input
+                  type="text"
+                  value={keywordsAvoid}
+                  onChange={(e) => setKeywordsAvoid(e.target.value)}
+                  placeholder="e.g. sponsor read, silence"
+                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)]"
+                />
+                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
+                  Comma-separated — kept with this wizard session; excluded when
+                  matching runs in Phase 3.
+                </span>
+              </label>
+
+              <fieldset className="md:col-span-2">
+                <legend className="text-sm font-medium text-white">Processing mode</legend>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {(['eco', 'balanced', 'fast'] as const).map((m) => (
+                    <ChoiceButton
+                      key={m}
+                      selected={spec.processingMode === m}
+                      onClick={() => updateSpec({ processingMode: m })}
+                    >
+                      {m === 'eco' ? 'Eco' : m === 'balanced' ? 'Balanced' : 'Fast'}
+                    </ChoiceButton>
+                  ))}
+                </div>
+              </fieldset>
+            </div>
+
+            <div className="mt-6 rounded-xl border border-brand/40 bg-brand/10 p-4">
+              <p className="text-xs text-[var(--color-text-muted)]">Live summary</p>
+              <p className="mt-1 text-sm font-medium text-white">{summary}</p>
+              <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+                Caption style: {captionLabel} · Content: {contentLabel} ·{' '}
+                {spec.processingMode === 'eco'
+                  ? 'Eco'
+                  : spec.processingMode === 'balanced'
+                    ? 'Balanced'
+                    : 'Fast'}{' '}
+                processing
+                {keywordsAvoid.trim() ? ` · Avoid: ${keywordsAvoid.trim()}` : ''}
+              </p>
+            </div>
+
+            <div className="mt-6 flex justify-between">
+              <button
+                type="button"
+                onClick={() => goTo(1)}
+                className="flex items-center gap-2 rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white hover:bg-ink-border"
+              >
+                <ArrowLeft className="h-4 w-4" /> Back
+              </button>
+              <button
+                type="button"
+                disabled={projectId === null || !specValid}
+                onClick={() => goTo(3)}
+                className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-light disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Continue to Process <ArrowRight className="h-4 w-4" />
+              </button>
+            </div>
+            {projectId === null || !specValid ? (
+              <p className="mt-2 text-right text-xs text-[var(--color-text-muted)]">
+                {projectId === null
+                  ? 'Probe a video on Step 1 first — the style is saved into its project.'
+                  : 'Fix the highlighted fields to continue.'}
+              </p>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
+
+      {step === 3 ? (
+        <section aria-label="Step 3 — Process">
+          <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
+            <h2 className="text-lg font-semibold text-white">Process your video</h2>
+            <p className="mt-1 text-sm text-[var(--color-text-muted)]">
+              {project ? `Project: ${project.title} · ` : ''}{summary}
+            </p>
+            <div className="mt-4">
+              <NotImplemented
+                phase="Phase 3"
+                detail="transcription, highlight detection and rendering are not implemented yet"
+              />
+            </div>
+            <p className="mt-3 text-sm text-[var(--color-text-muted)]">
+              Phase 3 — transcription, highlight detection and rendering are not
+              implemented yet. The stages below are the real pipeline; nothing
+              here runs and no progress is shown.
+            </p>
+
+            <ol className="mt-5 space-y-2">
+              {PIPELINE_STAGES.map((label, i) => {
+                const done = audioResult !== null && i < 2
+                const jobId =
+                  i === 0 ? probe?.job_id : i === 1 ? audioResult?.job_id : undefined
+                return (
+                  <li
+                    key={label}
+                    className="flex items-center gap-3 rounded-xl bg-ink-panel2 px-4 py-3"
+                  >
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/10 text-xs font-bold text-white">
+                      {i + 1}
+                    </span>
+                    {done ? (
+                      <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-400" />
+                    ) : (
+                      <Clock className="h-5 w-5 shrink-0 text-[var(--color-text-muted)]" />
+                    )}
+                    <span className="flex-1 text-sm font-medium text-white">{label}</span>
+                    {done ? (
+                      <span className="text-right text-xs text-emerald-300">
+                        Done (probe + audio extraction verified)
+                        {jobId ? (
+                          <span className="block text-emerald-200/70">job {jobId}</span>
+                        ) : null}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-[var(--color-text-muted)]">
+                        Pending — Phase 3
+                      </span>
+                    )}
+                  </li>
+                )
+              })}
+            </ol>
+
+            <div className="mt-6 flex justify-between">
+              <button
+                type="button"
+                onClick={() => goTo(2)}
+                className="flex items-center gap-2 rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white hover:bg-ink-border"
+              >
+                <ArrowLeft className="h-4 w-4" /> Back
+              </button>
+              <button
+                type="button"
+                disabled
+                title="Phase 3 — transcription, highlight detection and rendering are not implemented yet"
+                className="cursor-not-allowed rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white opacity-40"
+              >
+                Start Processing
+              </button>
+            </div>
+            <p className="mt-2 text-right text-xs text-[var(--color-text-muted)]">
+              Start Processing is disabled until Phase 3.
+            </p>
+          </div>
+        </section>
+      ) : null}
+
+      {step === 4 ? (
+        <section aria-label="Step 4 — Review">
+          <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
+            <h2 className="text-lg font-semibold text-white">Review clips</h2>
+            <p className="mt-1 text-sm text-[var(--color-text-muted)]">
+              Generated clips will appear here for review before export.
+            </p>
+            <div className="mt-4">
+              <NotImplemented phase="Phase 3" detail="no clips exist until processing runs" />
+            </div>
+            <div className="mt-6">
+              <EmptyState
+                title="No clips yet"
+                description="No clips yet — processing has not run (Phase 3). Transcription, highlight detection and rendering are not implemented yet, so there is nothing to review."
+              />
+            </div>
+
+            <fieldset disabled className="mt-6 opacity-60">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <label className="block">
+                  <span className="text-sm font-medium text-white">Clip start</span>
+                  <input
+                    type="text"
+                    placeholder="0:00"
+                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-sm font-medium text-white">Clip end</span>
+                  <input
+                    type="text"
+                    placeholder="0:20"
+                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
+                  />
+                </label>
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled
+                  className="cursor-not-allowed rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white opacity-40"
+                >
+                  Regenerate
+                </button>
+                <button
+                  type="button"
+                  disabled
+                  className="cursor-not-allowed rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white opacity-40"
+                >
+                  Exclude
+                </button>
+                <button
+                  type="button"
+                  disabled
+                  className="cursor-not-allowed rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white opacity-40"
+                >
+                  Reorder
+                </button>
+              </div>
+              <p className="mt-3 text-xs text-[var(--color-text-muted)]">
+                Clip list, edit start/end, regenerate, exclude and reorder all need
+                generated clips (Phase 3).
+              </p>
+            </fieldset>
+
+            <div className="mt-6 flex justify-between">
+              <button
+                type="button"
+                onClick={() => goTo(3)}
+                className="flex items-center gap-2 rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white hover:bg-ink-border"
+              >
+                <ArrowLeft className="h-4 w-4" /> Back
+              </button>
+              <button
+                type="button"
+                disabled
+                className="flex cursor-not-allowed items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white opacity-40"
+              >
+                Continue to Ship <ArrowRight className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {step === 5 ? (
+        <section aria-label="Step 5 — Ship">
+          <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
+            <h2 className="text-lg font-semibold text-white">Ship your clips</h2>
+            <p className="mt-1 text-sm text-[var(--color-text-muted)]">
+              Export finished clips or share them to TikTok, Instagram and YouTube.
+              Export needs generated clips, which do not exist yet.
+            </p>
+            <div className="mt-4">
+              <NotImplemented phase="Phase 3" detail="needs generated clips" />
+            </div>
+
+            <fieldset disabled className="mt-6 grid grid-cols-1 gap-6 opacity-60 md:grid-cols-2">
+              <fieldset>
+                <legend className="text-sm font-medium text-white">Export scope</legend>
+                <div className="mt-2 space-y-2 text-sm text-white">
+                  <label className="flex items-center gap-2">
+                    <input type="radio" name="export-scope" defaultChecked /> One clip
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input type="radio" name="export-scope" /> Selected clips
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input type="radio" name="export-scope" /> All clips
+                  </label>
+                </div>
+              </fieldset>
+              <label className="block">
+                <span className="text-sm font-medium text-white">Format</span>
+                <select className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white">
+                  <option>MP4</option>
+                </select>
+              </label>
+              <fieldset>
+                <legend className="text-sm font-medium text-white">Quality</legend>
+                <div className="mt-2 space-y-2 text-sm text-white">
+                  <label className="flex items-center gap-2">
+                    <input type="radio" name="export-quality" /> Draft
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input type="radio" name="export-quality" defaultChecked /> Standard
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input type="radio" name="export-quality" /> High
+                  </label>
+                </div>
+              </fieldset>
+              <fieldset>
+                <legend className="text-sm font-medium text-white">Captions</legend>
+                <div className="mt-2 space-y-2 text-sm text-white">
+                  <label className="flex items-center gap-2">
+                    <input type="radio" name="export-captions" defaultChecked /> Burned in
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input type="radio" name="export-captions" /> Clean (no captions)
+                  </label>
+                </div>
+              </fieldset>
+              <label className="flex items-center gap-2 text-sm font-medium text-white md:col-span-2">
+                <input type="checkbox" /> Download as ZIP
+              </label>
+            </fieldset>
+
+            <div className="mt-6 flex flex-wrap justify-center gap-2 opacity-60">
+              <button
+                type="button"
+                disabled
+                className="cursor-not-allowed rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white"
+              >
+                Share to TikTok
+              </button>
+              <button
+                type="button"
+                disabled
+                className="cursor-not-allowed rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white"
+              >
+                Share to Instagram
+              </button>
+              <button
+                type="button"
+                disabled
+                className="cursor-not-allowed rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white"
+              >
+                Share to YouTube
+              </button>
+            </div>
+            <p className="mt-3 text-center text-xs text-[var(--color-text-muted)]">
+              Export options and sharing need generated clips (Phase 3). No
+              download links exist yet.
+            </p>
+
+            <div className="mt-6 flex justify-center gap-3">
+              <button
+                type="button"
+                onClick={() => goTo(4)}
+                className="flex items-center gap-2 rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white hover:bg-ink-border"
+              >
+                <ArrowLeft className="h-4 w-4" /> Back
+              </button>
+              <button
+                type="button"
+                disabled
+                className="cursor-not-allowed rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white opacity-40"
+              >
+                Export Clips
+              </button>
+            </div>
+          </div>
+        </section>
+      ) : null}
+    </div>
+  )
+}

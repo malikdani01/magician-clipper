@@ -1,0 +1,20 @@
+# Keep the Docker build context small and secret-free.
+.git
+vendor
+node_modules
+.env
+.env.*
+!.env.example
+storage/logs
+storage/app/clips
+storage/app/uploads
+storage/app/exports
+storage/app/public
+storage/*.key
+database/*.sqlite
+database/*.sqlite-journal
+database/*.sqlite-wal
+database/*.sqlite-shm
+tests
+.phpunit.cache
+.phpunit.result.cache

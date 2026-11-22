@@ -1,0 +1,178 @@
+# Magician Clipper — Render Blueprint (Free plan).
+#
+# What this creates (see docs/deployment-render-free.md for the exact
+# click-by-click steps):
+#   1. magician-clipper-api — Laravel API, Docker, Free plan
+#      (PHP 8.3 + Apache; Dockerfile: backend/laravel/Dockerfile).
+#   2. magician-clipper-web — React frontend, Static Site (free).
+#   3. magician-clipper-db  — PostgreSQL, Free plan (90-day expiry —
+#      Render's free databases expire after 90 days; see the doc).
+#
+# What it does NOT create:
+#   - The Python video engine. Heavy video processing runs on the
+#     separate Muse worker (dev VM), NOT on Render — the Free instance
+#     (512 MB RAM, no background workers) cannot run FFmpeg +
+#     faster-whisper. On this deployment the frontend honestly reports
+#     the engine as Down and Step 1 probe fails with a clear error.
+#   - Any persistent disk. Render Free has an ephemeral filesystem:
+#     uploads / SQLite files vanish on every deploy. User accounts and
+#     projects live in the Postgres database above, not on disk.
+#
+# Env vars marked `sync: false` have NO value in this file on purpose:
+# they must be filled in once in the Render dashboard (their values
+# depend on the live URLs, which only exist after the first deploy).
+# Render never overwrites a dashboard-set value on later blueprint
+# syncs. If Render's blueprint validation ever rejects a valueless
+# entry, set the value in the dashboard after the first sync instead —
+# the doc lists the exact values.
+#
+# Deploy: push this repo to GitHub, then in Render: New → Blueprint →
+# pick the repo → Apply. Details in docs/deployment-render-free.md.
+#
+# NOTE (fixed 2026-11-22): the backend now HAS config/cors.php
+# (Phase 3), reading allowed origins from FRONTEND_URL — see the
+# FRONTEND_URL entry in the api service envVars below. It MUST be set
+# to the static site's URL after the first deploy, or the hosted
+# frontend's calls to the API are blocked by the browser (CORS).
+
+services:
+  # ------------------------------------------------------------------
+  # Laravel API — Docker web service, Free plan.
+  # ------------------------------------------------------------------
+  - type: web
+    name: magician-clipper-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./backend/laravel/Dockerfile
+    dockerContext: ./backend/laravel
+    healthCheckPath: /up
+    # Runs inside the freshly built image, before the new version goes
+    # live. Creates the tables on first deploy; later deploys apply
+    # new migrations. --force skips the "are you sure?" prompt.
+    # db:seed runs the DatabaseSeeder, which creates the initial admin
+    # user ONLY when ADMIN_EMAIL + ADMIN_PASSWORD are set (see below);
+    # it is idempotent (firstOrCreate), so re-running it on later
+    # deploys changes nothing.
+    preDeployCommand: php artisan migrate --force && php artisan db:seed --force
+    envVars:
+      - key: APP_NAME
+        value: Magician Clipper
+      - key: APP_ENV
+        value: production
+      - key: APP_DEBUG
+        value: false
+      # Initial admin account (created by the seeder on first deploy).
+      # Set these in the dashboard BEFORE the first deploy, or the
+      # site will have no admin user (registering only makes plain
+      # users). Any strong password; keep it somewhere safe.
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      # No secret is committed here. Generate once and paste in the
+      # dashboard (Dashboard → magician-clipper-api → Environment):
+      #   python3 -c "import secrets,base64; print('base64:'+base64.b64encode(secrets.token_bytes(32)).decode())"
+      # or, with PHP available: php artisan key:generate --show
+      - key: APP_KEY
+        sync: false
+      # The API's own public URL, e.g. https://magician-clipper-api.onrender.com
+      # (copy it from the dashboard after the first deploy).
+      - key: APP_URL
+        sync: false
+      # The hosted FRONTEND's origin, e.g. https://magician-clipper-web.onrender.com
+      # (copy it from the static site's dashboard after the first deploy).
+      # REQUIRED: backend/laravel/config/cors.php reads FRONTEND_URL for
+      # allowed origins. Without it the hosted frontend's login/register
+      # and every API call are blocked by the browser (CORS) — the site
+      # looks deployed but nothing works. Comma-separated list supported.
+      - key: FRONTEND_URL
+        sync: false
+      # Key for the Muse Job API (GET /api/v1/muse/jobs/...). REQUIRED
+      # for the Muse bridge: without it the worker gets 401 on every
+      # call and no hosted job ever reaches Muse in chat. Set it to the
+      # SAME value the Muse worker uses (backend/laravel/.env's
+      # MUSE_JOB_API_KEY on the dev machine — never commit a real key;
+      # a fresh random 32-byte hex string also works if the worker is
+      # given the same one). See docs/deployment-render-free.md §5.
+      - key: MUSE_JOB_API_KEY
+        sync: false
+      # Render's free PostgreSQL (see `databases` below).
+      - key: DB_CONNECTION
+        value: pgsql
+      - key: DB_URL
+        fromDatabase:
+          name: magician-clipper-db
+          property: connectionString
+      # Database queue (no Redis on Free). NOTE: no queue worker runs
+      # on Render Free (no background workers), so queued jobs will
+      # sit unprocessed until a worker exists — see the doc.
+      - key: QUEUE_CONNECTION
+        value: database
+      - key: SESSION_DRIVER
+        value: file
+      - key: CACHE_STORE
+        value: file
+      - key: LOG_LEVEL
+        value: error
+      # Local-disk storage (default). Uploads/clips/exports live under
+      # storage/app inside the container and are LOST on redeploy.
+      # Durable file storage (Cloudflare R2 / Backblaze B2 via the
+      # existing S3-compatible disk) is documented in
+      # docs/deployment-render-free.md — not wired up by default.
+      - key: FILESYSTEM_DISK
+        value: local
+      # VIDEO_ENGINE_URL is intentionally NOT set here: there is no
+      # engine on Render. The backend falls back to
+      # http://127.0.0.1:8001 (config/app.php) and the admin health
+      # endpoint honestly reports the engine as down. If the worker
+      # ever gets a public URL, set VIDEO_ENGINE_URL to it here.
+      - key: VIDEO_ENGINE_URL
+        sync: false
+
+  # ------------------------------------------------------------------
+  # React frontend — Static Site (free; does not consume instance hours).
+  # ------------------------------------------------------------------
+  - type: web
+    name: magician-clipper-web
+    env: static
+    rootDir: apps/web
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./dist
+    # SPA fallback: every path serves index.html so React Router works
+    # on refresh / deep links (/clipper, /admin, ...).
+    routes:
+      - type: rewrite
+        source: /*
+        dest: /index.html
+    envVars:
+      # Vite bakes VITE_* into the JavaScript AT BUILD TIME. These
+      # values point at the API service, whose URL only exists after
+      # the first deploy — so: deploy once, copy the API URL from the
+      # dashboard, fill these three in, then hit "Manual Deploy" on
+      # this static site to rebuild with the real values. See the doc.
+      #
+      # VITE_API_URL — e.g. https://magician-clipper-api.onrender.com/api/v1
+      - key: VITE_API_URL
+        sync: false
+      # VITE_APP_URL — e.g. https://magician-clipper-api.onrender.com
+      # (used for the /up health check).
+      - key: VITE_APP_URL
+        sync: false
+      # VITE_ENGINE_URL — leave UNSET until the video engine has a
+      # public URL. Unset = the local fallback http://127.0.0.1:8001,
+      # which fails honestly in a visitor's browser ("engine is not
+      # reachable"). Do NOT point it at the API service.
+      - key: VITE_ENGINE_URL
+        sync: false
+
+databases:
+  # Free PostgreSQL: 1 GB storage. WARNING — Render's free databases
+  # expire after 90 days (the data is deleted unless you upgrade).
+  # That is a Render Free limit, not an app limit: before day 90,
+  # either upgrade the database or export the data (pg_dump) and
+  # recreate it. User accounts and projects live here — without it,
+  # a redeploy would wipe them (ephemeral disk).
+  - name: magician-clipper-db
+    plan: free
+    databaseName: magician_clipper
+    user: magician_clipper

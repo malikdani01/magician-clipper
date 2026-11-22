@@ -1,0 +1,19 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+python-multipart==0.0.20
+# Muse-connected Job System worker (Phase 3):
+# faster-whisper = transcription (tiny model, CPU int8); requests = Job API
+# client; opencv-python-headless = face detection for split layouts
+# (optional at runtime — the worker falls back to frame analysis without it).
+faster-whisper>=1.1.0
+# faster-whisper 1.2.1 calls av.open(metadata_errors=...) in decode_audio,
+# a keyword PyAV 19 removed -> pin av<19 (the worker passes a numpy array
+# to transcribe() so it does not hit that path, but the pin keeps fresh
+# installs safe for any path-based call).
+av>=11,<19
+requests>=2.32
+opencv-python-headless>=4.10,<5
+# NOTE: opencv 5.x headless builds ship no cv2.CascadeClassifier (no
+# objdetect submodule), so the bundled Haar cascade cannot run there.
+# Pin to 4.x until the worker is rewritten for a 5.x detector.

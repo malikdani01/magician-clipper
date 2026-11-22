@@ -1,0 +1,101 @@
+/**
+ * Magician Clipper — design tokens as CSS custom properties.
+ * Source of truth: shared/design-tokens/tokens.json (keep in sync).
+ * apps/web imports this file (or the Tailwind theme generated from
+ * tokens.json) so the frontend and these tokens never drift.
+ *
+ * Visual language derived from the supplied screenshots:
+ * deep navy background, purple/violet primary, restrained glow.
+ */
+
+:root {
+  /* Background */
+  --mc-bg-base: #070714;
+  --mc-bg-raised: #0b0b1e;
+  --mc-bg-overlay: #0e0e24;
+
+  /* Surface */
+  --mc-surface: #12122b;
+  --mc-surface-muted: #171738;
+  --mc-surface-input: #1a1a3a;
+
+  /* Border */
+  --mc-border: #26264a;
+  --mc-border-strong: #34345e;
+
+  /* Primary (violet) */
+  --mc-primary-300: #c4b5fd;
+  --mc-primary-400: #a78bfa;
+  --mc-primary-500: #8b5cf6;
+  --mc-primary-600: #7c3aed;
+  --mc-primary-subtle: rgba(139, 92, 246, 0.14);
+
+  /* Text */
+  --mc-text-primary: #f4f4fb;
+  --mc-text-secondary: #c7c7e0;
+  --mc-text-muted: #8a8aa8;
+  --mc-text-on-primary: #ffffff;
+
+  /* Status */
+  --mc-success: #22c55e;
+  --mc-success-subtle: rgba(34, 197, 94, 0.14);
+  --mc-warning: #f59e0b;
+  --mc-warning-subtle: rgba(245, 158, 11, 0.14);
+  --mc-danger: #ef4444;
+  --mc-danger-subtle: rgba(239, 68, 68, 0.14);
+  --mc-info: #3b82f6;
+  --mc-info-subtle: rgba(59, 130, 246, 0.14);
+
+  /* Chart / preset accents */
+  --mc-accent-teal: #14b8a6;
+  --mc-accent-pink: #ec4899;
+  --mc-accent-amber: #f59e0b;
+
+  /* Radius */
+  --mc-radius-sm: 8px;
+  --mc-radius-md: 12px;
+  --mc-radius-lg: 16px;
+  --mc-radius-xl: 20px;
+  --mc-radius-full: 9999px;
+
+  /* Spacing */
+  --mc-space-1: 4px;
+  --mc-space-2: 8px;
+  --mc-space-3: 12px;
+  --mc-space-4: 16px;
+  --mc-space-5: 20px;
+  --mc-space-6: 24px;
+  --mc-space-8: 32px;
+  --mc-space-10: 40px;
+  --mc-space-12: 48px;
+  --mc-space-16: 64px;
+  --mc-sidebar-width: 240px;
+  --mc-content-max-width: 1280px;
+
+  /* Typography */
+  --mc-font-sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mc-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --mc-font-size-xs: 12px;
+  --mc-font-size-sm: 14px;
+  --mc-font-size-base: 16px;
+  --mc-font-size-lg: 18px;
+  --mc-font-size-xl: 20px;
+  --mc-font-size-2xl: 24px;
+  --mc-font-size-3xl: 32px;
+
+  /* Shadows / glow (restrained — hero and primary buttons only) */
+  --mc-shadow-card: 0 4px 24px rgba(0, 0, 0, 0.35);
+  --mc-shadow-modal: 0 16px 48px rgba(0, 0, 0, 0.55);
+  --mc-glow-primary: 0 0 24px rgba(139, 92, 246, 0.35);
+  --mc-glow-primary-soft: 0 0 12px rgba(139, 92, 246, 0.22);
+
+  /* Gradients (restrained) */
+  --mc-gradient-primary: linear-gradient(135deg, #7c3aed 0%, #8b5cf6 55%, #a855f7 100%);
+  --mc-gradient-hero: radial-gradient(ellipse at 30% 20%, rgba(124, 58, 237, 0.28) 0%, transparent 60%);
+
+  /* Motion */
+  --mc-duration-fast: 120ms;
+  --mc-duration-base: 200ms;
+  --mc-duration-slow: 320ms;
+  --mc-easing: cubic-bezier(0.4, 0, 0.2, 1);
+}

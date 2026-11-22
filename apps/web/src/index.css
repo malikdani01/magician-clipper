@@ -1,0 +1,123 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Magician Clipper design tokens — deep navy / near-black + purple/violet.
+   Visual language only, taken from the design reference screenshots. */
+:root {
+  --color-bg: #070714;
+  --color-bg-deep: #0b0b1e;
+  --color-panel: #12122b;
+  --color-panel-2: #1a1a3a;
+  --color-border: #26264a;
+  --color-primary: #7c3aed;
+  --color-primary-light: #8b5cf6;
+  --color-primary-dark: #5b21b6;
+  --color-text: #f1f1f8;
+  --color-text-muted: #9a9ab8;
+  --color-success: #22c55e;
+  --color-warning: #f59e0b;
+  --color-danger: #ef4444;
+  --radius-card: 1rem;
+  --radius-control: 0.625rem;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-bg-deep);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-primary-dark);
+}
+
+/* Caption animations — Captions Studio preview only (Phase 2).
+   Burn-in of animated captions onto rendered clips needs Phase 3. */
+@keyframes caption-bounce {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  30% {
+    transform: translateY(-14px);
+  }
+  55% {
+    transform: translateY(0);
+  }
+  75% {
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes caption-pop {
+  0% {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.12);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes caption-karaoke {
+  0%,
+  100% {
+    color: #67e8f9;
+  }
+  50% {
+    color: #fde047;
+  }
+}
+
+@keyframes caption-glow {
+  0%,
+  100% {
+    text-shadow: 0 0 12px rgba(217, 70, 239, 0.9);
+  }
+  50% {
+    text-shadow:
+      0 0 24px rgba(217, 70, 239, 1),
+      0 0 48px rgba(217, 70, 239, 0.6);
+  }
+}
+
+.caption-anim-bounce {
+  animation: caption-bounce 1.2s ease-in-out infinite;
+}
+
+.caption-anim-pop {
+  animation: caption-pop 0.6s ease-out infinite;
+}
+
+.caption-anim-karaoke {
+  animation: caption-karaoke 1.6s ease-in-out infinite;
+}
+
+.caption-anim-glow {
+  animation: caption-glow 1.8s ease-in-out infinite;
+}
+
