@@ -375,6 +375,13 @@ class JobApi:
 
     def list_rerenders(self) -> list[dict]:
         resp = self._request("GET", "/muse/rerenders")
+        if resp.status_code == 404:
+            # The re-render routes ship with the Stronger round; a backend
+            # deployed before them (live is still on 72694ce until the
+            # round is pushed) simply has no such route. That is not a
+            # failure — it just means no re-renders can be queued there.
+            log.warning("Re-render routes not present on this backend (HTTP 404); skipping re-render check.")
+            return []
         if resp.status_code != 200:
             raise RuntimeError(f"List queued re-renders failed: HTTP {resp.status_code}: {resp.text[:300]}")
         data = resp.json()

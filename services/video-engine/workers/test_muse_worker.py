@@ -206,5 +206,43 @@ class ProcessJobIsolationTests(unittest.TestCase):
         self.assertIn("99.5", ready[0]["note"])
 
 
+class ListRerendersTests(unittest.TestCase):
+    """A 404 on /muse/rerenders means the backend predates the re-render
+    routes (live is still on 72694ce) — the worker must treat it as
+    'no re-renders', not crash the whole poll run."""
+
+    def _api_with_status(self, status, body=None):
+        class FakeResp:
+            status_code = status
+            text = body if body is not None else "{}"
+
+            def json(self):
+                import json
+                return json.loads(self.text)
+
+        class FakeRequests:
+            def request(self, method, url, headers=None, **kwargs):
+                return FakeResp()
+
+        api = muse_worker.JobApi("test-key")
+        api._requests = FakeRequests()
+        return api
+
+    def test_404_returns_empty_list(self):
+        api = self._api_with_status(
+            404, '{"message": "The route api/v1/muse/rerenders could not be found."}')
+        self.assertEqual(api.list_rerenders(), [])
+
+    def test_200_returns_the_list(self):
+        api = self._api_with_status(
+            200, '{"rerenders": [{"id": 7, "clip_id": 38}]}')
+        self.assertEqual(api.list_rerenders(), [{"id": 7, "clip_id": 38}])
+
+    def test_500_still_raises(self):
+        api = self._api_with_status(500, '{"message": "boom"}')
+        with self.assertRaises(RuntimeError):
+            api.list_rerenders()
+
+
 if __name__ == "__main__":
     unittest.main()
