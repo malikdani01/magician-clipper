@@ -134,6 +134,13 @@ W_SILENCE = 0.05
 W_ENERGY = 0.05
 W_GAMEPLAY = 0.15
 W_STABILITY = 0.10
+# Visual-moment windows (speech-scarce sources): the score is built only
+# from what a wordless window honestly has — loud audio, gameplay on
+# screen, a stable scene. No speech terms: a visual moment must never
+# out-score a real speech highlight on speech's own terms.
+W_VISUAL_ENERGY = 0.35
+W_VISUAL_GAMEPLAY = 0.35
+W_VISUAL_STABILITY = 0.30
 
 # Minimum fraction of a clip window that must contain transcribed speech
 # for the window to count as usable audio (Fix 2). Windows below this
@@ -317,7 +324,8 @@ class JobApi:
         return dest
 
     def set_status(self, job_id, status: str, error_reason: str | None = None,
-                   stage: str | None = None, progress: int | None = None) -> dict:
+                   stage: str | None = None, progress: int | None = None,
+                   note: str | None = None) -> dict:
         payload: dict = {"status": status}
         if error_reason is not None:
             payload["error_reason"] = error_reason[:500]
@@ -325,6 +333,8 @@ class JobApi:
             payload["stage"] = stage
         if progress is not None:
             payload["progress"] = progress
+        if note is not None:
+            payload["note"] = note[:1000]
         resp = self._request("PATCH", f"/muse/jobs/{job_id}/status", json=payload)
         if resp.status_code not in (200, 202):
             raise RuntimeError(
@@ -360,6 +370,59 @@ class JobApi:
             )
         data = resp.json()
         return data.get("clip", data)
+
+    # --- Clip re-renders (worker side) ---
+
+    def list_rerenders(self) -> list[dict]:
+        resp = self._request("GET", "/muse/rerenders")
+        if resp.status_code != 200:
+            raise RuntimeError(f"List queued re-renders failed: HTTP {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+        return data.get("rerenders", [])
+
+    def set_rerender_status(self, rerender_id, status: str,
+                            error_message: str | None = None) -> dict:
+        payload: dict = {"status": status}
+        if error_message is not None:
+            payload["error_message"] = error_message[:500]
+        resp = self._request("PATCH", f"/muse/rerenders/{rerender_id}/status", json=payload)
+        if resp.status_code not in (200, 202):
+            raise RuntimeError(
+                f"Set re-render {rerender_id} status to {status} failed: "
+                f"HTTP {resp.status_code}: {resp.text[:300]}"
+            )
+        data = resp.json()
+        return data.get("rerender", data)
+
+    def upload_replacement_clip(self, clip_id, clip_path: Path, rerender_id,
+                                thumbnail: Path | None = None,
+                                duration_seconds: float | None = None) -> dict:
+        files: dict = {}
+        handles = []
+        try:
+            fh = open(clip_path, "rb")
+            handles.append(fh)
+            files["file"] = (clip_path.name, fh, "video/mp4")
+            if thumbnail is not None and thumbnail.exists():
+                th = open(thumbnail, "rb")
+                handles.append(th)
+                files["thumbnail"] = (thumbnail.name, th, "image/jpeg")
+            data = {"rerender_id": str(rerender_id)}
+            if duration_seconds is not None:
+                data["duration_seconds"] = str(duration_seconds)
+            resp = self._request(
+                "POST", f"/muse/clips/{clip_id}/file",
+                files=files, data=data, timeout=300,
+            )
+        finally:
+            for h in handles:
+                h.close()
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(
+                f"Upload replacement clip {clip_path.name} for clip {clip_id} failed: "
+                f"HTTP {resp.status_code}: {resp.text[:300]}"
+            )
+        return resp.json()
 
 
 # ---------------------------------------------------------------------------
@@ -716,6 +779,99 @@ def _select_usable_windows(candidates: list[dict], count: int) -> list[dict]:
     return flagged
 
 
+def _visual_moment_windows(energy_profile: list[float], source_duration: float,
+                           span: float, mode: str,
+                           min_s: float | None, max_s: float | None,
+                           count: int,
+                           occupied: list[tuple[float, float]],
+                           energy_in, gameplay_in, stability_in) -> list[dict]:
+    """Energy-ranked visual moments: windows centred on the loudest
+    audio peaks, for sources where speech is scarce or absent.
+
+    A window is centred on a peak second (peak + 0.5s), clamped to the
+    source, and must not overlap any ``occupied`` window or another
+    visual moment. Its duration honours the job's mode: exact/minimum
+    need a full ``span`` (the min bound), maximum needs at least
+    ``min_s`` when the job set one. Peaks that cannot fit a valid window
+    are skipped — a short window is never delivered to pad the count.
+    Scored only on energy/gameplay/stability and labelled
+    ``visual_moment`` so the job page never presents one as a speech
+    highlight. Returns at most ``count`` windows, sorted by start time.
+    An all-zero (silent) energy profile yields no windows.
+    """
+    if count <= 0 or not energy_profile or max(energy_profile) <= 0:
+        return []
+    if mode in ("exact", "minimum") and span > source_duration + DURATION_TOLERANCE:
+        return []
+    if mode == "maximum" and min_s and min_s > source_duration + DURATION_TOLERANCE:
+        return []
+    # A visual window is exactly ``span`` long (the mode's bound), except
+    # in maximum mode where the floor is min_s and span is the ceiling.
+    length = span
+    if mode == "maximum" and min_s and span < min_s:
+        length = min_s
+    if length > source_duration:
+        length = source_duration
+    if mode == "maximum" and min_s and length < min_s - DURATION_TOLERANCE:
+        return []
+    if mode in ("exact", "minimum") and length < span - DURATION_TOLERANCE:
+        return []
+
+    def overlaps(start: float, end: float, taken: list[tuple[float, float]]) -> bool:
+        return any(not (end <= o_start or start >= o_end)
+                   for (o_start, o_end) in taken)
+
+    picked: list[dict] = []
+    taken = list(occupied)
+    # Loudest seconds first; ties break toward earlier in the source.
+    peaks = sorted(range(len(energy_profile)),
+                   key=lambda i: (-energy_profile[i], i))
+    for peak in peaks:
+        if len(picked) >= count:
+            break
+        centre = peak + 0.5
+        start = max(0.0, centre - length / 2)
+        end = start + length
+        if end > source_duration:
+            end = source_duration
+            start = end - length
+        if start < 0 or end - start < length - DURATION_TOLERANCE:
+            continue
+        if overlaps(start, end, taken):
+            continue
+        energy = energy_in(start, end)
+        gameplay = gameplay_in(start, end)
+        stability = stability_in(start, end)
+        score = round(
+            W_VISUAL_ENERGY * min(1.0, energy)
+            + W_VISUAL_GAMEPLAY * gameplay
+            + W_VISUAL_STABILITY * stability, 4)
+        signals = ["visual_moment"]
+        if energy > 0:
+            signals.append("audio_energy")
+        if gameplay >= 0.5:
+            signals.append("gameplay_present")
+        if stability >= 0.8:
+            signals.append("single_scene")
+        picked.append({
+            "start": round(start, 3), "end": round(end, 3),
+            "duration": round(end - start, 3), "words": 0,
+            "density": 0.0, "complete": False, "coverage": 0.0,
+            "silence": 0.0, "energy": energy,
+            "gameplay": gameplay, "stability": stability,
+            "score": score, "signals": signals, "text": "",
+            "reason": (
+                f"Visual moment (viral {round(score * 100)}/100): speech "
+                f"was scarce in this source, so this window was picked "
+                f"for its loudest audio moment — energy {energy:.2f}, "
+                f"gameplay {gameplay:.2f}, scene stability {stability:.2f}. "
+                f"Not a speech highlight."),
+        })
+        taken.append((start, end))
+    picked.sort(key=lambda c: c["start"])
+    return picked
+
+
 def select_highlights(segments: list[dict], source_duration: float,
                       settings: dict, energy_profile: list[float],
                       face_profile: list[tuple[float, float]] | None = None) -> list[dict]:
@@ -930,6 +1086,16 @@ def select_highlights(segments: list[dict], source_duration: float,
                 f"gameplay {c['gameplay']:.2f}, scene stability {c['stability']:.2f}."
             )
         chosen = _select_usable_windows(candidates, count)
+        if len(chosen) < count:
+            # Speech is scarce: fill the remaining slots with
+            # energy-ranked visual moments (loudest audio peaks),
+            # honestly labelled — a music-led source still yields
+            # clips, but nobody is told they are speech highlights.
+            chosen = chosen + _visual_moment_windows(
+                energy_profile, source_duration, target, mode,
+                min_s, max_s, count - len(chosen),
+                [(c["start"], c["end"]) for c in chosen],
+                energy_in, gameplay_in, stability_in)
         if chosen:
             chosen.sort(key=lambda c: c["start"])
             return chosen
@@ -937,17 +1103,31 @@ def select_highlights(segments: list[dict], source_duration: float,
     if units:
         # Speech exists, but no window met the duration bounds or the
         # speech-coverage bar (e.g. only a 20s stretch of speech for a
-        # 30-90s job). Return the honest shortfall (possibly zero clips)
-        # instead of uniform filler windows: a uniform window over a
-        # speech source is mostly silence — exactly the boring content
-        # the user does not want. The job page explains why fewer clips
+        # 30-90s job). Visual moments (loudest audio peaks) may still
+        # fill the job — a uniform window over a speech source is mostly
+        # silence, exactly the boring content the user does not want.
+        # When even those cannot fit, return the honest shortfall
+        # (possibly zero clips); the job page explains why fewer clips
         # came back.
+        fill = _visual_moment_windows(
+            energy_profile, source_duration, target, mode,
+            min_s, max_s, count, [],
+            energy_in, gameplay_in, stability_in)
+        if fill:
+            return fill
         return []
 
     # Fallback: no usable transcribed speech at all (e.g. music-only /
-    # silent source). Deterministic uniform windows over the source — real footage,
-    # never fabricated — clearly labelled so nobody mistakes them for
-    # speech-driven highlights.
+    # silent source). Prefer energy-ranked visual moments (loudest audio
+    # peaks) over uniform windows; uniform only when the source is
+    # silent (energy all zero) — real footage either way, clearly
+    # labelled so nobody mistakes it for a speech-driven highlight.
+    visual = _visual_moment_windows(
+        energy_profile, source_duration, target, mode,
+        min_s, max_s, count, [],
+        energy_in, gameplay_in, stability_in)
+    if visual:
+        return visual
     if source_duration < target and mode in ("exact", "minimum"):
         raise RuntimeError(
             f"Source is {source_duration:.1f}s long but the job requests "
@@ -1576,6 +1756,13 @@ def face_profile(source: Path, duration: float, step: float = 3.0) -> list[tuple
     A small facecam inset reads ~0.01, a full-facecam talking stretch
     reads ~0.05+. Used by select_highlights' gameplay term; a missing
     cascade/OpenCV yields an empty profile (neutral scoring).
+
+    One ffmpeg run extracts ALL sample frames (fps filter into a temp
+    dir); the Haar cascade then runs per frame. Same output contract
+    and same detection parameters as the old per-sample ffmpeg calls —
+    only the extraction is batched, which is what made long sources
+    slow (one ffmpeg process per sample, ~120 processes for an 8-min
+    video).
     """
     try:
         import cv2
@@ -1584,18 +1771,30 @@ def face_profile(source: Path, duration: float, step: float = 3.0) -> list[tuple
     face_cascade, _ = _load_face_cascade()
     if face_cascade is None:
         return []
-    profile: list[tuple[float, float]] = []
-    t = 0.0
     step = max(step, duration / 120.0)  # at most ~120 samples per source
+    times: list[float] = []
+    t = 0.0
     while t < duration:
-        frame_path = WORK_DIR / f"face_prof_{uuid.uuid4().hex}.jpg"
-        proc = run([FFMPEG, "-y", "-v", "error", "-ss", str(t), "-i", str(source),
-                    "-frames:v", "1", "-vf", "scale=640:-1", str(frame_path)],
-                   timeout=60)
-        frac = 0.0
-        if proc.returncode == 0 and frame_path.exists():
-            try:
-                img = cv2.imread(str(frame_path))
+        times.append(t)
+        t += step
+    if not times:
+        return []
+    frames_dir = WORK_DIR / f"face_prof_{uuid.uuid4().hex}"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        proc = run([FFMPEG, "-y", "-v", "error", "-i", str(source),
+                    "-vf", f"fps=1/{step:.6f},scale=640:-1",
+                    str(frames_dir / "f_%04d.jpg")], timeout=600)
+        if proc.returncode != 0:
+            log.warning("face_profile: batch frame extraction failed (ffmpeg rc=%s); "
+                        "scoring proceeds without a face profile.", proc.returncode)
+            return []
+        frames = sorted(frames_dir.glob("f_*.jpg"))
+        profile: list[tuple[float, float]] = []
+        for i, t in enumerate(times):
+            frac = 0.0
+            if i < len(frames):
+                img = cv2.imread(str(frames[i]))
                 if img is not None:
                     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                     # minSize 30 (see detect_face_box): the inset face is
@@ -1608,12 +1807,13 @@ def face_profile(source: Path, duration: float, step: float = 3.0) -> list[tuple
                     if len(faces):
                         x, y, w, h = max(faces, key=lambda b: b[2] * b[3])
                         if 0.02 <= w / img.shape[1] <= 0.35:
-                            frac = (w * h) / (img.shape[1] * img.shape[0])
-            finally:
-                frame_path.unlink(missing_ok=True)
-        profile.append((t, frac))
-        t += step
-    return profile
+                            # Plain float, not np.float64: the profile is a
+                            # list[tuple[float, float]] by contract.
+                            frac = float((w * h) / (img.shape[1] * img.shape[0]))
+            profile.append((t, frac))
+        return profile
+    finally:
+        shutil.rmtree(frames_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1857,6 +2057,92 @@ def _throw_if_cancelled(api: "JobApi", job_id) -> None:
         raise JobCancelled(f"Job {job_id} was cancelled by the user.")
 
 
+def _ready_note(clips: list[dict], requested: int, failed: list[str]) -> str | None:
+    """The note the job page shows when a job finishes Ready but the
+    result is not the full request: fewer clips than asked for (speech
+    was scarce, visual moments may have filled some slots), or some
+    clips failed to render and were skipped. Returns None when the job
+    delivered exactly what was asked with no failures.
+    """
+    notes: list[str] = []
+    if len(clips) < requested:
+        visual = sum(1 for c in clips if "visual_moment" in (c.get("signals") or []))
+        if visual:
+            notes.append(
+                f"Only {len(clips)} of {requested} requested clips could be "
+                f"selected from speech; {visual} visual moment(s) (loudest "
+                f"audio peaks) filled the rest because the source has very "
+                f"little speech.")
+        else:
+            notes.append(
+                f"Only {len(clips)} of {requested} requested clips could be "
+                f"selected from the source.")
+    if failed:
+        notes.append(
+            f"{len(failed)} clip(s) failed to render and were skipped: "
+            + "; ".join(failed[:3]))
+    return " ".join(notes) if notes else None
+
+
+def process_rerender(api: JobApi, rerender: dict) -> None:
+    """Re-render one clip with a different caption style.
+
+    The clip's SAME [start, end] window is rendered again from the job's
+    source, with the re-render's caption style, and the new file replaces
+    the old one in place (POST /muse/clips/{clip}/file). The transcript
+    is re-run — the original job's segments are not stored anywhere, and
+    the new style needs word timings to burn in. A failure marks the
+    re-render failed; the original clip is never touched on failure.
+    """
+    rerender_id = rerender["id"]
+    clip_id = rerender["clip_id"]
+    job_id = rerender["job_id"]
+    style = rerender["caption_style"]
+    log.info("Processing re-render %s: clip %s of job %s with style '%s'.",
+             rerender_id, clip_id, job_id, style)
+    try:
+        api.set_rerender_status(rerender_id, "processing")
+        job = api.get_job(job_id)
+        settings = dict(job.get("settings") or {})
+        settings["caption_style"] = style
+        job_dir = WORK_DIR / f"rerender-{rerender_id}"
+        job_dir.mkdir(parents=True, exist_ok=True)
+        source, source_note = acquire_source(api, job, job_dir)
+        log.info("Source acquired for re-render %s: %s", rerender_id, source_note)
+        source_info = probe_summary(source)
+        clip = {
+            "start": float(rerender["start_seconds"]),
+            "end": float(rerender["end_seconds"]),
+            "duration": float(rerender["duration_seconds"]),
+            "words": 0, "text": "",
+        }
+        segments: list[dict] = []
+        if source_info["has_audio"]:
+            wav_path = job_dir / "audio_16k.wav"
+            extract_audio(source, wav_path)
+            lang = LANGUAGE_MAP.get(
+                (settings.get("captions_language") or "auto").lower(), None)
+            segments = transcribe(wav_path, lang)
+        out_path = job_dir / "clip.mp4"
+        render_clip(source, clip, settings, segments, out_path,
+                    source_info, job_dir)
+        info = validate_clip(out_path, {"settings": settings}, source_info)
+        thumb = extract_thumbnail(out_path, job_dir / "thumb.jpg")
+        api.upload_replacement_clip(clip_id, out_path, rerender_id,
+                                    thumbnail=thumb,
+                                    duration_seconds=info["duration"])
+        log.info("Re-render %s ready: clip %s now uses style '%s' (%.2fs).",
+                 rerender_id, clip_id, style, info["duration"])
+    except Exception as exc:
+        reason = str(exc)[:500]
+        log.error("Re-render %s failed: %s", rerender_id, reason)
+        try:
+            api.set_rerender_status(rerender_id, "failed", error_message=reason)
+        except Exception as api_exc:  # noqa: BLE001 - report both failures
+            log.error("Could not mark re-render %s Failed via API: %s", rerender_id, api_exc)
+        raise
+
+
 def process_job(api: JobApi, job: dict) -> None:
     job_id = job["id"]
     settings = job.get("settings") or {}
@@ -1940,19 +2226,35 @@ def process_job(api: JobApi, job: dict) -> None:
 
         api.set_status(job_id, "Processing", stage="rendering", progress=60)
         rendered: list[tuple[Path, dict, dict, Path | None]] = []
+        failed: list[str] = []
         for i, clip in enumerate(clips, 1):
             _throw_if_cancelled(api, job_id)
             out_path = job_dir / f"clip_{i:02d}.mp4"
-            render_clip(source, clip, settings, segments, out_path,
-                        source_info, job_dir)
-            info = validate_clip(out_path, {"settings": settings}, source_info)
+            try:
+                render_clip(source, clip, settings, segments, out_path,
+                            source_info, job_dir)
+                info = validate_clip(out_path, {"settings": settings}, source_info)
+                thumb = extract_thumbnail(out_path, job_dir / f"thumb_{i:02d}.jpg")
+            except Exception as clip_exc:  # noqa: BLE001 - one bad clip must not kill the job
+                # Per-clip failure isolation: log the failure, drop the
+                # partial file, and keep rendering the rest. Only when
+                # EVERY clip fails does the job fail (below).
+                reason = str(clip_exc)[:300]
+                log.error("Job %s: clip %d (%.1f-%.1fs) failed: %s; skipping it.",
+                          job_id, i, clip["start"], clip["end"], reason)
+                failed.append(f"Clip {i} ({clip['start']:.1f}–{clip['end']:.1f}s): {reason}")
+                if out_path.exists():
+                    out_path.unlink(missing_ok=True)
+                continue
             log.info("Clip %d/%d validated: %.2fs %dx%d %d bytes.",
                      i, len(clips), info["duration"], info["width"],
                      info["height"], info["size_bytes"])
-            thumb = extract_thumbnail(out_path, job_dir / f"thumb_{i:02d}.jpg")
             rendered.append((out_path, clip, info, thumb))
             api.set_status(job_id, "Processing", stage="rendering",
                            progress=60 + int(25 * i / len(clips)))
+        if clips and not rendered:
+            raise RuntimeError(
+                "Every clip failed to render: " + "; ".join(failed[:3]))
 
         api.set_status(job_id, "Processing", stage="uploading_clips", progress=90)
         for i, (out_path, clip, info, thumb) in enumerate(rendered, 1):
@@ -1964,10 +2266,12 @@ def process_job(api: JobApi, job: dict) -> None:
                 "score": clip.get("score", 0),
                 "reason": clip.get("reason", ""),
                 "transcript_excerpt": clip.get("text", ""),
+                "caption_style": (settings.get("caption_style") or "punchy"),
             }, thumbnail=thumb)
             log.info("Uploaded clip %d/%d for job %s.", i, len(rendered), job_id)
 
-        api.set_status(job_id, "Ready", stage="ready", progress=100)
+        api.set_status(job_id, "Ready", stage="ready", progress=100,
+                       note=_ready_note(clips, requested, failed))
         log.info("Job %s is Ready (%d clip(s)).", job_id, len(rendered))
     except JobCancelled:
         log.info("Job %s cancelled by the user; stopping without rendering further clips.", job_id)
@@ -2019,7 +2323,9 @@ def main(argv: list[str] | None = None) -> int:
     api = JobApi(key)
 
     def run_once() -> bool:
-        """Process a single job. Returns True if a job was processed."""
+        """Process a single job, or a single queued re-render when no
+        job is queued. Jobs first: a re-render never jumps the queue
+        ahead of a waiting job. Returns True if anything was processed."""
         if args.job_id:
             job = api.get_job(args.job_id)
             if (job.get("status") or "").lower() not in ("queued",):
@@ -2029,8 +2335,16 @@ def main(argv: list[str] | None = None) -> int:
         else:
             queued = api.list_queued()
             if not queued:
-                log.info("No queued jobs.")
-                return False
+                rerenders = api.list_rerenders()
+                if not rerenders:
+                    log.info("No queued jobs.")
+                    return False
+                rerender = rerenders[0]
+                try:
+                    process_rerender(api, rerender)
+                except Exception:
+                    return True  # re-render was processed (and marked Failed)
+                return True
             job = queued[0]
         job_id = job["id"]
         try:
