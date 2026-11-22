@@ -13,5 +13,12 @@ set -e
 php artisan migrate --force
 php artisan db:seed --force
 
+# Diagnostics for the deploy log (never block startup): show which
+# VirtualHost file Apache will actually load and its DocumentRoot.
+# The 721d87d deploy proved a config COPY can silently not take
+# effect, so the next deploy log must show ground truth here.
+apache2ctl -S 2>&1 || true
+grep -h -A1 'DocumentRoot\|<Directory' /etc/apache2/sites-enabled/*.conf 2>/dev/null || true
+
 sed -i "s/Listen 80/Listen ${PORT:-80}/" /etc/apache2/ports.conf
 exec apache2-foreground

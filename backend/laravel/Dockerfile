@@ -56,7 +56,16 @@ COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 # apache2.conf is left untouched: its stock <Directory /var/www/>
 # "Require all granted" stays intact.
 RUN a2enmod rewrite
+# Copy to BOTH sites-available and sites-enabled. In the stock
+# php:8.3-apache image sites-enabled/000-default.conf is a symlink
+# to sites-available, but the 721d87d deploy proved the
+# sites-available copy alone did not take effect (Apache still
+# served /var/www/html: /up 404, HEAD / 403) — so the enabled file
+# may be a stale regular copy. Writing both paths covers either
+# layout; when it is a symlink the second COPY just writes through
+# to the same target file.
 COPY docker-000-default.conf /etc/apache2/sites-available/000-default.conf
+COPY docker-000-default.conf /etc/apache2/sites-enabled/000-default.conf
 
 WORKDIR /var/www/html
 
