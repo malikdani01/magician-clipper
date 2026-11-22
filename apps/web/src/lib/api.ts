@@ -13,11 +13,26 @@
  */
 
 export const ENGINE_URL =
-  import.meta.env.VITE_ENGINE_URL ?? 'http://127.0.0.1:8001'
+  (import.meta.env.VITE_ENGINE_URL || '').trim() || 'http://127.0.0.1:8001'
 export const API_URL =
   import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8000/api/v1'
 export const APP_URL =
   import.meta.env.VITE_APP_URL ?? 'http://127.0.0.1:8000'
+
+/**
+ * True when this page is served from local dev (localhost), where a
+ * local engine can run. Same hostname test as Clipper.tsx.
+ * The engine URL alone cannot tell us: on the hosted site
+ * VITE_ENGINE_URL is set but empty, so it falls back to
+ * 127.0.0.1:8001 even though no engine can run there.
+ */
+export const IS_LOCAL_SITE =
+  typeof window !== 'undefined' &&
+  /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname)
+
+/** True when an engine URL was explicitly configured (non-empty VITE_ENGINE_URL). */
+export const ENGINE_CONFIGURED =
+  (import.meta.env.VITE_ENGINE_URL || '').trim().length > 0
 
 const TOKEN_KEY = 'magician-clipper.token'
 const USER_KEY = 'magician-clipper.user'
@@ -110,6 +125,15 @@ function serverMessage(body: unknown, fallback: string): string {
 /* ------------------------------------------------------------------ */
 
 export async function engineHealth(): Promise<EngineHealth> {
+  // Hosted site with no engine URL configured: there is no engine to
+  // probe — heavy processing runs through the connected Muse worker,
+  // not a local FastAPI engine. Report the worker path as up instead
+  // of probing localhost (unreachable from a visitor's browser) or
+  // the static host itself (which 404s /health). Local dev still
+  // probes the real engine below.
+  if (!IS_LOCAL_SITE && !ENGINE_CONFIGURED) {
+    return { ok: true, status: 'worker', ffmpeg: null, ffprobe: null }
+  }
   const { signal, cancel } = timeoutSignal(5000)
   try {
     const res = await fetch(`${ENGINE_URL}/health`, { signal })

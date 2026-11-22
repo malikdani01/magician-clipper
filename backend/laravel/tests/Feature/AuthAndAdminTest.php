@@ -64,6 +64,42 @@ class AuthAndAdminTest extends TestCase
             ]);
     }
 
+    public function test_admin_dashboard_usage_counts_job_settings(): void
+    {
+        // Regression test (2026-11-23): jobUsage() used SQLite-only
+        // json_extract(), which 500'd the dashboard on production
+        // Postgres. Usage must be counted from the settings JSON
+        // without any database-specific function.
+        $admin = User::factory()->admin()->create();
+        $user = User::factory()->create();
+        $payload = fn (string $platform, string $style) => [
+            'platform' => $platform,
+            'aspect_ratio' => '9:16',
+            'clip_count' => 2,
+            'duration_mode' => 'exact',
+            'duration_seconds' => 30,
+            'captions_enabled' => true,
+            'captions_language' => 'english',
+            'caption_style' => $style,
+            'on_screen_text' => false,
+            'job_type' => 'myself',
+            'layout' => 'center_crop',
+            'source_url' => 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+        ];
+        $this->actingAs($user, 'sanctum')->postJson('/api/v1/jobs', $payload('tiktok', 'punchy'))->assertStatus(201);
+        $this->actingAs($user, 'sanctum')->postJson('/api/v1/jobs', $payload('tiktok', 'word_pop'))->assertStatus(201);
+        $this->actingAs($user, 'sanctum')->postJson('/api/v1/jobs', $payload('instagram', 'punchy'))->assertStatus(201);
+
+        $this->actingAs($admin, 'sanctum')
+            ->getJson('/api/v1/admin/dashboard')
+            ->assertStatus(200)
+            ->assertJsonPath('usage.platforms.0.label', 'tiktok')
+            ->assertJsonPath('usage.platforms.0.value', 2)
+            ->assertJsonPath('usage.platforms.1.label', 'instagram')
+            ->assertJsonPath('usage.caption_styles.0.label', 'punchy')
+            ->assertJsonPath('usage.caption_styles.0.value', 2);
+    }
+
     public function test_admin_system_logs_returns_tail_lines(): void
     {
         $admin = User::factory()->admin()->create();

@@ -133,11 +133,18 @@ class AdminController extends Controller
     /** Top values from job settings (platform, caption style), by job count. */
     private function jobUsage(): array
     {
+        // Counted in PHP, not SQL: the settings JSON extraction
+        // (json_extract) is SQLite-only and 500'd the dashboard on
+        // the production Postgres database (2026-11-23). The jobs
+        // table is small, so plucking settings and counting here
+        // behaves identically on SQLite and Postgres.
         $top = function (string $key): array {
-            return ProcessingJob::selectRaw("json_extract(settings, '$.{$key}') as k, count(*) as c")
-                ->whereNotNull(DB::raw("json_extract(settings, '$.{$key}')"))
-                ->groupBy('k')->orderByDesc('c')->limit(5)
-                ->pluck('c', 'k')
+            return ProcessingJob::pluck('settings')
+                ->map(fn ($settings) => is_array($settings) ? ($settings[$key] ?? null) : null)
+                ->filter()
+                ->countBy()
+                ->sortDesc()
+                ->take(5)
                 ->map(fn ($count, $value) => ['label' => (string) $value, 'value' => (int) $count])
                 ->values()->all();
         };

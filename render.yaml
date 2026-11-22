@@ -13,8 +13,9 @@
 #   - The Python video engine. Heavy video processing runs on the
 #     separate Muse worker (dev VM), NOT on Render — the Free instance
 #     (512 MB RAM, no background workers) cannot run FFmpeg +
-#     faster-whisper. On this deployment the frontend honestly reports
-#     the engine as Down and Step 1 probe fails with a clear error.
+#     faster-whisper. On the hosted site the frontend reports the
+#     engine as "up (worker)" (the Muse worker path) instead of
+#     probing a local engine that cannot exist there.
 #   - Any persistent disk. Render Free has an ephemeral filesystem:
 #     uploads / SQLite files vanish on every deploy. User accounts and
 #     projects live in the Postgres database above, not on disk.
