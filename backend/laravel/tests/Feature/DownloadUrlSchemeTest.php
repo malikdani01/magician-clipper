@@ -68,6 +68,19 @@ class DownloadUrlSchemeTest extends TestCase
         $this->assertStringEndsWith('/download', $url);
     }
 
+    public function test_app_service_provider_is_registered(): void
+    {
+        // Regression test (2026-11-23): AppServiceProvider was never
+        // registered — config/app.php has no 'providers' key and
+        // bootstrap/providers.php did not exist — so nothing in its
+        // boot() ever ran, including the URL::forceScheme('https') fix.
+        // The scheme tests above boot the provider manually; this one
+        // proves a normally-booted app actually registers it.
+        $this->assertNotNull(
+            $this->app->getProvider(\App\Providers\AppServiceProvider::class)
+        );
+    }
+
     public function test_download_url_stays_http_when_app_url_is_http(): void
     {
         // Local dev must be unaffected: an http APP_URL keeps http URLs.

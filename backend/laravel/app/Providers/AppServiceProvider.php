@@ -52,6 +52,10 @@ class AppServiceProvider extends ServiceProvider
         // APP_URL is http://127.0.0.1:8000.
         if (str_starts_with((string) config('app.url'), 'https://')) {
             URL::forceScheme('https');
+        } else {
+            // Explicit reset so a stale forced scheme can never linger
+            // (e.g. in tests that re-boot the provider with an http URL).
+            URL::forceScheme(null);
         }
     }
 }

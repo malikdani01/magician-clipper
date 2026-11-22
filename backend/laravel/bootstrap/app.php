@@ -13,6 +13,16 @@ return Application::configure(basePath: dirname(__DIR__))
         commands: __DIR__.'/../routes/console.php',
         health: '/up',
     )
+    // AppServiceProvider was NEVER registered: config/app.php has no
+    // 'providers' key and bootstrap/providers.php did not exist, so
+    // nothing in AppServiceProvider::boot() ever ran (proved 2026-11-23
+    // with a debug log that stayed empty — the URL::forceScheme('https')
+    // fix for mixed-content clip downloads was dead code until this
+    // registration). Gate policies worked anyway only because Laravel
+    // auto-discovers them by naming convention.
+    ->withProviders([
+        \App\Providers\AppServiceProvider::class,
+    ])
     ->withMiddleware(function (Middleware $middleware) {
         // API routes are stateless token auth (Sanctum); no CSRF on /api/*.
         // Web routes keep the default Laravel web middleware stack.
