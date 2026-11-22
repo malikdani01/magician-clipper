@@ -4,8 +4,10 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Models\Clip;
+use App\Models\ClipRerender;
 use App\Models\ProcessingJob;
 use App\Models\Project;
+use App\Models\UserSetting;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -226,11 +228,21 @@ class MuseJobController extends Controller
             'error_reason' => ['sometimes', 'nullable', 'string', 'max:500'],
             'stage' => ['sometimes', 'nullable', 'string', 'max:255'],
             'progress' => ['sometimes', 'nullable', 'integer', 'min:0', 'max:100'],
+            // Human-readable note the worker leaves on the job (e.g. why
+            // fewer clips were delivered). Shown on the job page.
+            'note' => ['sometimes', 'nullable', 'string', 'max:1000'],
         ]);
 
         $public = strtolower($validated['status']);
         $stage = $validated['stage'] ?? null;
         $progress = $validated['progress'] ?? null;
+
+        // A note rides along with any status report and is stored on the
+        // job itself, so it survives the state transition below.
+        if (array_key_exists('note', $validated)) {
+            $job->note = $validated['note'];
+            $job->save();
+        }
 
         // Same-status report: just update stage/progress.
         if ($job->publicStatus() === $public) {
@@ -293,12 +305,11 @@ class MuseJobController extends Controller
      * POST /api/v1/muse/jobs/{id}/clips — upload one rendered MP4 clip.
      *
      * Multipart: file (MP4) + title, start_seconds, end_seconds,
-     * duration_seconds, score (0-1), reason, transcript_excerpt.
-     * The upload is validated with ffprobe (must be a playable video with
-     * a video stream) before a clip record is created; the file is stored
-     * under storage/app/clips/{job_id}/<uuid>.mp4. A clip record is only
-     * created for a validated file — 'ready' without a real file is a
-     * data error, never a success (Clip::isComplete).
+     * duration_seconds, score (0-1), reason, transcript_excerpt,
+     * caption_style (the style burned into this clip, for the job page
+     * and for re-renders). The upload is validated with ffprobe (must
+     * be a playable video with a video stream) before a clip record is
+     * created; the file is stored under storage/app/clips/{job_id}/<uuid>.mp4.
      */
     public function storeClip(Request $request, ProcessingJob $job)
     {
@@ -319,6 +330,7 @@ class MuseJobController extends Controller
             'score' => ['sometimes', 'nullable', 'numeric', 'min:0', 'max:1'],
             'reason' => ['sometimes', 'nullable', 'string', 'max:2000'],
             'transcript_excerpt' => ['sometimes', 'nullable', 'string', 'max:5000'],
+            'caption_style' => ['sometimes', 'nullable', 'string', Rule::in(UserSetting::CAPTION_STYLES)],
         ]);
 
         $file = $request->file('file');
@@ -375,6 +387,8 @@ class MuseJobController extends Controller
             'score' => $validated['score'] ?? null,
             'reason' => $validated['reason'] ?? null,
             'transcript_excerpt' => $validated['transcript_excerpt'] ?? null,
+            'caption_style' => $validated['caption_style']
+                ?? ($settings['caption_style'] ?? null),
         ]);
 
         return response()->json(['clip' => $clip->fresh()], 201);
@@ -448,5 +462,153 @@ class MuseJobController extends Controller
         }
 
         return response()->json(['deleted' => $deleted]);
+    }
+
+    // --- Clip re-renders (worker side) --------------------------------
+
+    /**
+     * GET /api/v1/muse/rerenders — queued clip re-render requests,
+     * oldest first. The worker takes the first, claims it via
+     * updateRerenderStatus, re-renders the clip's SAME window with the
+     * requested caption style, and uploads the result via
+     * replaceClipFile. A re-render is not a job: it never appears in
+     * the jobs list and never counts toward job usage.
+     */
+    public function listRerenders(Request $request)
+    {
+        $rerenders = ClipRerender::where('status', ClipRerender::STATUS_QUEUED)
+            ->with('clip')
+            ->orderBy('id')
+            ->get()
+            ->map(fn (ClipRerender $r) => $r->toWorkerArray())
+            ->all();
+
+        return response()->json(['rerenders' => $rerenders]);
+    }
+
+    /**
+     * PATCH /api/v1/muse/rerenders/{rerender}/status — the worker claims
+     * a re-render (queued -> processing) and reports its outcome
+     * (processing -> ready | failed). Any other transition is a 422:
+     * the worker never re-opens a finished re-render.
+     */
+    public function updateRerenderStatus(Request $request, ClipRerender $rerender)
+    {
+        $validated = $request->validate([
+            'status' => ['required', 'string', Rule::in(['processing', 'ready', 'failed'])],
+            'error_message' => ['sometimes', 'nullable', 'string', 'max:500'],
+        ]);
+
+        $next = $validated['status'];
+        $allowed = match ($rerender->status) {
+            ClipRerender::STATUS_QUEUED => [$next === ClipRerender::STATUS_PROCESSING],
+            ClipRerender::STATUS_PROCESSING => [
+                $next === ClipRerender::STATUS_READY || $next === ClipRerender::STATUS_FAILED,
+            ],
+            default => [false],
+        };
+
+        if (! in_array(true, $allowed, true)) {
+            return response()->json([
+                'error' => 'invalid_state',
+                'message' => "Cannot move a {$rerender->status} re-render to {$next}.",
+            ], 422);
+        }
+
+        $rerender->update([
+            'status' => $next,
+            'error_message' => $validated['error_message'] ?? ($next === ClipRerender::STATUS_FAILED ? 'Worker reported failure without a reason.' : null),
+        ]);
+
+        return response()->json(['rerender' => $rerender->fresh()->toWorkerArray()]);
+    }
+
+    /**
+     * POST /api/v1/muse/clips/{clip}/file — replace a clip's rendered
+     * file after a re-render. Multipart: file (MP4) + rerender_id +
+     * optional thumbnail. The file is ffprobe-validated BEFORE anything
+     * is replaced (a bad upload never clobbers a good clip); then the
+     * old file + thumbnail are deleted, the clip row is updated
+     * (output_path, thumbnail_path, size, duration, caption_style),
+     * and the re-render is marked ready — all in one request so the
+     * clip is never left pointing at a file that does not exist.
+     * Unlike storeClip, the parent job does NOT need to be Processing:
+     * a re-render targets a finished job's clip.
+     */
+    public function replaceClipFile(Request $request, Clip $clip)
+    {
+        $validated = $request->validate([
+            'file' => ['required', 'file', 'mimes:mp4', 'max:2097152'],
+            'thumbnail' => ['sometimes', 'nullable', 'file', 'mimes:jpeg,jpg,png', 'max:2048'],
+            'rerender_id' => ['required', 'integer'],
+            'duration_seconds' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+        ]);
+
+        $rerender = ClipRerender::find($validated['rerender_id']);
+        if ($rerender === null || $rerender->clip_id !== $clip->id) {
+            return response()->json([
+                'error' => 'not_found',
+                'message' => 'No such re-render for this clip.',
+            ], 404);
+        }
+        if ($rerender->status !== ClipRerender::STATUS_PROCESSING) {
+            return response()->json([
+                'error' => 'invalid_state',
+                'message' => "Re-render must be processing to upload a replacement file (current status: {$rerender->status}).",
+            ], 422);
+        }
+
+        $jobId = $clip->job_id ?? $clip->project_id;
+        $file = $request->file('file');
+        $filename = Str::uuid()->toString().'.mp4';
+        $relativePath = "clips/{$jobId}/{$filename}";
+        Storage::disk('local')->putFileAs("clips/{$jobId}", $file, $filename);
+        $absolutePath = Storage::disk('local')->path($relativePath);
+
+        $probe = $this->probeClip($absolutePath);
+        if ($probe === null) {
+            Storage::disk('local')->delete($relativePath);
+
+            return response()->json([
+                'error' => 'validation_error',
+                'message' => 'The replacement clip is not a playable MP4 (FFprobe could not read a video stream).',
+            ], 422);
+        }
+
+        $thumbnailPath = $clip->thumbnail_path;
+        if ($request->hasFile('thumbnail')) {
+            $thumbFilename = 'thumb-'.Str::uuid()->toString().'.jpg';
+            Storage::disk('local')->putFileAs(
+                "clips/{$jobId}", $request->file('thumbnail'), $thumbFilename
+            );
+            $thumbnailPath = "clips/{$jobId}/{$thumbFilename}";
+        }
+
+        $oldOutput = $clip->output_path;
+        $oldThumbnail = $clip->thumbnail_path;
+
+        $clip->update([
+            'output_path' => $relativePath,
+            'thumbnail_path' => $thumbnailPath,
+            'file_size_bytes' => Storage::disk('local')->size($relativePath),
+            'duration_seconds' => (float) ($validated['duration_seconds'] ?? $probe['duration']),
+            'caption_style' => $rerender->caption_style,
+            'status' => Clip::STATUS_READY,
+        ]);
+        $rerender->update(['status' => ClipRerender::STATUS_READY, 'error_message' => null]);
+
+        // Only now, with the new file safely recorded, remove the old
+        // ones — a failure above leaves the original clip intact.
+        if ($oldOutput && $oldOutput !== $relativePath) {
+            Storage::disk('local')->delete($oldOutput);
+        }
+        if ($oldThumbnail && $oldThumbnail !== $thumbnailPath) {
+            Storage::disk('local')->delete($oldThumbnail);
+        }
+
+        return response()->json([
+            'clip' => $clip->fresh(),
+            'rerender' => $rerender->fresh()->toWorkerArray(),
+        ]);
     }
 }

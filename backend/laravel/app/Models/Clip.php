@@ -34,6 +34,7 @@ class Clip extends Model
         'status',
         'output_path',
         'thumbnail_path',
+        'caption_style',
         'file_size_bytes',
         'score',
         'reason',
@@ -59,6 +60,11 @@ class Clip extends Model
     public function job()
     {
         return $this->belongsTo(ProcessingJob::class, 'job_id');
+    }
+
+    public function rerenders()
+    {
+        return $this->hasMany(ClipRerender::class);
     }
 
     /**

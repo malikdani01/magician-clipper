@@ -4,7 +4,9 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Models\Clip;
+use App\Models\ClipRerender;
 use App\Models\Project;
+use App\Models\UserSetting;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
@@ -105,16 +107,77 @@ class ClipController extends Controller
     }
 
     /**
-     * POST /api/v1/clips/{clip}/render — Phase 3.
-     * Re-renders one clip with FFmpeg (trim / reframe / caption burn-in)
-     * and validates the output before marking it ready.
+     * POST /api/v1/clips/{clip}/render — queue a re-render of one clip
+     * with a different caption style. The clip itself is NOT rendered
+     * here: the request is queued and the connected worker picks it up
+     * (GET /muse/rerenders), re-renders the clip's SAME window with the
+     * new style, and replaces the file in place. Returns 202 with the
+     * queued re-render; the job page polls GET .../rerenders for its
+     * status. A clip with no rendered file yet cannot be re-rendered,
+     * and only one queued/processing re-render per clip may exist —
+     * a second request while one is in flight is a 409, not a queue
+     * of duplicates.
      */
     public function render(Request $request, Clip $clip)
     {
         $this->authorize('render', $clip);
 
-        return $this->notImplemented(
-            'Clip rendering is not implemented yet (Phase 3). Rendering requires the video engine and a validated output file.'
-        );
+        $validated = $request->validate([
+            'caption_style' => ['required', 'string', Rule::in(UserSetting::CAPTION_STYLES)],
+        ]);
+
+        if ($clip->output_path === null) {
+            return response()->json([
+                'error' => 'invalid_state',
+                'message' => 'This clip has no rendered file yet — there is nothing to re-render.',
+            ], 422);
+        }
+
+        // Effective style: the clip's own, else the job's (clips rendered
+        // before styles were recorded carry null — the job's style is
+        // what the worker burned in).
+        $effectiveStyle = $clip->caption_style
+            ?? ($clip->job?->settings['caption_style'] ?? null);
+        if ($effectiveStyle === $validated['caption_style']) {
+            return response()->json([
+                'error' => 'validation_error',
+                'message' => 'This clip already uses that caption style.',
+            ], 422);
+        }
+
+        $inFlight = ClipRerender::where('clip_id', $clip->id)
+            ->whereIn('status', [ClipRerender::STATUS_QUEUED, ClipRerender::STATUS_PROCESSING])
+            ->exists();
+        if ($inFlight) {
+            return response()->json([
+                'error' => 'conflict',
+                'message' => 'A re-render for this clip is already queued or processing.',
+            ], 409);
+        }
+
+        $rerender = ClipRerender::create([
+            'clip_id' => $clip->id,
+            'user_id' => $request->user()->id,
+            'caption_style' => $validated['caption_style'],
+            'status' => ClipRerender::STATUS_QUEUED,
+        ]);
+
+        return response()->json(['rerender' => $rerender->toUserArray()], 202);
+    }
+
+    /**
+     * GET /api/v1/clips/{clip}/rerenders — re-render history for one
+     * clip, latest first. The job page polls this while a re-render is
+     * queued/processing and shows the result when it lands.
+     */
+    public function rerenders(Request $request, Clip $clip)
+    {
+        $this->authorize('view', $clip);
+
+        return response()->json([
+            'rerenders' => $clip->rerenders()->latest()->get()->map(
+                fn (ClipRerender $r) => $r->toUserArray()
+            )->all(),
+        ]);
     }
 }

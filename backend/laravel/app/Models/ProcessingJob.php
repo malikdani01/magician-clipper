@@ -106,6 +106,7 @@ class ProcessingJob extends Model
         'progress',
         'error_code',
         'error_message',
+        'note',
         'engine_job_id',
         'settings',
         'source_type',
@@ -209,7 +210,11 @@ class ProcessingJob extends Model
      */
     public function toUserArray(): array
     {
-        $clips = $this->clips()->orderBy('id')->get()->map(function ($clip) {
+        // Clips rendered before caption_style was recorded (2026-11-23)
+        // carry null — the job's own style is what the worker burned in,
+        // so it is the honest fallback for display and re-render checks.
+        $jobStyle = $this->settings['caption_style'] ?? null;
+        $clips = $this->clips()->orderBy('id')->get()->map(function ($clip) use ($jobStyle) {
             return [
                 'id' => $clip->id,
                 'title' => $clip->title,
@@ -222,6 +227,8 @@ class ProcessingJob extends Model
                 'score' => $clip->score,
                 'reason' => $clip->reason,
                 'transcript_excerpt' => $clip->transcript_excerpt,
+                'thumbnail_path' => $clip->thumbnail_path,
+                'caption_style' => $clip->caption_style ?? $jobStyle,
                 'download_url' => url("/api/v1/clips/{$clip->id}/download"),
                 'created_at' => $clip->created_at,
             ];
@@ -240,6 +247,7 @@ class ProcessingJob extends Model
             'clips' => $clips,
             'error_code' => $this->error_code,
             'error_message' => $this->error_message,
+            'note' => $this->note,
             'started_at' => $this->started_at,
             'finished_at' => $this->finished_at,
             'created_at' => $this->created_at,

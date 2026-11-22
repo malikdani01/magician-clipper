@@ -74,6 +74,7 @@ Route::prefix('v1')->group(function () {
         Route::patch('/clips/{clip}', [ClipController::class, 'update']);
         Route::post('/clips/{clip}/render', [ClipController::class, 'render'])
             ->middleware('throttle:6,1');
+        Route::get('/clips/{clip}/rerenders', [ClipController::class, 'rerenders']);
 
         // --- Exports ---
         Route::post('/projects/{project}/export', [ExportController::class, 'store'])
@@ -112,5 +113,9 @@ Route::prefix('v1')->group(function () {
         Route::post('/jobs/{job}/clips', [MuseJobController::class, 'storeClip'])
             ->middleware('throttle:30,1');
         Route::delete('/jobs/{job}/clips', [MuseJobController::class, 'destroyClips']);
+        Route::get('/rerenders', [MuseJobController::class, 'listRerenders']);
+        Route::patch('/rerenders/{rerender}/status', [MuseJobController::class, 'updateRerenderStatus']);
+        Route::post('/clips/{clip}/file', [MuseJobController::class, 'replaceClipFile'])
+            ->middleware('throttle:30,1');
     });
 });
