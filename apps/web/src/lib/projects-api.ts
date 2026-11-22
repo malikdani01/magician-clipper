@@ -41,6 +41,8 @@ export interface ProjectClipSummary {
   duration_seconds: number | null
   file_size_bytes: number | null
   score: number | null
+  /** Caption style burned into this clip (null when rendered before styles were stored). */
+  caption_style: string | null
   /** The transcribed lines burned into this clip (null when none). */
   transcript_excerpt: string | null
 }

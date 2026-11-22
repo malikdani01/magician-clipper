@@ -62,6 +62,8 @@ export interface JobClip {
   download_url: string
   /** First-frame JPEG path (null for clips rendered before thumbnails). */
   thumbnail_path: string | null
+  /** Caption style burned into this clip (null when rendered before styles were stored). */
+  caption_style: string | null
   created_at: string
 }
 
@@ -72,6 +74,8 @@ export interface Job {
   state: string
   stage: string | null
   progress: number | null
+  /** Worker note: why fewer clips came back, or why some failed. */
+  note: string | null
   settings: JobSettings | null
   source_type: 'upload' | 'link'
   source_url: string | null
@@ -401,6 +405,91 @@ async function postJobAction(id: number, action: 'cancel' | 'retry'): Promise<Jo
           ? err.message
           : `Could not ${action} the job.`,
     }
+  } finally {
+    cancel()
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Clip re-renders (queue a clip with a different caption style)       */
+/* ------------------------------------------------------------------ */
+
+/** One re-render request for a clip (see ClipRerender in the backend). */
+export interface ClipRerender {
+  id: number
+  clip_id: number
+  caption_style: string
+  status: 'queued' | 'processing' | 'ready' | 'failed'
+  error_message: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type RerenderResult =
+  | { ok: true; rerender: ClipRerender }
+  | { ok: false; error: string; status?: number }
+
+/**
+ * POST /api/v1/clips/{id}/render — queue a re-render of one clip with a
+ * different caption style. The worker re-renders the SAME window and
+ * replaces the file in place; the job page polls getClipRerenders.
+ */
+export async function requestClipRerender(
+  clipId: number,
+  captionStyle: string,
+): Promise<RerenderResult> {
+  if (!getToken()) {
+    return { ok: false, error: 'Sign in to re-render a clip.' }
+  }
+  const { signal, cancel } = timeoutSignal(15000)
+  try {
+    const res = await fetch(`${API_URL}/clips/${clipId}/render`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ caption_style: captionStyle }),
+      signal,
+    })
+    const body: unknown = await res.json().catch(() => null)
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: serverMessage(body, `Could not queue the re-render (HTTP ${res.status})`),
+        status: res.status,
+      }
+    }
+    const rerender = (body as { rerender?: ClipRerender }).rerender
+    if (!rerender || typeof rerender.id !== 'number') {
+      return { ok: false, error: 'The server did not return the queued re-render.' }
+    }
+    return { ok: true, rerender }
+  } catch (err) {
+    return {
+      ok: false,
+      error: isUnreachable(err)
+        ? 'Backend is not reachable.'
+        : err instanceof Error
+          ? err.message
+          : 'Could not queue the re-render.',
+    }
+  } finally {
+    cancel()
+  }
+}
+
+/** GET /api/v1/clips/{id}/rerenders — re-render history, latest first. */
+export async function getClipRerenders(clipId: number): Promise<ClipRerender[]> {
+  if (!getToken()) return []
+  const { signal, cancel } = timeoutSignal(15000)
+  try {
+    const res = await fetch(`${API_URL}/clips/${clipId}/rerenders`, {
+      headers: authHeaders(),
+      signal,
+    })
+    if (!res.ok) return []
+    const body = (await res.json()) as { rerenders?: ClipRerender[] }
+    return Array.isArray(body.rerenders) ? body.rerenders : []
+  } catch {
+    return []
   } finally {
     cancel()
   }

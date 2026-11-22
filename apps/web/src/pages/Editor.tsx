@@ -246,6 +246,7 @@ export function EditorPage() {
       transcript_excerpt: clip.transcript_excerpt,
       download_url: `${API_URL}/clips/${clip.id}/download`,
       thumbnail_path: clip.thumbnail_path,
+      caption_style: clip.caption_style ?? null,
       created_at: '',
     })
     setDownloadingClipId(null)

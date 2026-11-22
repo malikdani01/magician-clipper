@@ -10,16 +10,20 @@ import {
   X,
 } from 'lucide-react'
 import { EmptyState } from '../components/EmptyState'
+import { ClipThumbnail } from '../components/ClipThumbnail'
 import { JobStatusPill, jobSummary } from '../components/JobStatusPill'
 import { PageHeader } from '../components/PageHeader'
-import { getCaptionStyle } from '../lib/captionStyles'
+import { CAPTION_STYLES, getCaptionStyle } from '../lib/captionStyles'
 import { formatBytes, formatDuration } from '../lib/format'
 import { VIRAL_TONE_CLASS, viralScore } from '../lib/viralScore'
 import {
   cancelJob,
   downloadClip,
+  getClipRerenders,
   getJob,
+  requestClipRerender,
   retryJob,
+  type ClipRerender,
   type Job,
   type JobClip,
 } from '../lib/jobs'
@@ -76,14 +80,122 @@ function settingRows(job: Job): Array<[string, string]> {
 }
 
 /**
- * Job detail — polls GET /api/v1/jobs/{id} every 5s while the job is
- * Queued or Processing and shows the real stage/progress the API
- * returns. Progress is shown only when the API reports a number; a
- * stage with no measurable percentage shows as indeterminate — never
- * a faked percentage. Clips download through the real download
- * endpoint. Cancel / Retry render only because the user-facing API
- * supports them (docs/api.md: POST /jobs/{id}/cancel + /retry).
+ * Re-render control for one clip: pick a different caption style and
+ * queue a re-render. The worker re-renders the SAME window and replaces
+ * the file in place; this polls the re-render status while it is
+ * queued/processing and refreshes the job when it lands, so the new
+ * style and file show without a manual reload.
  */
+function ClipRerenderControl({
+  clip,
+  onRerendered,
+}: {
+  clip: JobClip
+  onRerendered: () => void
+}) {
+  const otherStyles = CAPTION_STYLES.filter((s) => s.id !== (clip.caption_style ?? ''))
+  const [style, setStyle] = useState<string>(otherStyles[0]?.id ?? 'punchy')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [latest, setLatest] = useState<ClipRerender | null>(null)
+  const prevStatusRef = useRef<string | null>(null)
+
+  // Keep the picker on a valid style when the clip changes (new file landed).
+  useEffect(() => {
+    const next = CAPTION_STYLES.filter((s) => s.id !== (clip.caption_style ?? ''))[0]?.id
+    if (next) setStyle(next)
+  }, [clip.caption_style])
+
+  const refresh = useCallback(async () => {
+    const list = await getClipRerenders(clip.id)
+    const first = list[0] ?? null
+    const prev = prevStatusRef.current
+    setLatest(first)
+    prevStatusRef.current = first?.status ?? null
+    // A re-render that just finished changes the clip file + style.
+    if (
+      first &&
+      (first.status === 'ready' || first.status === 'failed') &&
+      (prev === 'queued' || prev === 'processing')
+    ) {
+      onRerendered()
+    }
+  }, [clip.id, onRerendered])
+
+  useEffect(() => {
+    void refresh()
+    if (!latest || latest.status === 'queued' || latest.status === 'processing') {
+      const timer = setInterval(() => void refresh(), 5000)
+      return () => clearInterval(timer)
+    }
+    return undefined
+  }, [refresh, latest?.status])
+
+  const submit = async () => {
+    setSubmitting(true)
+    setError(null)
+    const result = await requestClipRerender(clip.id, style)
+    setSubmitting(false)
+    if (!result.ok) {
+      setError(result.error)
+      return
+    }
+    prevStatusRef.current = null
+    setLatest(result.rerender)
+  }
+
+  const inFlight = latest?.status === 'queued' || latest?.status === 'processing'
+
+  return (
+    <div className="mt-3 w-full rounded-xl border border-ink-border bg-ink-panel px-3 py-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-medium text-white">
+          Captions: {getCaptionStyle(clip.caption_style).name}
+        </span>
+        <select
+          value={style}
+          onChange={(e) => setStyle(e.target.value)}
+          disabled={submitting || inFlight}
+          aria-label="Caption style for re-render"
+          className="rounded-lg border border-ink-border bg-ink-panel2 px-2 py-1.5 text-xs text-white disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {otherStyles.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={() => void submit()}
+          disabled={submitting || inFlight}
+          className="flex items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-light disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {submitting ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <RotateCcw className="h-3.5 w-3.5" />
+          )}
+          {inFlight ? 'Re-rendering…' : 'Re-render with this style'}
+        </button>
+      </div>
+      {latest ? (
+        <p className="mt-1.5 text-xs text-[var(--color-text-muted)]">
+          {latest.status === 'ready'
+            ? `Re-rendered with ${getCaptionStyle(latest.caption_style).name} — the file above is the new version.`
+            : latest.status === 'failed'
+              ? `Re-render failed${latest.error_message ? `: ${latest.error_message}` : '.'}`
+              : `Re-render ${latest.status} with ${getCaptionStyle(latest.caption_style).name}…`}
+        </p>
+      ) : null}
+      {error ? (
+        <p role="alert" className="mt-1.5 text-xs text-red-300">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  )
+}
 export function JobDetailPage() {
   const { id } = useParams<{ id: string }>()
   const jobId = Number(id)
@@ -340,6 +452,18 @@ export function JobDetailPage() {
               </p>
             ) : null}
 
+            {job.note ? (
+              <div
+                role="note"
+                className="mt-4 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4"
+              >
+                <p className="flex items-center gap-2 text-sm font-semibold text-amber-300">
+                  <AlertTriangle className="h-4 w-4" /> A note from the worker
+                </p>
+                <p className="mt-1 text-sm text-amber-200/90">{job.note}</p>
+              </div>
+            ) : null}
+
             {actionError ? (
               <p role="alert" className="mt-4 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
                 {actionError}
@@ -399,6 +523,12 @@ export function JobDetailPage() {
                     key={clip.id}
                     className="flex flex-wrap items-center gap-4 rounded-xl bg-ink-panel2 p-4"
                   >
+                    <ClipThumbnail
+                      clipId={clip.id}
+                      hasThumbnail={clip.thumbnail_path != null}
+                      alt={`First frame of ${clip.title}`}
+                      className="h-24 w-14 shrink-0 rounded-xl object-cover"
+                    />
                     <div
                       className={`flex shrink-0 flex-col items-center rounded-xl border px-3 py-2 ${VIRAL_TONE_CLASS[viral.tone]}`}
                       title="Viral score — estimate from speech, gameplay, energy and scene signals"
@@ -435,6 +565,10 @@ export function JobDetailPage() {
                         </p>
                       ) : null}
                     </div>
+                    <ClipRerenderControl
+                      clip={clip}
+                      onRerendered={() => void fetchJob()}
+                    />
                     <button
                       type="button"
                       onClick={() => void doDownload(clip)}
