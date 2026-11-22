@@ -55,6 +55,14 @@ export interface ProbeResult {
   format: string | null
   size_bytes: number
   source_path: string
+  /**
+   * Where the numbers came from. 'engine' = ffprobe on the video
+   * engine (full metadata incl. fps/codecs); 'browser' = the browser
+   * read duration/resolution itself (fps/codecs unknown, null).
+   * The UI says which one it was — never present browser numbers
+   * as engine numbers.
+   */
+  probed_by?: 'browser' | 'engine'
 }
 
 /** GET /jobs/{job_id} response from the video engine. */
@@ -174,9 +182,23 @@ export async function engineHealth(): Promise<EngineHealth> {
   }
 }
 
-/** POST /probe — multipart field `file`. Throws on HTTP error.
- * 120s timeout: long-video uploads routinely exceed 10s. */
+/**
+ * Probe a video file for duration, resolution and size.
+ *
+ * Local dev (engine configured): POST /probe to the video engine —
+ * ffprobe gives full metadata incl. fps and codecs.
+ *
+ * Hosted site (no engine configured): the engine URL falls back to
+ * 127.0.0.1:8001, which the visitor's browser can never reach — the
+ * old code fetched it anyway and every probe failed ("Failed to
+ * fetch", wizard blocked). Here the browser reads the metadata
+ * itself from the file (duration/resolution); fps/codecs stay null
+ * and are labelled as unmeasured. The server re-validates the
+ * upload with ffprobe when the job is created, so a bad file is
+ * still caught before any work starts.
+ */
 export async function probeVideo(file: File): Promise<ProbeResult> {
+  if (!ENGINE_CONFIGURED) return probeVideoInBrowser(file)
   const form = new FormData()
   form.append('file', file)
   const { signal, cancel } = timeoutSignal(120000)
@@ -196,9 +218,74 @@ export async function probeVideo(file: File): Promise<ProbeResult> {
       }
       throw new Error(detail)
     }
-    return (await res.json()) as ProbeResult
+    const result = (await res.json()) as ProbeResult
+    return { ...result, probed_by: 'engine' }
   } finally {
     cancel()
+  }
+}
+
+/** Read duration/resolution from the file in the browser itself. */
+async function probeVideoInBrowser(file: File): Promise<ProbeResult> {
+  const url = URL.createObjectURL(file)
+  try {
+    const meta = await new Promise<{ duration: number; width: number; height: number }>(
+      (resolve, reject) => {
+        const video = document.createElement('video')
+        video.preload = 'metadata'
+        video.muted = true
+        const cleanup = () => {
+          window.clearTimeout(timer)
+          video.removeAttribute('src')
+          video.load()
+        }
+        const timer = window.setTimeout(() => {
+          cleanup()
+          reject(new Error('The browser could not read this video file.'))
+        }, 30000)
+        video.onloadedmetadata = () => {
+          const duration = video.duration
+          const width = video.videoWidth
+          const height = video.videoHeight
+          cleanup()
+          if (!Number.isFinite(duration) || duration <= 0 || !width || !height) {
+            reject(
+              new Error(
+                'The browser could not read this video’s duration or resolution. Try the New Job page instead — the server checks the file there.',
+              ),
+            )
+          } else {
+            resolve({ duration, width, height })
+          }
+        }
+        video.onerror = () => {
+          cleanup()
+          reject(
+            new Error(
+              'The browser could not play this video file. It may be corrupt or in an unsupported format.',
+            ),
+          )
+        }
+        video.src = url
+      },
+    )
+    return {
+      job_id: 'browser',
+      duration_seconds: meta.duration,
+      width: meta.width,
+      height: meta.height,
+      fps: null,
+      video_codec: null,
+      audio_codec: null,
+      audio_streams: 0,
+      bitrate: null,
+      format: file.type || null,
+      size_bytes: file.size,
+      source_path: '',
+      probed_by: 'browser',
+    }
+  } finally {
+    URL.revokeObjectURL(url)
   }
 }
 

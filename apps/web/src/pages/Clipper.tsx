@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   AlertTriangle,
   ArrowLeft,
@@ -19,11 +20,10 @@ import {
   Upload,
   X,
 } from 'lucide-react'
-import { EmptyState } from '../components/EmptyState'
-import { NotImplemented } from '../components/NotImplemented'
 import { PageHeader } from '../components/PageHeader'
 import { ENGINE_URL, extractAudio, probeVideo, type ProbeResult } from '../lib/api'
 import { formatBytes, formatDuration } from '../lib/format'
+import { createJob } from '../lib/jobs'
 import {
   defaultClipSpec,
   setProjectFile,
@@ -69,6 +69,32 @@ const CAPTION_STYLES = [
   { id: 'cinematic', label: 'Cinematic' },
   { id: 'minimal', label: 'Minimal' },
 ] as const
+
+/**
+ * These preset ids predate the 13 real caption styles the worker burns
+ * in (see lib/captionStyles). Map each legacy preset to the real style
+ * it most resembles — the job API rejects unknown style ids, so the
+ * preset must never be sent as-is.
+ */
+const CAPTION_PRESET_TO_STYLE: Record<string, string> = {
+  'bold-pop': 'punchy',
+  highlight: 'word_pop',
+  bounce: 'bounce',
+  karaoke: 'karaoke',
+  'neon-glow': 'neon',
+  'word-slam': 'slam',
+  modern: 'clean_subs',
+  podcast: 'classic',
+  cinematic: 'title_card',
+  minimal: 'clean_subs',
+}
+
+/** Processing mode → job quality (the worker renders at 'standard' unless told otherwise). */
+const PROCESSING_MODE_TO_QUALITY: Record<string, 'draft' | 'standard' | 'high'> = {
+  eco: 'draft',
+  balanced: 'standard',
+  fast: 'standard',
+}
 
 const CONTENT_TYPES = [
   { id: 'podcast', label: 'Podcast' },
@@ -198,6 +224,7 @@ function Toggle({
  */
 export function ClipperPage() {
   const { addProject, updateProject, getProject } = useProjects()
+  const navigate = useNavigate()
 
   const [step, setStep] = useState(1)
   const [maxStep, setMaxStep] = useState(1)
@@ -217,6 +244,17 @@ export function ClipperPage() {
   const [probeError, setProbeError] = useState<string | null>(null)
   const [probeUnreachable, setProbeUnreachable] = useState(false)
   const [projectId, setProjectId] = useState<string | null>(null)
+
+  // Step 1 — link import (goes through the New Job wizard, which the
+  // worker serves end to end: the backend accepts source_url and the
+  // worker downloads it with yt-dlp).
+  const [linkUrl, setLinkUrl] = useState('')
+  const [linkError, setLinkError] = useState<string | null>(null)
+
+  // Step 3 — real processing: creates a Job via the API and navigates
+  // to the job page, where the worker renders the clips.
+  const [processing, setProcessing] = useState(false)
+  const [processingError, setProcessingError] = useState<string | null>(null)
 
   // Step 1 — audio extraction (Phase 2 groundwork for transcription)
   const [audioStatus, setAudioStatus] = useState<'idle' | 'extracting' | 'done' | 'error'>('idle')
@@ -261,6 +299,68 @@ export function ClipperPage() {
     if (projectId) {
       updateProject(projectId, { spec: next })
     }
+  }
+
+  /**
+   * Link import: validate the URL, then hand it to the New Job wizard
+   * with the link tab prefilled — that wizard + the worker download
+   * the video (YouTube / TikTok / Drive / direct file). No download
+   * is claimed here; the job page shows the real result.
+   */
+  const submitLink = () => {
+    const url = linkUrl.trim()
+    if (!url) {
+      setLinkError('Paste a video link first.')
+      return
+    }
+    try {
+      new URL(url)
+    } catch {
+      setLinkError('That does not look like a valid link. Paste a full YouTube, TikTok, Drive or direct video URL.')
+      return
+    }
+    setLinkError(null)
+    navigate(`/jobs/new?source=link&url=${encodeURIComponent(url)}`)
+  }
+
+  /**
+   * Start Processing — the real one. Creates a Job from the probed file
+   * + the style spec via the Job API and navigates to the job page,
+   * where the connected worker transcribes, selects highlights and
+   * renders the clips. The wizard itself never pretends to render.
+   */
+  const startRealProcessing = async () => {
+    if (!file || !projectId || processing) return
+    if (!specValid) return
+    setProcessing(true)
+    setProcessingError(null)
+    const result = await createJob({
+      file,
+      platform: spec.platform,
+      aspectRatio: spec.aspect,
+      clipCount: spec.clipCount,
+      durationMode: spec.durationMode,
+      durationSeconds: spec.durationSeconds,
+      durationMinSeconds: null,
+      durationMaxSeconds: null,
+      captionsEnabled: spec.captions,
+      captionsLanguage: 'auto',
+      captionStyle: CAPTION_PRESET_TO_STYLE[captionPreset] ?? 'punchy',
+      onScreenText: spec.onScreenText,
+      jobType: 'myself',
+      notes: keywordsAvoid.trim()
+        ? `Keywords to avoid: ${keywordsAvoid.trim()}`
+        : undefined,
+      layout: spec.aspect === '9:16' ? 'split' : 'center_crop',
+      contentType: spec.contentType,
+      quality: PROCESSING_MODE_TO_QUALITY[spec.processingMode] ?? 'standard',
+    })
+    setProcessing(false)
+    if (!result.ok) {
+      setProcessingError(result.error)
+      return
+    }
+    navigate(`/jobs/${result.job.id}`)
   }
 
   const applyClipCount = (n: number) => {
@@ -503,7 +603,11 @@ export function ClipperPage() {
         ],
         ['Video codec', probe.video_codec ?? '—'],
         ['Audio codec', probe.audio_codec ?? '—'],
-        ['Audio streams', String(probe.audio_streams)],
+        [
+          'Audio streams',
+          // The browser probe cannot count streams — show '—', not 0.
+          probe.probed_by === 'browser' ? '—' : String(probe.audio_streams),
+        ],
         [
           'Bitrate',
           probe.bitrate != null ? `${Math.round(probe.bitrate / 1000)} kbps` : '—',
@@ -681,10 +785,13 @@ export function ClipperPage() {
                 <div className="mt-5 flex items-start gap-3 rounded-xl bg-ink-panel2 p-4">
                   <Loader2 className="mt-0.5 h-5 w-5 shrink-0 animate-spin text-brand-light" />
                   <div>
-                    <p className="text-sm font-medium text-white">Uploading to engine…</p>
+                    <p className="text-sm font-medium text-white">
+                      {IS_LOCAL_SITE ? 'Uploading to engine…' : 'Reading video…'}
+                    </p>
                     <p className="mt-1 text-sm text-[var(--color-text-muted)]">
-                      Probing with ffprobe… follows on the engine once the upload
-                      finishes. No fake progress is shown.
+                      {IS_LOCAL_SITE
+                        ? 'Probing with ffprobe… follows on the engine once the upload finishes. No fake progress is shown.'
+                        : 'Your browser is reading the duration and resolution. No fake progress is shown.'}
                     </p>
                   </div>
                 </div>
@@ -735,6 +842,12 @@ export function ClipperPage() {
                       </div>
                     ))}
                   </dl>
+                  {probe.probed_by === 'browser' ? (
+                    <p className="mt-3 text-xs text-[var(--color-text-muted)]">
+                      Read in your browser — frame rate and codecs are checked
+                      by the server when the job is created.
+                    </p>
+                  ) : null}
                   {browserDiffers && browserMeta ? (
                     <p className="mt-3 text-xs text-[var(--color-text-muted)]">
                       Engine values are authoritative — they differ from the
@@ -824,26 +937,38 @@ export function ClipperPage() {
               <Link2 className="h-5 w-5 text-brand-light" /> Import from a link
             </h2>
             <p className="mt-1 text-sm text-[var(--color-text-muted)]">
-              Paste a YouTube, Google Drive or direct video link. Link import
-              needs the backend.
+              Paste a YouTube, Google Drive or direct video link. It opens
+              in the New Job wizard — the worker downloads the video and
+              the job page shows the real result.
             </p>
-            <div className="mt-3">
-              <NotImplemented phase="Phase 3" detail="needs the backend — downloading is not claimed" />
-            </div>
-            <fieldset disabled className="mt-4 flex flex-col gap-3 opacity-60 sm:flex-row">
+            <div className="mt-4 flex flex-col gap-3 sm:flex-row">
               <input
                 type="url"
+                value={linkUrl}
+                onChange={(e) => {
+                  setLinkUrl(e.target.value)
+                  setLinkError(null)
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') submitLink()
+                }}
                 placeholder="Paste a YouTube, Drive or video link…"
-                className="w-full flex-1 rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)]"
+                aria-label="Video link to import"
+                className="w-full flex-1 rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)] focus:border-brand focus:outline-none"
               />
               <button
                 type="button"
-                disabled
-                className="cursor-not-allowed rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white opacity-40"
+                onClick={submitLink}
+                className="rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
               >
                 Import link
               </button>
-            </fieldset>
+            </div>
+            {linkError ? (
+              <p role="alert" className="mt-3 text-sm text-red-300">
+                {linkError}
+              </p>
+            ) : null}
           </div>
 
           <div className="mt-6 flex justify-end">
@@ -859,10 +984,14 @@ export function ClipperPage() {
           {projectId === null ? (
             <p className="mt-2 text-right text-xs text-[var(--color-text-muted)]">
               {probeStatus === 'probing'
-                ? 'Probing with the engine — please wait.'
+                ? IS_LOCAL_SITE
+                  ? 'Probing with the engine — please wait.'
+                  : 'Reading the video in your browser — please wait.'
                 : probeStatus === 'error'
                   ? 'Probe failed — retry or choose a different file.'
-                  : 'Choose a video and let the engine probe it to continue.'}
+                  : IS_LOCAL_SITE
+                    ? 'Choose a video and let the engine probe it to continue.'
+                    : 'Choose a video — your browser reads its duration and resolution — to continue.'}
             </p>
           ) : null}
             </div>
@@ -1267,16 +1396,11 @@ export function ClipperPage() {
             <p className="mt-1 text-sm text-[var(--color-text-muted)]">
               {project ? `Project: ${project.title} · ` : ''}{summary}
             </p>
-            <div className="mt-4">
-              <NotImplemented
-                phase="Phase 3"
-                detail="transcription, highlight detection and rendering are not implemented yet"
-              />
-            </div>
             <p className="mt-3 text-sm text-[var(--color-text-muted)]">
-              Phase 3 — transcription, highlight detection and rendering are not
-              implemented yet. The stages below are the real pipeline; nothing
-              here runs and no progress is shown.
+              Transcription, highlight detection and rendering run on the job
+              page through the connected worker — not in this wizard. Start
+              processing below to create the job; the stages below show
+              what the worker will do there.
             </p>
 
             <ol className="mt-5 space-y-2">
@@ -1307,7 +1431,7 @@ export function ClipperPage() {
                       </span>
                     ) : (
                       <span className="text-xs text-[var(--color-text-muted)]">
-                        Pending — Phase 3
+                        Runs on the job page
                       </span>
                     )}
                   </li>
@@ -1325,16 +1449,30 @@ export function ClipperPage() {
               </button>
               <button
                 type="button"
-                disabled
-                title="Phase 3 — transcription, highlight detection and rendering are not implemented yet"
-                className="cursor-not-allowed rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white opacity-40"
+                onClick={() => void startRealProcessing()}
+                disabled={processing || !specValid}
+                className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-light disabled:cursor-not-allowed disabled:opacity-40"
               >
-                Start Processing
+                {processing ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" /> Creating job…
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="h-4 w-4" /> Start Processing
+                  </>
+                )}
               </button>
             </div>
-            <p className="mt-2 text-right text-xs text-[var(--color-text-muted)]">
-              Start Processing is disabled until Phase 3.
-            </p>
+            {processingError ? (
+              <p role="alert" className="mt-3 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+                {processingError}
+              </p>
+            ) : (
+              <p className="mt-2 text-right text-xs text-[var(--color-text-muted)]">
+                Creates a real job and opens its page — the worker renders the clips there.
+              </p>
+            )}
           </div>
         </section>
       ) : null}
@@ -1344,80 +1482,25 @@ export function ClipperPage() {
           <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
             <h2 className="text-lg font-semibold text-white">Review clips</h2>
             <p className="mt-1 text-sm text-[var(--color-text-muted)]">
-              Generated clips will appear here for review before export.
+              Clips are reviewed on the job page, where the worker renders
+              them — with playback, viral scores, download and re-render.
+              This wizard hands off to the job at Step 3, so there is no
+              separate review list here.
             </p>
-            <div className="mt-4">
-              <NotImplemented phase="Phase 3" detail="no clips exist until processing runs" />
-            </div>
-            <div className="mt-6">
-              <EmptyState
-                title="No clips yet"
-                description="No clips yet — processing has not run (Phase 3). Transcription, highlight detection and rendering are not implemented yet, so there is nothing to review."
-              />
-            </div>
-
-            <fieldset disabled className="mt-6 opacity-60">
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <label className="block">
-                  <span className="text-sm font-medium text-white">Clip start</span>
-                  <input
-                    type="text"
-                    placeholder="0:00"
-                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
-                  />
-                </label>
-                <label className="block">
-                  <span className="text-sm font-medium text-white">Clip end</span>
-                  <input
-                    type="text"
-                    placeholder="0:20"
-                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
-                  />
-                </label>
-              </div>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  disabled
-                  className="cursor-not-allowed rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white opacity-40"
-                >
-                  Regenerate
-                </button>
-                <button
-                  type="button"
-                  disabled
-                  className="cursor-not-allowed rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white opacity-40"
-                >
-                  Exclude
-                </button>
-                <button
-                  type="button"
-                  disabled
-                  className="cursor-not-allowed rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white opacity-40"
-                >
-                  Reorder
-                </button>
-              </div>
-              <p className="mt-3 text-xs text-[var(--color-text-muted)]">
-                Clip list, edit start/end, regenerate, exclude and reorder all need
-                generated clips (Phase 3).
-              </p>
-            </fieldset>
-
-            <div className="mt-6 flex justify-between">
+            <div className="mt-6 flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={() => navigate('/jobs')}
+                className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
+              >
+                Open my jobs <ArrowRight className="h-4 w-4" />
+              </button>
               <button
                 type="button"
                 onClick={() => goTo(3)}
                 className="flex items-center gap-2 rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white hover:bg-ink-border"
               >
-                <ArrowLeft className="h-4 w-4" /> Back
-              </button>
-              <button
-                type="button"
-                disabled
-                className="flex cursor-not-allowed items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white opacity-40"
-              >
-                Continue to Ship <ArrowRight className="h-4 w-4" />
+                <ArrowLeft className="h-4 w-4" /> Back to Process
               </button>
             </div>
           </div>
@@ -1429,106 +1512,32 @@ export function ClipperPage() {
           <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
             <h2 className="text-lg font-semibold text-white">Ship your clips</h2>
             <p className="mt-1 text-sm text-[var(--color-text-muted)]">
-              Export finished clips or share them to TikTok, Instagram and YouTube.
-              Export needs generated clips, which do not exist yet.
+              Finished clips are downloaded and exported from the job page
+              — single clips, all clips, or a ZIP from the Export Center.
+              This app does not post to TikTok, Instagram or YouTube for
+              you; you upload the downloaded clips yourself.
             </p>
-            <div className="mt-4">
-              <NotImplemented phase="Phase 3" detail="needs generated clips" />
-            </div>
-
-            <fieldset disabled className="mt-6 grid grid-cols-1 gap-6 opacity-60 md:grid-cols-2">
-              <fieldset>
-                <legend className="text-sm font-medium text-white">Export scope</legend>
-                <div className="mt-2 space-y-2 text-sm text-white">
-                  <label className="flex items-center gap-2">
-                    <input type="radio" name="export-scope" defaultChecked /> One clip
-                  </label>
-                  <label className="flex items-center gap-2">
-                    <input type="radio" name="export-scope" /> Selected clips
-                  </label>
-                  <label className="flex items-center gap-2">
-                    <input type="radio" name="export-scope" /> All clips
-                  </label>
-                </div>
-              </fieldset>
-              <label className="block">
-                <span className="text-sm font-medium text-white">Format</span>
-                <select className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white">
-                  <option>MP4</option>
-                </select>
-              </label>
-              <fieldset>
-                <legend className="text-sm font-medium text-white">Quality</legend>
-                <div className="mt-2 space-y-2 text-sm text-white">
-                  <label className="flex items-center gap-2">
-                    <input type="radio" name="export-quality" /> Draft
-                  </label>
-                  <label className="flex items-center gap-2">
-                    <input type="radio" name="export-quality" defaultChecked /> Standard
-                  </label>
-                  <label className="flex items-center gap-2">
-                    <input type="radio" name="export-quality" /> High
-                  </label>
-                </div>
-              </fieldset>
-              <fieldset>
-                <legend className="text-sm font-medium text-white">Captions</legend>
-                <div className="mt-2 space-y-2 text-sm text-white">
-                  <label className="flex items-center gap-2">
-                    <input type="radio" name="export-captions" defaultChecked /> Burned in
-                  </label>
-                  <label className="flex items-center gap-2">
-                    <input type="radio" name="export-captions" /> Clean (no captions)
-                  </label>
-                </div>
-              </fieldset>
-              <label className="flex items-center gap-2 text-sm font-medium text-white md:col-span-2">
-                <input type="checkbox" /> Download as ZIP
-              </label>
-            </fieldset>
-
-            <div className="mt-6 flex flex-wrap justify-center gap-2 opacity-60">
+            <div className="mt-6 flex flex-wrap gap-3">
               <button
                 type="button"
-                disabled
-                className="cursor-not-allowed rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white"
+                onClick={() => navigate('/jobs')}
+                className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
               >
-                Share to TikTok
+                Open my jobs <ArrowRight className="h-4 w-4" />
               </button>
               <button
                 type="button"
-                disabled
-                className="cursor-not-allowed rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white"
+                onClick={() => navigate('/exports')}
+                className="flex items-center gap-2 rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white hover:bg-ink-border"
               >
-                Share to Instagram
+                Export Center
               </button>
-              <button
-                type="button"
-                disabled
-                className="cursor-not-allowed rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white"
-              >
-                Share to YouTube
-              </button>
-            </div>
-            <p className="mt-3 text-center text-xs text-[var(--color-text-muted)]">
-              Export options and sharing need generated clips (Phase 3). No
-              download links exist yet.
-            </p>
-
-            <div className="mt-6 flex justify-center gap-3">
               <button
                 type="button"
                 onClick={() => goTo(4)}
                 className="flex items-center gap-2 rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white hover:bg-ink-border"
               >
                 <ArrowLeft className="h-4 w-4" /> Back
-              </button>
-              <button
-                type="button"
-                disabled
-                className="cursor-not-allowed rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white opacity-40"
-              >
-                Export Clips
               </button>
             </div>
           </div>

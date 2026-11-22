@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   AlertTriangle,
   ArrowRight,
@@ -132,6 +132,7 @@ const numberClass =
 export function NewJobPage() {
   const { user, token } = useAuth()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const inputRef = useRef<HTMLInputElement>(null)
 
   // Source
@@ -139,6 +140,20 @@ export function NewJobPage() {
   const [file, setFile] = useState<File | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const [link, setLink] = useState('')
+
+  // Link prefill: the Create Project cards and the Clipper wizard send
+  // the user here with ?source=link&url=… — open the link tab with the
+  // URL already pasted. Only on first mount.
+  useEffect(() => {
+    if (searchParams.get('source') === 'link') {
+      const url = searchParams.get('url') ?? ''
+      if (url) {
+        setSourceTab('link')
+        setLink(url)
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Settings — dropdowns/toggles only
   const [platform, setPlatform] = useState<'tiktok' | 'instagram'>('tiktok')
