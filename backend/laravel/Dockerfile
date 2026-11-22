@@ -11,14 +11,18 @@
 FROM php:8.3-apache
 
 # System libraries needed by the PHP extensions below.
-# NOTE: libsqlite3-dev is REQUIRED by the sqlite3 extension
-# (docker-php-ext-install fails without it: "Package 'sqlite3',
-# required by 'virtual:world', not found" — broke the first Render
-# build, 2026-11-22). Do not remove it while pdo_sqlite/sqlite3
-# are installed below.
+# NOTE (2026-11-22): do NOT add sqlite extensions back. The
+# `sqlite3` extension broke the Render build twice in a row — first
+# "Package 'sqlite3' not found" (missing libsqlite3-dev), then
+# "Cannot find config.m4" from phpize during docker-php-ext-install.
+# The production image does not need SQLite at all: Render runs
+# PostgreSQL (DB_CONNECTION=pgsql is set in the dashboard), and no
+# code in app/, routes/ or the seeders touches SQLite — it is only
+# the local-dev default and the phpunit driver, neither of which
+# runs inside this image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq-dev \
-        libsqlite3-dev \
+        libcurl4-openssl-dev \
         libzip-dev \
         libpng-dev \
         libonig-dev \
@@ -27,11 +31,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # PHP extensions the app needs:
-#   pdo_sqlite + sqlite3 — local SQLite default (spec §5)
 #   pdo_pgsql             — Render's free PostgreSQL database
 #   mbstring, xml, curl, zip, gd — Laravel + file handling
 RUN docker-php-ext-install -j"$(nproc)" \
-        pdo_sqlite sqlite3 pdo_pgsql mbstring xml curl zip gd
+        pdo_pgsql mbstring xml curl zip gd
 
 # Upload limits: the app accepts multi-hundred-MB video uploads, but PHP
 # defaults cap uploads at 2M (upload_max_filesize) and POST bodies at 8M
