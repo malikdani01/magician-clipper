@@ -103,7 +103,7 @@ time — changing them does nothing until a rebuild).
 
 ## 7. Reminders to set at deploy time
 
-- **Day 89: free PostgreSQL expires after 90 days.** Before then,
+- **Day 29: free PostgreSQL expires after 30 days (live DB expires 2026-12-22).** Before then,
   upgrade the database or `pg_dump` + recreate it (then update `DB_URL`).
 - Uploaded videos / rendered clips on Render are **ephemeral** (lost on
   every redeploy) — download promptly; the chat copies are the backup.

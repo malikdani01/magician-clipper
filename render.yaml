@@ -5,8 +5,9 @@
 #   1. magician-clipper-api — Laravel API, Docker, Free plan
 #      (PHP 8.3 + Apache; Dockerfile: backend/laravel/Dockerfile).
 #   2. magician-clipper-web — React frontend, Static Site (free).
-#   3. magician-clipper-db  — PostgreSQL, Free plan (90-day expiry —
-#      Render's free databases expire after 90 days; see the doc).
+#   3. magician-clipper-db  — PostgreSQL, Free plan (30-day expiry —
+#      Render's free databases expire after 30 days; the live one
+#      created 2026-11-22 expires 2026-12-22. See the doc).
 #
 # What it does NOT create:
 #   - The Python video engine. Heavy video processing runs on the
@@ -167,8 +168,8 @@ services:
 
 databases:
   # Free PostgreSQL: 1 GB storage. WARNING — Render's free databases
-  # expire after 90 days (the data is deleted unless you upgrade).
-  # That is a Render Free limit, not an app limit: before day 90,
+  # expire after 30 days (the data is deleted unless you upgrade).
+  # That is a Render Free limit, not an app limit: before day 30,
   # either upgrade the database or export the data (pg_dump) and
   # recreate it. User accounts and projects live here — without it,
   # a redeploy would wipe them (ephemeral disk).

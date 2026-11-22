@@ -25,7 +25,7 @@ Related files:
 |---|---|---|
 | React frontend (`apps/web`) | Yes | Static Site (free, no instance hours) |
 | Laravel API (`backend/laravel`) | Yes | Docker Web Service, Free plan (PHP 8.3 + Apache) |
-| PostgreSQL (users, projects, jobs) | Yes | Render free database (1 GB, **expires after 90 days** — see §6) |
+| PostgreSQL (users, projects, jobs) | Yes | Render free database (1 GB, **expires after 30 days** — see §6) |
 | Python video engine (`services/video-engine`) | **No** | Runs on the separate Muse worker (dev VM). See §5. |
 | Queue worker (`php artisan queue:work`) | **No** | Background workers are not available on the Free plan. See §6. |
 | Uploaded videos / rendered clips | Ephemeral only | Local disk inside the container; **lost on every deploy**. See §7. |
@@ -329,7 +329,7 @@ time — limits change):
 | **512 MB RAM** | Fine for the Laravel API + Apache. Not enough for the video engine, Whisper, or large in-memory file handling — another reason the engine stays off Render. Uploads are capped by `CLIPPER_MAX_UPLOAD_MB` (4096 MB default in `backend/laravel/.env.example`) — a 4 GB upload would OOM the instance; lower it for the hosted deployment if you enable uploads in Phase 3. |
 | **750 instance hours / month** (shared across Free web services) | One always-on Free web service ≈ 744 h/month — just inside the allowance. The API is the only web service in this Blueprint; the static site and the database do not consume instance hours. **Do not add a second Free web service** (e.g. a queue worker) or you will exceed 750 h and the services stop until next month. |
 | **Ephemeral filesystem** | Everything written under `storage/` (uploads, clips, exports, SQLite file, logs, file sessions, file cache) disappears on every deploy and restart. That is why the Blueprint uses Postgres for data, not the SQLite default. File sessions also reset on redeploy (users stay logged in — Sanctum uses bearer tokens, not sessions — but any file-session state is lost). |
-| **Free PostgreSQL expires after 90 days** | Render deletes free databases 90 days after creation. Before day 90: upgrade to paid, or `pg_dump` the data and recreate the database (Render will give it a new connection string — update `DB_URL` in the API service). Set a calendar reminder at deploy time. 1 GB storage is plenty for users/projects/jobs metadata (no media is stored in the DB). |
+| **Free PostgreSQL expires after 30 days** | Render deletes free databases 30 days after creation (the live one, created 2026-11-22, expires 2026-12-22). Before day 30: upgrade to paid, or `pg_dump` the data and recreate the database (Render will give it a new connection string — update `DB_URL` in the API service). Set a calendar reminder at deploy time. 1 GB storage is plenty for users/projects/jobs metadata (no media is stored in the DB). |
 | **No background workers / cron on Free** | `QUEUE_CONNECTION=database` is set, but no `queue:work` process runs, so any job dispatched to the database queue will sit in `pending` forever. Phase 3's pipeline must either run synchronously, be driven by the external Muse worker, or wait for a paid worker. Do not expect "Process" to work on Render Free. |
 | **100 GB/month outbound bandwidth** | Plenty for an API + static site. Video files are NOT served from Render (no engine, ephemeral disk), so the big files never count against this. |
 | **7-day log retention, no persistent disk, no SSH** | Debugging is via the Render dashboard logs only. `php artisan` commands cannot be run interactively on the instance — use `preDeployCommand` or a one-off Job (paid) for migrations/maintenance. |
@@ -429,7 +429,7 @@ break the deploy — but the two templates disagree, and the backend
 one should not be copied verbatim for production. The doc's tables
 above are the authority for Render, not either `.env.example`.
 
-### F6 — Free Postgres 90-day expiry
+### F6 — Free Postgres 30-day expiry
 
 See §6. The Blueprint creates the database, but nobody will remind
 you on day 89. Set the reminder when you deploy.

@@ -11,8 +11,14 @@
 FROM php:8.3-apache
 
 # System libraries needed by the PHP extensions below.
+# NOTE: libsqlite3-dev is REQUIRED by the sqlite3 extension
+# (docker-php-ext-install fails without it: "Package 'sqlite3',
+# required by 'virtual:world', not found" — broke the first Render
+# build, 2026-11-22). Do not remove it while pdo_sqlite/sqlite3
+# are installed below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq-dev \
+        libsqlite3-dev \
         libzip-dev \
         libpng-dev \
         libonig-dev \
@@ -63,6 +69,7 @@ RUN chown -R www-data:www-data storage bootstrap/cache \
 # Render environment variables (see render.yaml). Render's filesystem
 # is ephemeral: anything written under storage/ disappears on redeploy.
 #
-# Apache listens on 80 by default; Render routes traffic to $PORT
-# (default 10000), so rebind at container start.
-CMD ["sh", "-c", "sed -i \"s/Listen 80/Listen ${PORT:-80}/\" /etc/apache2/ports.conf && apache2-foreground"]
+# Container start: docker-entrypoint.sh runs pending migrations +
+# the idempotent seeder, rebinds Apache to $PORT, then starts Apache.
+RUN chmod +x docker-entrypoint.sh
+CMD ["sh", "./docker-entrypoint.sh"]
