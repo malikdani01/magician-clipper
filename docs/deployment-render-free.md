@@ -269,7 +269,9 @@ then):**
    the same value to both sides).
 2. Tell Muse the live API URL (e.g.
    `https://magician-clipper-api.onrender.com`). The worker then runs
-   with `LARAVEL_URL=<that URL>/api/v1` and `MUSE_JOB_API_KEY=<the
+   with `LARAVEL_URL=<that URL>` (BARE host — the worker appends
+   `/api/v1` itself; with `/api/v1` in the URL the poll hits
+   `/api/v1/api/v1` and 404s, seen 2026-11-23) and `MUSE_JOB_API_KEY=<the
    key>` and a scheduled check polls `GET /api/v1/muse/jobs?status=queued`
    for new jobs. Each new job is reported in this chat (job number +
    settings + notes), the worker renders it, and the finished clips

@@ -93,7 +93,9 @@ time — changing them does nothing until a rebuild).
 
 1. Set `MUSE_JOB_API_KEY` on Render = the worker's key (§4 — already
    done there, just confirm it matches).
-2. Worker runs with `LARAVEL_URL=<live API>/api/v1` +
+2. Worker runs with `LARAVEL_URL=<live API>` (BARE host — the worker
+   appends `/api/v1` itself; with `/api/v1` in the URL the poll hits
+   `/api/v1/api/v1` and 404s, seen 2026-11-23) +
    `MUSE_JOB_API_KEY=<same key>`; scheduled check polls
    `GET /api/v1/muse/jobs?status=queued`.
 3. Smoke-test with one real hosted job (upload or link): submit on the
