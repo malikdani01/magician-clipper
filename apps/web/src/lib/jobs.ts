@@ -22,6 +22,22 @@ import { API_URL, getToken } from './api'
 
 export type JobStatus = 'queued' | 'processing' | 'ready' | 'failed' | 'cancelled'
 
+/** Clip layout (9:16 only — other ratios fall back to centre crop). */
+export type ClipLayout =
+  | 'center_crop'
+  | 'split'
+  | 'pip_facecam'
+  | 'blur_fill'
+  | 'streamer_full'
+
+export const LAYOUT_LABELS: Record<ClipLayout, string> = {
+  center_crop: 'Centre crop (full frame)',
+  split: 'Split — streamer top, gameplay bottom',
+  pip_facecam: 'Gameplay full + facecam corner',
+  blur_fill: 'Blurred background fill',
+  streamer_full: 'Streamer full frame',
+}
+
 export interface JobSettings {
   platform: 'tiktok' | 'instagram'
   aspect_ratio: '9:16' | '16:9' | '1:1' | '4:5'
@@ -39,7 +55,7 @@ export interface JobSettings {
   campaign_requirements: string | null
   /** Free-text notes for Muse (campaign brief, extra instructions). */
   notes?: string | null
-  layout: 'center_crop' | 'split'
+  layout: ClipLayout
   content_type: string
   quality: 'draft' | 'standard' | 'high'
   source_type: 'upload' | 'link'
@@ -113,7 +129,7 @@ export interface CreateJobInput {
   campaignRequirements?: string
   /** Free-text notes for Muse (campaign brief, extra instructions). */
   notes?: string
-  layout: 'center_crop' | 'split'
+  layout: ClipLayout
   contentType: string
   quality: 'draft' | 'standard' | 'high'
 }

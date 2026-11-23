@@ -19,7 +19,7 @@ import {
   getCaptionStyle,
   isCaptionStyleId,
 } from '../lib/captionStyles'
-import { createJob } from '../lib/jobs'
+import { createJob, LAYOUT_LABELS, type ClipLayout } from '../lib/jobs'
 import { formatBytes } from '../lib/format'
 import { useAuth } from '../state/auth'
 
@@ -175,7 +175,7 @@ export function NewJobPage() {
   // Optional for every job; campaign jobs already have their own
   // required requirements box above.
   const [notes, setNotes] = useState('')
-  const [layout, setLayout] = useState<'center_crop' | 'split'>('center_crop')
+  const [layout, setLayout] = useState<ClipLayout>('center_crop')
   const [contentType, setContentType] = useState('general')
   const [quality, setQuality] = useState<'draft' | 'standard' | 'high'>('standard')
 
@@ -688,11 +688,14 @@ export function NewJobPage() {
                   <span className="text-sm font-medium text-white">Layout (9:16 only)</span>
                   <select
                     value={layout}
-                    onChange={(e) => setLayout(e.target.value as 'center_crop' | 'split')}
+                    onChange={(e) => setLayout(e.target.value as ClipLayout)}
                     className={`${selectClass} mt-2`}
                   >
-                    <option value="center_crop">Centre crop (full frame)</option>
-                    <option value="split">Split — streamer top, gameplay bottom</option>
+                    {(Object.keys(LAYOUT_LABELS) as ClipLayout[]).map((id) => (
+                      <option key={id} value={id}>
+                        {LAYOUT_LABELS[id]}
+                      </option>
+                    ))}
                   </select>
                 </label>
               ) : null}
@@ -801,7 +804,7 @@ export function NewJobPage() {
                 ['Caption style', captionsEnabled ? getCaptionStyle(captionStyle).name : 'Off'],
                 ['On-screen text', onScreenText ? 'On' : 'Off'],
                 ['Job type', jobType === 'myself' ? 'For myself' : 'For a campaign'],
-                ['Layout', aspectRatio === '9:16' ? (layout === 'split' ? 'Split (streamer top / gameplay bottom)' : 'Centre crop') : 'Centre crop'],
+                ['Layout', aspectRatio === '9:16' ? LAYOUT_LABELS[layout] : 'Centre crop'],
                 ['Quality', quality === 'draft' ? 'Draft preview' : quality === 'standard' ? 'Standard' : 'High quality'],
               ].map(([label, value]) => (
                 <div key={label} className="flex items-start justify-between gap-3">

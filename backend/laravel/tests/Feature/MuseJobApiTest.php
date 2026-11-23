@@ -159,6 +159,30 @@ class MuseJobApiTest extends TestCase
             ->assertStatus(422);
     }
 
+    public function test_all_layouts_are_accepted_on_job_create(): void
+    {
+        // Job creation is throttled (6/min per user), so each layout gets
+        // its own user — the point is the layout validation, not the limit.
+        foreach (['center_crop', 'split', 'pip_facecam', 'blur_fill', 'streamer_full'] as $layout) {
+            $user = User::factory()->create();
+            $job = $this->createLinkJob($user, ['layout' => $layout]);
+
+            $this->assertSame($layout, $job['settings']['layout']);
+        }
+
+        // And an unknown layout is still rejected.
+        $user = User::factory()->create();
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/jobs', array_merge(
+                $this->validSettings(),
+                [
+                    'source_url' => 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+                    'layout' => 'not_a_layout',
+                ]
+            ))
+            ->assertStatus(422);
+    }
+
     public function test_create_job_requires_exactly_one_source(): void
     {
         $user = User::factory()->create();

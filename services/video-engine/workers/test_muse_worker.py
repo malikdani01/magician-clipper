@@ -11,6 +11,7 @@ Covers the Stronger Clipper round (2026-11-23):
   * per-clip failure isolation in process_job (one bad clip no longer
     fails the whole job; the job ends Ready with a note).
 """
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -242,6 +243,93 @@ class ListRerendersTests(unittest.TestCase):
         api = self._api_with_status(500, '{"message": "boom"}')
         with self.assertRaises(RuntimeError):
             api.list_rerenders()
+
+
+class LayoutChainsTests(unittest.TestCase):
+    """New layouts (2026-11-23): pip_facecam, blur_fill, streamer_full —
+    all 9:16-only like split, with honest fallbacks. The face box is
+    injected, so no ffmpeg/OpenCV runs here."""
+
+    SRC = Path("no-such-file.mp4")  # never read: face detection is injected
+    BOX = (0.20, 0.30, 0.05, 0.08)  # small inset face, left of centre
+
+    def _chains(self, layout, ratio="9:16", face_box=BOX, sw=576, sh=1280):
+        return muse_worker.build_layout_chains(
+            self.SRC, sw, sh, 1080, 1920, ratio, layout, 10.0, 30.0,
+            face_box=face_box)
+
+    def _joined(self, *args, **kwargs):
+        return ";".join(self._chains(*args, **kwargs))
+
+    def test_split_unchanged_with_face(self):
+        joined = self._joined("split")
+        self.assertIn("vstack", joined)
+        self.assertIn("scale=1080:864", joined)
+        self.assertIn("scale=1080:1056", joined)
+
+    def test_split_without_face_uses_top_45_fallback(self):
+        self.assertIn("crop=iw:ih*0.45:0:0",
+                      self._joined("split", face_box=None))
+
+    def test_pip_facecam_overlays_inset_top_right(self):
+        joined = self._joined("pip_facecam")
+        self.assertIn("scale=360:288", joined)
+        self.assertIn("drawbox=", joined)
+        self.assertIn("overlay=696:24", joined)
+
+    def test_pip_facecam_without_face_falls_back_to_centre_crop(self):
+        joined = self._joined("pip_facecam", face_box=None)
+        self.assertNotIn("overlay=", joined)
+        self.assertIn("crop=iw:iw/0.562500", joined)
+
+    def test_blur_fill_uses_blurred_background(self):
+        joined = self._joined("blur_fill")
+        self.assertIn("gblur=sigma=40", joined)
+        self.assertIn("overlay=(W-w)/2:(H-h)/2", joined)
+
+    def test_streamer_full_cover_scales_the_inset(self):
+        joined = self._joined("streamer_full")
+        self.assertIn("force_original_aspect_ratio=increase,crop=1080:1920",
+                      joined)
+        self.assertNotIn("vstack", joined)
+
+    def test_streamer_full_without_face_uses_top_45_fallback(self):
+        self.assertIn("crop=iw:ih*0.45:0:0",
+                      self._joined("streamer_full", face_box=None))
+
+    def test_unknown_layout_falls_back_to_centre_crop(self):
+        joined = self._joined("something_new")
+        self.assertNotIn("vstack", joined)
+        self.assertNotIn("overlay=", joined)
+        self.assertIn("crop=iw:iw/0.562500", joined)
+
+    def test_split_at_16_9_falls_back_to_centre_crop(self):
+        joined = self._joined("split", ratio="16:9")
+        self.assertNotIn("vstack", joined)
+
+
+class LayoutRenderTests(unittest.TestCase):
+    """One real ffmpeg render proves the new filter graphs actually run
+    (a typo in a filter name only fails at render time)."""
+
+    def test_blur_fill_renders_a_real_clip(self):
+        demo = (Path(__file__).resolve().parents[3]
+                / "demo" / "demo-source-3min.mp4")
+        if not demo.exists():
+            self.skipTest(f"demo source missing: {demo}")
+        info = muse_worker.probe_summary(demo)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            out = tmp / "blur.mp4"
+            settings = _settings(layout="blur_fill", captions_enabled=False)
+            muse_worker.render_clip(demo, {"start": 10.0, "end": 15.0},
+                                    settings, [], out, info, tmp)
+            self.assertTrue(out.exists())
+            self.assertGreater(out.stat().st_size, 0)
+            rendered = muse_worker.probe_summary(out)
+            self.assertEqual((rendered["width"], rendered["height"]),
+                             (1080, 1920))
+            self.assertAlmostEqual(rendered["duration"], 5.0, delta=0.5)
 
 
 if __name__ == "__main__":

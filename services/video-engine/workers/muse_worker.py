@@ -1827,6 +1827,137 @@ def face_profile(source: Path, duration: float, step: float = 3.0) -> list[tuple
 # Rendering
 # ---------------------------------------------------------------------------
 
+_DETECT_FACE = object()  # sentinel: build_layout_chains detects the face box itself
+
+
+def _center_crop_filter(sw: int, sh: int, tw: int, th: int) -> str:
+    """Crop-to-cover filter (no stretch) for the requested output size."""
+    src_ar = sw / sh if sh else 16 / 9
+    target_ar = tw / th
+    if src_ar > target_ar:
+        return f"crop=ih*{target_ar:.6f}:ih,scale={tw}:{th}"
+    return f"crop=iw:iw/{target_ar:.6f},scale={tw}:{th}"
+
+
+def _facecam_inset_crop(box, sw: int, sh: int) -> str | None:
+    """Crop filter for the facecam inset around a detected face box
+    (fx, fy, fw, fh as fractions of the frame) — the same estimate the
+    split layout uses: ~3x the face width, 0.6x as tall. None when no box."""
+    if box is None:
+        return None
+    fx, fy, fw, fh = box
+    top_w = int(min(sw, max(fw * sw * 3.0, sw * 0.25)))
+    top_h_src = int(top_w * 0.8)
+    top_x = int(min(max(fx * sw - top_w / 2, 0), max(0, sw - top_w)))
+    top_y = int(min(max(fy * sh - top_h_src * 0.45, 0), max(0, sh - top_h_src)))
+    return f"crop={top_w}:{top_h_src}:{top_x}:{top_y}"
+
+
+def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
+                        ratio: str, layout: str, start: float, duration: float,
+                        face_box=_DETECT_FACE) -> list[str]:
+    """FFmpeg filter chains turning [0:v] into [v0] for the job's layout.
+
+    Layouts (all 9:16-only, like split — any other ratio, or an unknown
+    layout, falls back to centre crop):
+      * split — streamer top / gameplay bottom, true split (864 + 1056).
+      * pip_facecam — gameplay full-frame, facecam inset overlaid top-right.
+      * blur_fill — blurred cover background + sharp contain-fit video.
+      * streamer_full — the streamer region fills the whole frame.
+    ``face_box`` is a detected (fx, fy, fw, fh) box, None for "no face"
+    (the face layouts fall back honestly), or the default sentinel to
+    detect it here from 5 samples across the clip window. Callers and
+    tests may inject a box instead of running detection.
+    """
+    layout = (layout or "center_crop").lower()
+    box = None
+    if layout in ("split", "pip_facecam", "streamer_full") and ratio == "9:16":
+        box = (detect_face_box(
+            source, [start + duration * f for f in (0.15, 0.3, 0.5, 0.7, 0.85)], sw, sh)
+            if face_box is _DETECT_FACE else face_box)
+
+    if layout == "split" and ratio == "9:16":
+        # Streamer-top / gameplay-bottom, TRUE split (reference style):
+        # top = the facecam inset, full-fit; bottom = gameplay, full-fit,
+        # aspect-matched (no squeeze/stretch) and shifted away from the
+        # facecam inset when it would overlap. Top panel 864, bottom 1056.
+        top_h, bot_h = 864, 1056
+        bot_h_src = int(sh * 0.55)
+        bot_w_src = int(bot_h_src * tw / bot_h)
+        bot_w_src = min(bot_w_src, sw)
+        bot_h_src = int(bot_w_src * bot_h / tw)
+        bot_y = sh - bot_h_src
+        if box is not None:
+            fx, fy, fw, fh = box
+            # Facecam inset estimate: ~3x the face width, 0.6x as tall.
+            inset_w = int(min(sw, max(fw * sw * 3.0, sw * 0.25)))
+            inset_h = int(inset_w * 0.6)
+            top_crop = _facecam_inset_crop(box, sw, sh)
+            # Bottom: centred gameplay crop, shifted away from the inset
+            # only when the inset actually overlaps it — and only when the
+            # detected face is a SMALL inset face (fw < 0.12). A big
+            # full-facecam face has no small inset to avoid; shifting on
+            # its (huge, meaningless) inset estimate would push the real
+            # inset INTO the bottom crop.
+            bot_x = (sw - bot_w_src) // 2
+            if fw < 0.12:
+                inset_x0 = fx * sw - inset_w / 2
+                inset_x1 = inset_x0 + inset_w
+                inset_y1 = fy * sh + inset_h / 2
+                if inset_y1 > bot_y and inset_x0 < bot_x + bot_w_src and inset_x1 > bot_x:
+                    bot_x = sw - bot_w_src if fx < 0.5 else 0
+            bot_x = int(min(max(bot_x, 0), max(0, sw - bot_w_src)))
+            bot_crop = f"crop={bot_w_src}:{bot_h_src}:{bot_x}:{bot_y}"
+        else:
+            # Frame-analysis fallback: top 45% of the frame as facecam.
+            top_crop = "crop=iw:ih*0.45:0:0"
+            bot_crop = f"crop={bot_w_src}:{bot_h_src}:{(sw - bot_w_src) // 2}:{bot_y}"
+        return [f"[0:v]split=2[ts][bs];"
+                f"[ts]{top_crop},scale=1080:{top_h}[top];"
+                f"[bs]{bot_crop},scale=1080:{bot_h}[bot];"
+                f"[top][bot]vstack[v0]"]
+
+    if layout == "pip_facecam" and ratio == "9:16":
+        # Gameplay fills the whole frame; the facecam inset sits top-right
+        # with a thin border. No face found -> honest centre-crop fallback.
+        ow = tw // 3
+        oh = int(ow * 0.8)
+        ox, oy = tw - ow - 24, 24
+        face_crop = _facecam_inset_crop(box, sw, sh)
+        if face_crop is None:
+            log.warning("pip_facecam: no face detected in this clip window; "
+                        "falling back to centre crop.")
+            return [f"[0:v]{_center_crop_filter(sw, sh, tw, th)}[v0]"]
+        return [f"[0:v]split=2[base][face];"
+                f"[base]{_center_crop_filter(sw, sh, tw, th)}[bg];"
+                f"[face]{face_crop},scale={ow}:{oh},"
+                f"drawbox=x=0:y=0:w=iw:h=ih:color=white@0.85:t=4[fg];"
+                f"[bg][fg]overlay={ox}:{oy}[v0]"]
+
+    if layout == "blur_fill" and ratio == "9:16":
+        # Landscape source in a vertical frame: blurred cover background
+        # with the sharp video contain-fit on top. No detection needed.
+        return [f"[0:v]split=2[bg][fg];"
+                f"[bg]scale={tw}:{th}:force_original_aspect_ratio=increase,"
+                f"crop={tw}:{th},gblur=sigma=40[bg2];"
+                f"[fg]scale={tw}:{th}:force_original_aspect_ratio=decrease[fg2];"
+                f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2[v0]"]
+
+    if layout == "streamer_full" and ratio == "9:16":
+        # The streamer region fills the whole frame (cover-scaled, no
+        # stretch). No face found -> the top 45% of the frame instead.
+        top_crop = _facecam_inset_crop(box, sw, sh)
+        if top_crop is None:
+            log.info("streamer_full: no face detected in this clip window; "
+                     "using the top 45% of the frame.")
+            top_crop = "crop=iw:ih*0.45:0:0"
+        return [f"[0:v]{top_crop},scale={tw}:{th}:"
+                f"force_original_aspect_ratio=increase,crop={tw}:{th}[v0]"]
+
+    # Centre crop (crop-to-cover for the requested ratio), no stretch.
+    return [f"[0:v]{_center_crop_filter(sw, sh, tw, th)}[v0]"]
+
+
 def render_clip(source: Path, clip: dict, settings: dict,
                 segments: list[dict], out_path: Path,
                 source_info: dict, job_dir: Path) -> Path:
@@ -1862,65 +1993,10 @@ def render_clip(source: Path, clip: dict, settings: dict,
                 captions_is_ass = True
 
     sw, sh = source_info["width"], source_info["height"]
-    src_ar = sw / sh if sh else 16 / 9
-    target_ar = tw / th
 
     # Build the filter graph as a list of "; "-joined filter chains.
-    chains: list[str] = []
-    if layout == "split" and ratio == "9:16":
-        # Streamer-top / gameplay-bottom, TRUE split (reference style):
-        # top = the facecam inset, full-fit; bottom = gameplay, full-fit,
-        # aspect-matched (no squeeze/stretch) and shifted away from the
-        # facecam inset when it would overlap. Top panel 864, bottom 1056.
-        top_h, bot_h = 864, 1056
-        box = detect_face_box(
-            source, [start + duration * f for f in (0.15, 0.3, 0.5, 0.7, 0.85)], sw, sh)
-        bot_h_src = int(sh * 0.55)
-        bot_w_src = int(bot_h_src * tw / bot_h)
-        bot_w_src = min(bot_w_src, sw)
-        bot_h_src = int(bot_w_src * bot_h / tw)
-        bot_y = sh - bot_h_src
-        if box is not None:
-            fx, fy, fw, fh = box
-            # Facecam inset estimate: ~3x the face width, 0.6x as tall.
-            inset_w = int(min(sw, max(fw * sw * 3.0, sw * 0.25)))
-            inset_h = int(inset_w * 0.6)
-            top_w = inset_w
-            top_h_src = int(top_w * 0.8)
-            top_x = int(min(max(fx * sw - top_w / 2, 0), max(0, sw - top_w)))
-            top_y = int(min(max(fy * sh - top_h_src * 0.45, 0), max(0, sh - top_h_src)))
-            top_crop = f"crop={top_w}:{top_h_src}:{top_x}:{top_y}"
-            # Bottom: centred gameplay crop, shifted away from the inset
-            # only when the inset actually overlaps it — and only when the
-            # detected face is a SMALL inset face (fw < 0.12). A big
-            # full-facecam face has no small inset to avoid; shifting on
-            # its (huge, meaningless) inset estimate would push the real
-            # inset INTO the bottom crop.
-            bot_x = (sw - bot_w_src) // 2
-            if fw < 0.12:
-                inset_x0 = fx * sw - inset_w / 2
-                inset_x1 = inset_x0 + inset_w
-                inset_y1 = fy * sh + inset_h / 2
-                if inset_y1 > bot_y and inset_x0 < bot_x + bot_w_src and inset_x1 > bot_x:
-                    bot_x = sw - bot_w_src if fx < 0.5 else 0
-            bot_x = int(min(max(bot_x, 0), max(0, sw - bot_w_src)))
-            bot_crop = f"crop={bot_w_src}:{bot_h_src}:{bot_x}:{bot_y}"
-        else:
-            # Frame-analysis fallback: top 45% of the frame as facecam.
-            top_crop = "crop=iw:ih*0.45:0:0"
-            bot_crop = f"crop={bot_w_src}:{bot_h_src}:{(sw - bot_w_src) // 2}:{bot_y}"
-        chains.append(
-            f"[0:v]split=2[ts][bs];"
-            f"[ts]{top_crop},scale=1080:{top_h}[top];"
-            f"[bs]{bot_crop},scale=1080:{bot_h}[bot];"
-            f"[top][bot]vstack[v0]"
-        )
-    else:
-        # Center-crop (crop-to-cover for the requested ratio), no stretch.
-        if src_ar > target_ar:
-            chains.append(f"[0:v]crop=ih*{target_ar:.6f}:ih,scale={tw}:{th}[v0]")
-        else:
-            chains.append(f"[0:v]crop=iw:iw/{target_ar:.6f},scale={tw}:{th}[v0]")
+    chains = build_layout_chains(source, sw, sh, tw, th, ratio, layout,
+                                 start, duration)
 
     video_label = "[v0]"
     if captions_path is not None:

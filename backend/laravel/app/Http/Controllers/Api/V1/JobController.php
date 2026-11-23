@@ -102,7 +102,7 @@ class JobController extends Controller
             'job_type' => ['sometimes', 'string', Rule::in(['myself', 'campaign'])],
             'campaign_requirements' => ['sometimes', 'nullable', 'string', 'max:5000'],
             'notes' => ['sometimes', 'nullable', 'string', 'max:5000'],
-            'layout' => ['sometimes', 'string', Rule::in(['center_crop', 'split'])],
+            'layout' => ['sometimes', 'string', Rule::in(['center_crop', 'split', 'pip_facecam', 'blur_fill', 'streamer_full'])],
             'content_type' => ['sometimes', 'string', Rule::in(Project::CONTENT_TYPES)],
             'quality' => ['sometimes', 'string', Rule::in(['draft', 'standard', 'high'])],
         ]);
