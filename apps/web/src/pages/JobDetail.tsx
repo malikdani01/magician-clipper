@@ -6,10 +6,12 @@ import {
   Download,
   Film,
   Loader2,
+  Play,
   RotateCcw,
   X,
 } from 'lucide-react'
 import { EmptyState } from '../components/EmptyState'
+import { ClipPlayerModal } from '../components/ClipPlayerModal'
 import { ClipThumbnail } from '../components/ClipThumbnail'
 import { JobStatusPill, jobSummary } from '../components/JobStatusPill'
 import { PageHeader } from '../components/PageHeader'
@@ -207,6 +209,7 @@ export function JobDetailPage() {
   const [acting, setActing] = useState<'cancel' | 'retry' | null>(null)
   const [downloadingId, setDownloadingId] = useState<number | null>(null)
   const [downloadError, setDownloadError] = useState<string | null>(null)
+  const [previewingClip, setPreviewingClip] = useState<JobClip | null>(null)
   const requestRef = useRef(0)
 
   const fetchJob = useCallback(async () => {
@@ -571,6 +574,14 @@ export function JobDetailPage() {
                     />
                     <button
                       type="button"
+                      onClick={() => setPreviewingClip(clip)}
+                      className="flex shrink-0 items-center gap-2 rounded-xl border border-ink-border px-4 py-2.5 text-sm font-semibold text-white hover:bg-ink-panel2"
+                    >
+                      <Play className="h-4 w-4" />
+                      Preview
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => void doDownload(clip)}
                       disabled={downloadingId === clip.id}
                       className="flex shrink-0 items-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-light disabled:cursor-not-allowed disabled:opacity-50"
@@ -591,6 +602,12 @@ export function JobDetailPage() {
               <p role="alert" className="mt-4 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
                 Download failed: {downloadError}
               </p>
+            ) : null}
+            {previewingClip ? (
+              <ClipPlayerModal
+                clip={previewingClip}
+                onClose={() => setPreviewingClip(null)}
+              />
             ) : null}
           </section>
         </div>

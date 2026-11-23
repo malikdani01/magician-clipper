@@ -541,11 +541,11 @@ export async function fetchClipThumbnail(clipId: number): Promise<string | null>
 }
 
 /**
- * Download one clip via its download_url with the bearer token, then
- * trigger a browser download of the real MP4. Returns the exact
- * backend error when the file is not ready / not found.
+ * Fetch one clip's MP4 as a blob via its download_url with the bearer
+ * token. Shared by downloads and the in-app preview player. Returns the
+ * exact backend error when the file is not ready / not found.
  */
-export async function downloadClip(clip: JobClip): Promise<{ ok: true } | { ok: false; error: string }> {
+export async function fetchClipBlob(clip: JobClip): Promise<{ ok: true; blob: Blob } | { ok: false; error: string }> {
   if (!getToken()) {
     return { ok: false, error: 'Sign in to download clips.' }
   }
@@ -565,19 +565,7 @@ export async function downloadClip(clip: JobClip): Promise<{ ok: true } | { ok: 
       }
       return { ok: false, error: detail }
     }
-    const blob = await res.blob()
-    const url = URL.createObjectURL(blob)
-    const safeTitle = (clip.title || `clip-${clip.id}`)
-      .replace(/[^a-zA-Z0-9._-]+/g, '_')
-      .slice(0, 100)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${safeTitle}.mp4`
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    setTimeout(() => URL.revokeObjectURL(url), 60_000)
-    return { ok: true }
+    return { ok: true, blob: await res.blob() }
   } catch (err) {
     return {
       ok: false,
@@ -590,4 +578,26 @@ export async function downloadClip(clip: JobClip): Promise<{ ok: true } | { ok: 
   } finally {
     cancel()
   }
+}
+
+/**
+ * Download one clip via its download_url with the bearer token, then
+ * trigger a browser download of the real MP4. Returns the exact
+ * backend error when the file is not ready / not found.
+ */
+export async function downloadClip(clip: JobClip): Promise<{ ok: true } | { ok: false; error: string }> {
+  const result = await fetchClipBlob(clip)
+  if (!result.ok) return result
+  const url = URL.createObjectURL(result.blob)
+  const safeTitle = (clip.title || `clip-${clip.id}`)
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .slice(0, 100)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${safeTitle}.mp4`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  return { ok: true }
 }

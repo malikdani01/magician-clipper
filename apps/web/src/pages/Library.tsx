@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { Clapperboard, Download, FileVideo, Image, Music, Play, Search, Video } from 'lucide-react'
 import { EmptyState } from '../components/EmptyState'
 import { PageHeader } from '../components/PageHeader'
+import { ClipPlayerModal } from '../components/ClipPlayerModal'
 import { ClipThumbnail } from '../components/ClipThumbnail'
 import { useProjects, getProjectFile, getProjectVideoUrl } from '../state/projects'
 import { downloadClip, listJobs, type Job, type JobClip } from '../lib/jobs'
@@ -37,6 +38,7 @@ export function LibraryPage() {
   const [readyJobs, setReadyJobs] = useState<Job[]>([])
   const [downloadingId, setDownloadingId] = useState<number | null>(null)
   const [downloadError, setDownloadError] = useState<string | null>(null)
+  const [previewingClip, setPreviewingClip] = useState<JobClip | null>(null)
 
   // Ready jobs (with their clips) for the Clips / Thumbnails tabs.
   useEffect(() => {
@@ -293,6 +295,14 @@ export function LibraryPage() {
                       <Download className="h-4 w-4" />
                       {downloadingId === clip.id ? 'Downloading…' : 'Download'}
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => setPreviewingClip(clip)}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-ink-border px-3 py-2 text-sm font-semibold text-white hover:bg-ink-panel2"
+                    >
+                      <Play className="h-4 w-4" />
+                      Preview
+                    </button>
                     <Link
                       to={`/jobs/${clip.jobId}`}
                       className="rounded-xl border border-ink-border px-3 py-2 text-sm font-medium text-white hover:bg-ink-panel2"
@@ -329,6 +339,12 @@ export function LibraryPage() {
           }
         />
       )}
+      {previewingClip ? (
+        <ClipPlayerModal
+          clip={previewingClip}
+          onClose={() => setPreviewingClip(null)}
+        />
+      ) : null}
     </div>
   )
 }
