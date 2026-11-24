@@ -22,8 +22,11 @@ class AdminController extends Controller
      *
      * Also returns the last-30-days daily series (for the Analytics
      * chart), 30-day growth vs the previous 30 days (for the stat-card
-     * sparklines), real feature usage from job settings, live server
-     * resources, and recent jobs/clips for the activity feed.
+     * sparklines), real feature usage from job settings, and recent
+     * jobs/clips for the activity feed. Server CPU/RAM percentages
+     * are deliberately NOT reported: on the hosted container the
+     * host's /proc numbers do not describe this app, so any
+     * percentage would be misleading.
      */
     public function dashboard(Request $request)
     {
@@ -90,8 +93,6 @@ class AdminController extends Controller
             'daily' => $this->dailySeries(),
             // Real feature usage, from job settings (share of all jobs).
             'usage' => $this->jobUsage(),
-            // Live server resources (CPU/RAM/disk %).
-            'resources' => $this->serverResources(),
             // Real sidebar badge counts.
             'nav_counts' => [
                 'processing_jobs' => ProcessingJob::whereNotIn('state', array_merge(
@@ -162,43 +163,6 @@ class AdminController extends Controller
         return [
             'platforms' => $top('platform'),
             'caption_styles' => $top('caption_style'),
-        ];
-    }
-
-    /** Live CPU (1-min load / cores), RAM and disk usage, in percent. Null when unreadable. */
-    private function serverResources(): array
-    {
-        $cpu = null;
-        $ram = null;
-        $disk = null;
-        try {
-            $load = function_exists('sys_getloadavg') ? sys_getloadavg() : false;
-            $cpuinfo = @file_get_contents('/proc/cpuinfo') ?: '';
-            $cores = max(1, substr_count($cpuinfo, 'processor'));
-            if ($load !== false && isset($load[0])) {
-                $cpu = round(min(100, ($load[0] / $cores) * 100), 1);
-            }
-            $meminfo = @file_get_contents('/proc/meminfo') ?: '';
-            if (preg_match('/MemTotal:\s+(\d+)/', $meminfo, $mTotal)
-                && preg_match('/MemAvailable:\s+(\d+)/', $meminfo, $mAvail)
-                && (int) $mTotal[1] > 0) {
-                $ram = round((1 - (int) $mAvail[1] / (int) $mTotal[1]) * 100, 1);
-            }
-        } catch (\Throwable) {
-            // Leave nulls: the UI shows "unavailable", never a fake number.
-        }
-        $diskTotal = @disk_total_space(storage_path('app'));
-        $diskFree = @disk_free_space(storage_path('app'));
-        if ($diskTotal !== false && $diskTotal > 0 && $diskFree !== false) {
-            $disk = round((1 - $diskFree / $diskTotal) * 100, 1);
-        }
-
-        return [
-            'cpu_pct' => $cpu,
-            'ram_pct' => $ram,
-            'disk_pct' => $disk,
-            'disk_total_bytes' => $diskTotal === false ? null : $diskTotal,
-            'disk_free_bytes' => $diskFree === false ? null : $diskFree,
         ];
     }
 

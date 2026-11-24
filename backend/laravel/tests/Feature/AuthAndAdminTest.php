@@ -62,7 +62,7 @@ class AuthAndAdminTest extends TestCase
             ->assertStatus(200)
             ->assertJsonStructure(['users', 'projects', 'clips', 'jobs'])
             ->assertJsonStructure([
-                'daily', 'usage', 'resources', 'nav_counts',
+                'daily', 'usage', 'nav_counts',
                 'recent_jobs', 'recent_clips',
             ]);
     }

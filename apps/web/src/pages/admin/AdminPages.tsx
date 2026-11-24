@@ -26,7 +26,7 @@ import {
 } from 'lucide-react'
 import { API_URL, engineHealth, getToken, laravelHealth } from '../../lib/api'
 import { formatBytes } from '../../lib/format'
-import { AreaChart, RingGauge } from '../../components/charts'
+import { AreaChart } from '../../components/charts'
 import { EmptyState } from '../../components/EmptyState'
 import { NotImplemented } from '../../components/NotImplemented'
 import { PageHeader } from '../../components/PageHeader'
@@ -113,8 +113,6 @@ interface DashboardPayload {
   daily?: DailyRow[]
   /** Real feature usage from job settings (share of all jobs). */
   usage?: { platforms: UsageEntry[]; caption_styles: UsageEntry[] }
-  /** Live server resources, in percent (null when unreadable). */
-  resources?: { cpu_pct: number | null; ram_pct: number | null; disk_pct: number | null }
   nav_counts?: { processing_jobs: number; failed_jobs: number }
   recent_users: AdminUserRow[]
   recent_projects: AdminProjectRow[]
@@ -752,15 +750,10 @@ export function AdminDashboardPage() {
             </div>
 
             <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
-              <h2 className="text-lg font-semibold text-white">Server Resource Usage</h2>
+              <h2 className="text-lg font-semibold text-white">Server Status</h2>
               <p className="mt-1 text-sm text-[var(--color-text-muted)]">
-                Live CPU, RAM and disk on this server
+                Server CPU/RAM percentages are not measured on the hosted container — the host&rsquo;s numbers do not describe this app.
               </p>
-              <div className="mt-5 flex items-start justify-around">
-                <RingGauge value={data.resources?.cpu_pct ?? null} color="#8B5CF6" label="CPU" />
-                <RingGauge value={data.resources?.ram_pct ?? null} color="#3B82F6" label="RAM" />
-                <RingGauge value={data.resources?.disk_pct ?? null} color="#22C55E" label="Storage" />
-              </div>
               <p className="mt-5 flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
                 <span className={`h-2 w-2 rounded-full ${engine?.ok ? 'bg-emerald-400' : 'bg-amber-400'}`} />
                 {engine === null

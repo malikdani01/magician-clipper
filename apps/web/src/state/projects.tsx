@@ -192,7 +192,7 @@ function persistProjects(projects: ProjectRecord[]): void {
  * maps to completed and failed maps back to draft (the failure detail
  * is not representable here; it is not invented either).
  */
-function mapLaravelStatus(status: string): ProjectRecord['status'] {
+export function mapLaravelStatus(status: string): ProjectRecord['status'] {
   if (status === 'processing') return 'processing'
   if (status === 'ready') return 'completed'
   return 'draft'
@@ -254,8 +254,25 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
             }
             const merged = [...current]
             for (const lr of laravelRecords) {
-              if (lr.laravelId !== null && !byLaravelId.has(lr.laravelId)) {
+              if (lr.laravelId === null) continue
+              const existing = byLaravelId.get(lr.laravelId)
+              if (!existing) {
                 merged.push(lr)
+              } else {
+                // The server is the source of truth for a job-linked
+                // project's status: refresh it from the server row so a
+                // finished job stops showing as "Processing" forever.
+                // Every local-only field (title, fileName, fileSize, spec,
+                // jobId, trim) stays exactly as-is — the server row has
+                // none of those.
+                const idx = merged.findIndex((p) => p.id === existing.id)
+                if (idx >= 0) {
+                  merged[idx] = {
+                    ...existing,
+                    status: lr.status,
+                    updatedAt: lr.updatedAt,
+                  }
+                }
               }
             }
             merged.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))

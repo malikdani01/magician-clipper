@@ -30,6 +30,7 @@ import {
   type JobClip,
 } from '../lib/jobs'
 import { useAuth } from '../state/auth'
+import { mapLaravelStatus, useProjects } from '../state/projects'
 
 const POLL_MS = 5000
 
@@ -202,6 +203,7 @@ export function JobDetailPage() {
   const { id } = useParams<{ id: string }>()
   const jobId = Number(id)
   const { user, loading: authLoading } = useAuth()
+  const { projects, updateProject } = useProjects()
   const [job, setJob] = useState<Job | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -245,6 +247,18 @@ export function JobDetailPage() {
     const timer = setInterval(() => void fetchJob(), POLL_MS)
     return () => clearInterval(timer)
   }, [job?.status, fetchJob])
+
+  // When the job reaches a terminal state, refresh its project's status
+  // in the store so Dashboard / My Projects flip without a reload. The
+  // status guard makes this a no-op once the store already agrees.
+  useEffect(() => {
+    if (!job) return
+    if (job.status !== 'ready' && job.status !== 'failed') return
+    const project = projects.find((p) => p.laravelId === job.project_id)
+    if (!project) return
+    const next = mapLaravelStatus(job.status)
+    if (project.status !== next) updateProject(project.id, { status: next })
+  }, [job, projects, updateProject])
 
   const doCancel = async () => {
     if (!job) return
