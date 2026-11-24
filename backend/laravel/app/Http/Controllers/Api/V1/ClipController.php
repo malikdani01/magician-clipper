@@ -65,18 +65,29 @@ class ClipController extends Controller
 
     /**
      * GET /api/v1/clips/{clip}/download — stream the rendered clip file.
-     * Ownership is enforced (ClipPolicy::view); a 'ready' clip without a
-     * stored file is a 404, never a fabricated download.
+     * Ownership is enforced (ClipPolicy::view); a clip without a stored
+     * file is a 404, never a fabricated download. Two cases are kept
+     * apart: never rendered yet (output_path is null) vs rendered but
+     * the file is gone from disk — on the hosted site a redeploy wipes
+     * the ephemeral disk, so the second case says so plainly instead
+     * of "not ready yet", which would send the user retrying a
+     * download that can never succeed.
      */
     public function download(Request $request, Clip $clip)
     {
         $this->authorize('view', $clip);
 
-        if ($clip->output_path === null
-            || ! Storage::disk('local')->exists($clip->output_path)) {
+        if ($clip->output_path === null) {
             return response()->json([
                 'error' => 'not_found',
                 'message' => 'This clip has no rendered file to download yet.',
+            ], 404);
+        }
+
+        if (! Storage::disk('local')->exists($clip->output_path)) {
+            return response()->json([
+                'error' => 'file_removed',
+                'message' => 'This clip was rendered, but its file was removed when the server restarted. Create the job again from the same video to get fresh downloadable clips.',
             ], 404);
         }
 
