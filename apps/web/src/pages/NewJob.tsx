@@ -230,6 +230,11 @@ export function NewJobPage() {
   const [captionStyle, setCaptionStyle] = useState('punchy')
   const [selectionMode, setSelectionMode] = useState<SelectionMode>('interesting_only')
   const [onScreenText, setOnScreenText] = useState(false)
+  // Batch 1 clip enhancements — all default ON.
+  const [autoZoom, setAutoZoom] = useState(true)
+  const [faceTracking, setFaceTracking] = useState(true)
+  const [silenceRemoval, setSilenceRemoval] = useState(true)
+  const [fillerRemoval, setFillerRemoval] = useState(true)
   const [jobType, setJobType] = useState<'myself' | 'campaign'>('myself')
   const [campaignRequirements, setCampaignRequirements] = useState('')
   // Notes for Muse: free-text brief for THIS job (campaign details,
@@ -354,6 +359,10 @@ export function NewJobPage() {
       setSelectionMode(s.selection_mode)
     }
     if (typeof s.on_screen_text === 'boolean') setOnScreenText(s.on_screen_text)
+    if (typeof s.auto_zoom === 'boolean') setAutoZoom(s.auto_zoom)
+    if (typeof s.face_tracking === 'boolean') setFaceTracking(s.face_tracking)
+    if (typeof s.silence_removal === 'boolean') setSilenceRemoval(s.silence_removal)
+    if (typeof s.filler_removal === 'boolean') setFillerRemoval(s.filler_removal)
     if (s.job_type === 'myself' || s.job_type === 'campaign') setJobType(s.job_type)
     if (typeof s.campaign_requirements === 'string') setCampaignRequirements(s.campaign_requirements)
     if (typeof s.notes === 'string') setNotes(s.notes)
@@ -387,6 +396,10 @@ export function NewJobPage() {
     caption_style: captionStyle,
     selection_mode: selectionMode,
     on_screen_text: onScreenText,
+    auto_zoom: autoZoom,
+    face_tracking: faceTracking,
+    silence_removal: silenceRemoval,
+    filler_removal: fillerRemoval,
     job_type: jobType,
     campaign_requirements: campaignRequirements.trim() ? campaignRequirements : null,
     notes: notes.trim() ? notes : null,
@@ -500,6 +513,10 @@ export function NewJobPage() {
       captionStyle,
       selectionMode,
       onScreenText,
+      autoZoom,
+      faceTracking,
+      silenceRemoval,
+      fillerRemoval,
       jobType,
       campaignRequirements: campaignRequirements.trim(),
       notes: notes.trim(),
@@ -995,21 +1012,69 @@ export function NewJobPage() {
                     {onScreenText ? 'On-screen text on' : 'On-screen text off'}
                   </span>
                 </div>
-                <label className="mt-3 block">
-                  <span className="text-sm font-medium text-white">Content type</span>
-                  <select
-                    value={contentType}
-                    onChange={(e) => setContentType(e.target.value)}
-                    className={`${selectClass} mt-2`}
-                  >
-                    {CONTENT_TYPES.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
               </div>
+
+              {/* Batch 1 clip enhancements — all default ON. */}
+              <div>
+                <span className="text-sm font-medium text-white">Clip enhancements</span>
+                <div className="mt-2 space-y-3">
+                  <div className="flex items-center gap-3">
+                    <Toggle
+                      checked={autoZoom}
+                      onChange={setAutoZoom}
+                      label="Auto zoom on or off"
+                    />
+                    <span className="text-sm text-[var(--color-text-muted)]">
+                      Auto zoom — slow punch-in on the exciting parts
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Toggle
+                      checked={faceTracking}
+                      onChange={setFaceTracking}
+                      label="Face tracking on or off"
+                    />
+                    <span className="text-sm text-[var(--color-text-muted)]">
+                      Face tracking — keep the speaker centred as they move
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Toggle
+                      checked={silenceRemoval}
+                      onChange={setSilenceRemoval}
+                      label="Silence removal on or off"
+                    />
+                    <span className="text-sm text-[var(--color-text-muted)]">
+                      Remove silence — trim pauses over 0.7s, start on speech
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Toggle
+                      checked={fillerRemoval}
+                      onChange={setFillerRemoval}
+                      label="Filler removal on or off"
+                    />
+                    <span className="text-sm text-[var(--color-text-muted)]">
+                      Remove filler words — cut um, uh, hmm, erm
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <label className="mt-3 block">
+                <span className="text-sm font-medium text-white">Content type</span>
+                <select
+                  value={contentType}
+                  onChange={(e) => setContentType(e.target.value)}
+                  className={`${selectClass} mt-2`}
+                >
+                  {CONTENT_TYPES.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
 
               <label className="block">
                 <span className="text-sm font-medium text-white">Clip selection</span>
@@ -1151,6 +1216,10 @@ export function NewJobPage() {
                 ['Caption style', captionsEnabled ? getCaptionStyle(captionStyle).name : 'Off'],
                 ['Clip selection', SELECTION_MODE_LABELS[selectionMode]],
                 ['On-screen text', onScreenText ? 'On' : 'Off'],
+                ['Auto zoom', autoZoom ? 'On' : 'Off'],
+                ['Face tracking', faceTracking ? 'On' : 'Off'],
+                ['Silence removal', silenceRemoval ? 'On' : 'Off'],
+                ['Filler removal', fillerRemoval ? 'On' : 'Off'],
                 ['Job type', jobType === 'myself' ? 'For myself' : 'For a campaign'],
                 ['Layout', aspectRatio === '9:16' ? LAYOUT_LABELS[layout] : 'Centre crop'],
                 ['Quality', quality === 'draft' ? 'Draft preview' : quality === 'standard' ? 'Standard' : 'High quality'],

@@ -22,6 +22,11 @@ export interface PresetSettings {
   caption_style: string
   selection_mode: SelectionMode
   on_screen_text: boolean
+  /** Batch 1 enhancements (2026-11-25); default ON. */
+  auto_zoom: boolean
+  face_tracking: boolean
+  silence_removal: boolean
+  filler_removal: boolean
   job_type: 'myself' | 'campaign'
   campaign_requirements: string | null
   notes: string | null

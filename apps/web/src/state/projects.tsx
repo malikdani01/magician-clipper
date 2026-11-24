@@ -38,6 +38,11 @@ export interface ClipSpec {
   durationSeconds: number
   captions: boolean
   onScreenText: boolean
+  /** Batch 1 enhancements (2026-11-25); default ON. */
+  autoZoom: boolean
+  faceTracking: boolean
+  silenceRemoval: boolean
+  fillerRemoval: boolean
   /** How clips are picked: best parts only, or any parts to fill the count. */
   selectionMode: 'interesting_only' | 'fill_any'
   contentType:
@@ -61,6 +66,10 @@ export function defaultClipSpec(): ClipSpec {
     durationSeconds: 20,
     captions: true,
     onScreenText: false,
+    autoZoom: true,
+    faceTracking: true,
+    silenceRemoval: true,
+    fillerRemoval: true,
     selectionMode: 'interesting_only',
     contentType: 'general',
     keywords: '',

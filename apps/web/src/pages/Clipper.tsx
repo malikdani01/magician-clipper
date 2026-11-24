@@ -387,6 +387,10 @@ export function ClipperPage() {
       patch.selectionMode = s.selection_mode
     }
     if (typeof s.on_screen_text === 'boolean') patch.onScreenText = s.on_screen_text
+    if (typeof s.auto_zoom === 'boolean') patch.autoZoom = s.auto_zoom
+    if (typeof s.face_tracking === 'boolean') patch.faceTracking = s.face_tracking
+    if (typeof s.silence_removal === 'boolean') patch.silenceRemoval = s.silence_removal
+    if (typeof s.filler_removal === 'boolean') patch.fillerRemoval = s.filler_removal
     if (CONTENT_TYPES.some((c) => c.id === s.content_type)) {
       patch.contentType = s.content_type as ClipSpec['contentType']
     }
@@ -455,6 +459,10 @@ export function ClipperPage() {
       captionStyle: translateLegacyCaptionPreset(captionPreset),
       selectionMode: spec.selectionMode ?? 'interesting_only',
       onScreenText: spec.onScreenText,
+      autoZoom: spec.autoZoom ?? true,
+      faceTracking: spec.faceTracking ?? true,
+      silenceRemoval: spec.silenceRemoval ?? true,
+      fillerRemoval: spec.fillerRemoval ?? true,
       jobType: 'myself',
       notes: keywordsAvoid.trim()
         ? `Keywords to avoid: ${keywordsAvoid.trim()}`
@@ -1466,8 +1474,59 @@ export function ClipperPage() {
                     {spec.onScreenText ? 'On-screen text on' : 'On-screen text off'}
                   </span>
                 </div>
-                <label className="mt-3 block">
-                  <span className="text-sm font-medium text-white">Content type</span>
+              </div>
+
+              {/* Batch 1 clip enhancements — all default ON. A spec saved
+                  before they existed has no value; `?? true` keeps the
+                  default instead of silently turning one off. */}
+              <div>
+                <span className="text-sm font-medium text-white">Clip enhancements</span>
+                <div className="mt-2 space-y-3">
+                  <div className="flex items-center gap-3">
+                    <Toggle
+                      checked={spec.autoZoom ?? true}
+                      onChange={(v) => updateSpec({ autoZoom: v })}
+                      label="Auto zoom on or off"
+                    />
+                    <span className="text-sm text-[var(--color-text-muted)]">
+                      Auto zoom — slow punch-in on the exciting parts
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Toggle
+                      checked={spec.faceTracking ?? true}
+                      onChange={(v) => updateSpec({ faceTracking: v })}
+                      label="Face tracking on or off"
+                    />
+                    <span className="text-sm text-[var(--color-text-muted)]">
+                      Face tracking — keep the speaker centred as they move
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Toggle
+                      checked={spec.silenceRemoval ?? true}
+                      onChange={(v) => updateSpec({ silenceRemoval: v })}
+                      label="Silence removal on or off"
+                    />
+                    <span className="text-sm text-[var(--color-text-muted)]">
+                      Remove silence — trim pauses over 0.7s, start on speech
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Toggle
+                      checked={spec.fillerRemoval ?? true}
+                      onChange={(v) => updateSpec({ fillerRemoval: v })}
+                      label="Filler removal on or off"
+                    />
+                    <span className="text-sm text-[var(--color-text-muted)]">
+                      Remove filler words — cut um, uh, hmm, erm
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <label className="mt-3 block">
+                <span className="text-sm font-medium text-white">Content type</span>
                   <select
                     value={spec.contentType}
                     onChange={(e) =>
@@ -1485,7 +1544,6 @@ export function ClipperPage() {
                 <p className="mt-2 text-xs text-[var(--color-text-muted)]">
                   Content type: <span className="font-medium text-white">{contentLabel}</span>
                 </p>
-              </div>
 
               <label className="block">
                 <span className="text-sm font-medium text-white">Keywords to prioritise</span>

@@ -64,6 +64,57 @@ class JobPresetTest extends TestCase
             ->assertJsonCount(0, 'presets');
     }
 
+    /**
+     * Batch 1 (2026-11-25): a preset saved with an enhancement OFF
+     * must load OFF — the flags round-trip through save and list.
+     */
+    public function test_batch1_enhancement_flags_round_trip_through_preset(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/presets', [
+                'name' => 'No enhancements',
+                'settings' => $this->validSettings([
+                    'auto_zoom' => false,
+                    'face_tracking' => false,
+                    'silence_removal' => false,
+                    'filler_removal' => false,
+                ]),
+            ])
+            ->assertStatus(201)
+            ->assertJsonPath('preset.settings.auto_zoom', false)
+            ->assertJsonPath('preset.settings.face_tracking', false)
+            ->assertJsonPath('preset.settings.silence_removal', false)
+            ->assertJsonPath('preset.settings.filler_removal', false);
+
+        // Listing the preset returns the same OFF values.
+        $this->actingAs($user, 'sanctum')
+            ->getJson('/api/v1/presets')
+            ->assertStatus(200)
+            ->assertJsonPath('presets.0.settings.auto_zoom', false)
+            ->assertJsonPath('presets.0.settings.face_tracking', false)
+            ->assertJsonPath('presets.0.settings.silence_removal', false)
+            ->assertJsonPath('presets.0.settings.filler_removal', false);
+    }
+
+    /**
+     * Batch 1: a preset with a non-boolean enhancement value is rejected
+     * by the same shared JobSettingsRules.
+     */
+    public function test_batch1_enhancement_invalid_value_rejected_in_preset(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/presets', [
+                'name' => 'Bad preset',
+                'settings' => $this->validSettings(['silence_removal' => 'yes-please']),
+            ])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['settings.silence_removal']);
+    }
+
     public function test_duplicate_name_for_same_user_is_422_but_other_users_may_reuse_it(): void
     {
         $user = User::factory()->create();

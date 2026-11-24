@@ -75,7 +75,8 @@ class JobController extends Controller
         // "true"/"false"; Laravel's `boolean` rule only accepts
         // true/false/1/0/"1"/"0", so normalise the string forms first.
         // (JSON clients send real booleans and are unaffected.)
-        foreach (['captions_enabled', 'on_screen_text'] as $boolField) {
+        foreach (['captions_enabled', 'on_screen_text', 'auto_zoom',
+                  'face_tracking', 'silence_removal', 'filler_removal'] as $boolField) {
             if ($request->has($boolField) && is_string($request->input($boolField))) {
                 $request->merge([
                     $boolField => filter_var($request->input($boolField), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE)
@@ -215,6 +216,13 @@ class JobController extends Controller
             'caption_style' => $validated['caption_style'] ?? 'punchy',
             'selection_mode' => $validated['selection_mode'] ?? 'interesting_only',
             'on_screen_text' => $validated['on_screen_text'] ?? false,
+            // Batch 1 enhancements: ON unless the job explicitly turns
+            // one off (the frontend sends all four; old API clients
+            // that omit them get the new behaviour, as does the worker).
+            'auto_zoom' => $validated['auto_zoom'] ?? true,
+            'face_tracking' => $validated['face_tracking'] ?? true,
+            'silence_removal' => $validated['silence_removal'] ?? true,
+            'filler_removal' => $validated['filler_removal'] ?? true,
             'job_type' => $validated['job_type'] ?? 'myself',
             'campaign_requirements' => $validated['campaign_requirements'] ?? null,
             'notes' => $validated['notes'] ?? null,

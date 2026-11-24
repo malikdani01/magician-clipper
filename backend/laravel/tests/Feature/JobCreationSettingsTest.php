@@ -79,4 +79,70 @@ class JobCreationSettingsTest extends TestCase
             ->assertStatus(422)
             ->assertJsonValidationErrors(['caption_style']);
     }
+
+    /** Batch 1 (2026-11-25): all four enhancements default ON. */
+    public function test_batch1_enhancements_default_on_when_omitted(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/jobs', $this->payload())
+            ->assertStatus(201)
+            ->assertJsonPath('job.settings.auto_zoom', true)
+            ->assertJsonPath('job.settings.face_tracking', true)
+            ->assertJsonPath('job.settings.silence_removal', true)
+            ->assertJsonPath('job.settings.filler_removal', true);
+    }
+
+    /** Batch 1: an explicit OFF is stored, not silently turned back on. */
+    public function test_batch1_enhancements_explicit_false_is_stored(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/jobs', $this->payload([
+                'auto_zoom' => false,
+                'face_tracking' => false,
+                'silence_removal' => false,
+                'filler_removal' => false,
+            ]))
+            ->assertStatus(201)
+            ->assertJsonPath('job.settings.auto_zoom', false)
+            ->assertJsonPath('job.settings.face_tracking', false)
+            ->assertJsonPath('job.settings.silence_removal', false)
+            ->assertJsonPath('job.settings.filler_removal', false);
+    }
+
+    /** Batch 1: a non-boolean value is rejected with 422. */
+    public function test_batch1_enhancements_invalid_value_is_rejected(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/jobs', $this->payload(['auto_zoom' => 'maybe']))
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['auto_zoom']);
+    }
+
+    /**
+     * Batch 1: multipart (FormData) clients send booleans as the strings
+     * "true"/"false"; the store must normalise them instead of 422ing.
+     */
+    public function test_batch1_enhancements_string_booleans_from_form_data_are_normalised(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user, 'sanctum')
+            ->post('/api/v1/jobs', $this->payload([
+                'auto_zoom' => 'false',
+                'face_tracking' => 'true',
+                'silence_removal' => 'false',
+                'filler_removal' => 'true',
+            ]))
+            ->assertStatus(201)
+            ->assertJsonPath('job.settings.auto_zoom', false)
+            ->assertJsonPath('job.settings.face_tracking', true)
+            ->assertJsonPath('job.settings.silence_removal', false)
+            ->assertJsonPath('job.settings.filler_removal', true);
+    }
 }

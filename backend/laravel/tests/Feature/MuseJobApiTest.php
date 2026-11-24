@@ -253,6 +253,36 @@ class MuseJobApiTest extends TestCase
         $this->assertSame($job['id'], $data[0]['id']);
         $this->assertSame('https://www.youtube.com/watch?v=dQw4w9WgXcQ', $data[0]['source_url']);
         $this->assertSame(3, $data[0]['settings']['clip_count']);
+        // Batch 1 (2026-11-25): the worker payload carries the four
+        // enhancement flags, default ON for a job that never sent them.
+        $this->assertSame(true, $data[0]['settings']['auto_zoom']);
+        $this->assertSame(true, $data[0]['settings']['face_tracking']);
+        $this->assertSame(true, $data[0]['settings']['silence_removal']);
+        $this->assertSame(true, $data[0]['settings']['filler_removal']);
+    }
+
+    /** Batch 1: a job created with the enhancements OFF carries OFF in the worker payload. */
+    public function test_muse_worker_payload_carries_enhancements_off(): void
+    {
+        $user = User::factory()->create();
+        $this->createLinkJob($user, [
+            'auto_zoom' => false,
+            'face_tracking' => false,
+            'silence_removal' => false,
+            'filler_removal' => false,
+        ]);
+
+        $response = $this->getJson(
+            '/api/v1/muse/jobs?status=queued', $this->museHeaders()
+        );
+
+        $response->assertStatus(200);
+        $data = $response->json('data');
+        $this->assertCount(1, $data);
+        $this->assertSame(false, $data[0]['settings']['auto_zoom']);
+        $this->assertSame(false, $data[0]['settings']['face_tracking']);
+        $this->assertSame(false, $data[0]['settings']['silence_removal']);
+        $this->assertSame(false, $data[0]['settings']['filler_removal']);
     }
 
     public function test_muse_status_walk_queued_to_ready(): void

@@ -8,6 +8,7 @@
 # Usage:
 #   bash scripts/muse-poll.sh              # poll mode, every 5 minutes (default)
 #   bash scripts/muse-poll.sh --once       # process one queued job, then exit
+#   bash scripts/muse-poll.sh --once --job-id 37   # process only job 37, then exit
 #   MUSE_POLL_INTERVAL=120 bash scripts/muse-poll.sh   # poll every 2 minutes
 #
 # Cron example (every 5 minutes, single-run mode — safe if a previous run
@@ -39,7 +40,9 @@ if ! curl -fsS -m 5 http://127.0.0.1:8000/up >/dev/null 2>&1; then
 fi
 
 if [ "${1:-}" = "--once" ]; then
-  exec "$VENV_PY" "$ENGINE_DIR/workers/muse_worker.py" --once >>"$LOG_FILE" 2>&1
+  shift
+  # Forward any extra flags (e.g. --job-id N) to the worker.
+  exec "$VENV_PY" "$ENGINE_DIR/workers/muse_worker.py" --once "$@" >>"$LOG_FILE" 2>&1
 fi
 
 INTERVAL="${MUSE_POLL_INTERVAL:-300}"

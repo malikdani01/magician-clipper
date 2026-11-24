@@ -67,6 +67,12 @@ export interface JobSettings {
   /** Clip selection mode; absent on jobs created before the mode existed. */
   selection_mode?: string
   on_screen_text: boolean
+  /** Batch 1 enhancements (2026-11-25); absent on older jobs, where the
+   * worker treats them as ON. */
+  auto_zoom?: boolean
+  face_tracking?: boolean
+  silence_removal?: boolean
+  filler_removal?: boolean
   job_type: 'myself' | 'campaign'
   campaign_requirements: string | null
   /** Free-text notes for Muse (campaign brief, extra instructions). */
@@ -148,6 +154,11 @@ export interface CreateJobInput {
   /** Clip selection mode (see SELECTION_MODE_LABELS); defaults to 'interesting_only'. */
   selectionMode?: SelectionMode
   onScreenText: boolean
+  /** Batch 1 enhancements (see lib/jobs JobSettings); default ON. */
+  autoZoom: boolean
+  faceTracking: boolean
+  silenceRemoval: boolean
+  fillerRemoval: boolean
   jobType: 'myself' | 'campaign'
   campaignRequirements?: string
   /** Free-text notes for Muse (campaign brief, extra instructions). */
@@ -236,6 +247,10 @@ export async function createJob(input: CreateJobInput): Promise<JobResult> {
       form.append('caption_style', input.captionStyle)
       form.append('selection_mode', input.selectionMode ?? 'interesting_only')
       form.append('on_screen_text', String(input.onScreenText))
+      form.append('auto_zoom', String(input.autoZoom))
+      form.append('face_tracking', String(input.faceTracking))
+      form.append('silence_removal', String(input.silenceRemoval))
+      form.append('filler_removal', String(input.fillerRemoval))
       form.append('job_type', input.jobType)
       if (input.jobType === 'campaign' && input.campaignRequirements) {
         form.append('campaign_requirements', input.campaignRequirements)
@@ -270,6 +285,10 @@ export async function createJob(input: CreateJobInput): Promise<JobResult> {
           caption_style: input.captionStyle,
           selection_mode: input.selectionMode ?? 'interesting_only',
           on_screen_text: input.onScreenText,
+          auto_zoom: input.autoZoom,
+          face_tracking: input.faceTracking,
+          silence_removal: input.silenceRemoval,
+          filler_removal: input.fillerRemoval,
           job_type: input.jobType,
           campaign_requirements:
             input.jobType === 'campaign' ? (input.campaignRequirements ?? null) : null,

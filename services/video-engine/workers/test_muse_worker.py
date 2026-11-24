@@ -1136,5 +1136,297 @@ class BrandAssetsTests(unittest.TestCase):
             self.assertNotIn("outro_applied", ready[0])
 
 
+class ClipEnhancementTests(unittest.TestCase):
+    """Batch 1 (2026-11-25): auto-zoom, face tracking, silence trim/cut,
+    filler removal — all default ON, all honest about what they did.
+    Silence/filler cutting runs BEFORE captions: the segment is cleaned
+    first and the transcript is re-mapped onto the cleaned timeline."""
+
+    def _make_silence_clip(self, path, duration, silence_spans, color="green",
+                           freq=440):
+        """A real MP4 with sine audio gated to silence over the given
+        spans (source-time seconds)."""
+        audio = f"sine=frequency={freq}:duration={duration}"
+        gates = ",".join(
+            f"volume=enable='between(t,{s},{e})':volume=0"
+            for s, e in silence_spans)
+        if gates:
+            audio += f",{gates}"
+        cmd = [muse_worker.FFMPEG, "-y", "-v", "error",
+               "-f", "lavfi", "-i", f"color=c={color}:s=640x360:d={duration}:r=30",
+               "-f", "lavfi", "-i", audio,
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+               "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+               "-shortest", str(path)]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(Path(path).exists())
+
+    def _word_segments(self, words):
+        """Fake transcript segments from [(start, end, text)] words."""
+        return [{"start": words[0][0], "end": words[-1][1],
+                 "text": " ".join(w[2] for w in words),
+                 "words": [{"start": s, "end": e, "word": t}
+                           for s, e, t in words]}]
+
+    def test_feature_on_defaults_on_when_absent(self):
+        self.assertTrue(muse_worker._feature_on({}, "auto_zoom"))
+        self.assertTrue(muse_worker._feature_on({"auto_zoom": True}, "auto_zoom"))
+        self.assertFalse(muse_worker._feature_on({"auto_zoom": False}, "auto_zoom"))
+        self.assertFalse(muse_worker._feature_on({"auto_zoom": 0}, "auto_zoom"))
+        for key in ("face_tracking", "silence_removal", "filler_removal"):
+            self.assertTrue(muse_worker._feature_on({}, key))
+
+    def test_detect_silences_finds_known_silence(self):
+        with tempfile.TemporaryDirectory() as d:
+            clip = Path(d) / "sil.mp4"
+            self._make_silence_clip(clip, 10, [(3, 5)])
+            spans = muse_worker.detect_silences(clip, 0, 10)
+            self.assertEqual(len(spans), 1)
+            self.assertAlmostEqual(spans[0][0], 3.0, delta=0.2)
+            self.assertAlmostEqual(spans[0][1], 5.0, delta=0.2)
+            # A window offset still reports source times.
+            spans = muse_worker.detect_silences(clip, 2, 8)
+            self.assertEqual(len(spans), 1)
+            self.assertAlmostEqual(spans[0][0], 3.0, delta=0.2)
+
+    def test_detect_silences_ignores_short_silence(self):
+        with tempfile.TemporaryDirectory() as d:
+            clip = Path(d) / "sil.mp4"
+            self._make_silence_clip(clip, 10, [(3, 3.5)])
+            self.assertEqual(muse_worker.detect_silences(clip, 0, 10), [])
+
+    def test_filler_spans_finds_fillers(self):
+        words = [(0.0, 0.4, "hello"), (0.5, 0.8, "um"), (1.0, 1.4, "world"),
+                 (1.6, 1.9, "UH"), (2.0, 2.4, "hmm,"), (2.6, 3.0, "ok")]
+        spans, count = muse_worker.filler_spans(
+            self._word_segments(words), 0, 3.5)
+        self.assertEqual(count, 3)
+        self.assertEqual(len(spans), 3)
+        self.assertAlmostEqual(spans[0][0], 0.45, delta=0.01)
+        self.assertAlmostEqual(spans[0][1], 0.85, delta=0.01)
+        self.assertAlmostEqual(spans[2][0], 1.95, delta=0.01)
+        # A clean transcript has no filler spans.
+        clean = [(0.0, 0.4, "hello"), (0.5, 0.9, "world")]
+        spans, count = muse_worker.filler_spans(
+            self._word_segments(clean), 0, 1.0)
+        self.assertEqual((spans, count), ([], 0))
+
+    def test_merge_cuts_merges_overlaps(self):
+        self.assertEqual(
+            muse_worker.merge_cuts([(0, 2), (1.5, 3), (5, 6)]),
+            [(0, 3), (5, 6)])
+        self.assertEqual(muse_worker.merge_cuts([(5, 6), (0, 1)]),
+                         [(0, 1), (5, 6)])
+
+    def test_remap_segments_shifts_and_drops_fillers(self):
+        words = [(0.0, 1.0, "hello"), (1.0, 1.3, "um"), (1.5, 2.5, "world")]
+        remapped = muse_worker.remap_segments(
+            self._word_segments(words), 0, [(1.0, 1.3)])
+        self.assertEqual(len(remapped), 1)
+        self.assertEqual(remapped[0]["text"], "hello world")
+        got = [(w["start"], w["end"], w["word"]) for w in remapped[0]["words"]]
+        self.assertAlmostEqual(got[0][0], 0.0, delta=0.01)
+        self.assertAlmostEqual(got[1][0], 1.2, delta=0.01)
+        self.assertAlmostEqual(got[1][1], 2.2, delta=0.01)
+
+    def test_zoom_moments_from_energy_profile(self):
+        profile = [0.1, 0.1, 0.9, 0.95, 0.9, 0.1, 0.1, 0.8, 0.85, 0.1]
+        self.assertEqual(muse_worker.zoom_moments(profile, 0, 10),
+                         [(2.0, 5.0), (7.0, 9.0)])
+        self.assertEqual(muse_worker.zoom_moments([0.0] * 10, 0, 10), [])
+        self.assertEqual(muse_worker.zoom_moments([], 0, 10), [])
+        # A single hot second is still a moment.
+        self.assertEqual(
+            muse_worker.zoom_moments([0.1, 0.1, 0.9, 0.1, 0.1], 0, 5),
+            [(2.0, 3.0)])
+
+    def test_zoompan_filter_none_without_moments(self):
+        self.assertIsNone(muse_worker.zoompan_filter([], 1080, 1920))
+        chain = muse_worker.zoompan_filter([(2.0, 5.0)], 1080, 1920)
+        self.assertIn("zoompan", chain)
+        self.assertIn("2.000", chain)
+        self.assertIn("5.000", chain)
+        self.assertIn("s=1080x1920", chain)
+        # Two moments combine with max(), never a sum past 1.08x.
+        chain = muse_worker.zoompan_filter([(1.0, 2.0), (4.0, 6.0)], 1080, 1920)
+        self.assertIn("max(", chain)
+        self.assertEqual(chain.count("1+0.08*"), 1)
+
+    def test_smooth_trajectory_averages(self):
+        samples = [(0.0, 0.2, 0.5, 0.1, 0.1), (2.0, 0.4, 0.5, 0.1, 0.1),
+                   (4.0, 0.6, 0.5, 0.1, 0.1)]
+        smoothed = muse_worker._smooth_trajectory(samples)
+        self.assertAlmostEqual(smoothed[0][1], 0.3, delta=0.01)
+        self.assertAlmostEqual(smoothed[1][1], 0.4, delta=0.01)
+        self.assertAlmostEqual(smoothed[2][1], 0.5, delta=0.01)
+
+    def test_pan_expr_interpolates(self):
+        samples = [(0.0, 0.2, 0.5, 0.1, 0.1), (4.0, 0.6, 0.5, 0.1, 0.1)]
+        expr = muse_worker._pan_expr(samples, 0)
+        self.assertIn("if(lt(t,4.000", expr)
+        self.assertIn("0.2000", expr)
+        self.assertIn("0.6000", expr)
+
+    def test_face_track_no_face_returns_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            clip = Path(d) / "plain.mp4"
+            self._make_silence_clip(clip, 6, [])
+            self.assertEqual(
+                muse_worker.face_track_trajectory(clip, 0, 5, 640, 360), [])
+
+    def test_cleaning_renders_shorter_clip_maximum_mode(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            clip = tmp / "sil.mp4"
+            self._make_silence_clip(clip, 10, [(3, 5)])
+            words = [(i * 0.5, i * 0.5 + 0.3, f"w{i}") for i in range(10)]
+            settings = _settings(layout="center_crop", captions_enabled=False,
+                                 duration_mode="maximum", duration_seconds=5)
+            out = tmp / "out.mp4"
+            info = muse_worker.probe_summary(clip)
+            clip_dict = {"start": 0.0, "end": 5.0}
+            muse_worker.render_clip(clip, clip_dict, settings,
+                                    self._word_segments(words), out, info, tmp)
+            rendered = muse_worker.probe_summary(out)
+            self.assertEqual((rendered["width"], rendered["height"]),
+                             (1080, 1920))
+            # The 3-5s silence (2s) was cut: 5s window -> ~3s clip.
+            self.assertAlmostEqual(rendered["duration"], 3.0, delta=0.4)
+            stats = clip_dict["_batch1_stats"]
+            self.assertAlmostEqual(stats["silence_trimmed"], 2.0, delta=0.3)
+            self.assertEqual(stats["fillers_cut"], 0)
+
+    def test_filler_removal_cuts_filler_words(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            clip = tmp / "fill.mp4"
+            self._make_silence_clip(clip, 10, [])
+            words = []
+            for i in range(16):
+                text = "um" if i == 4 else ("uh" if i == 12 else f"w{i}")
+                words.append((i * 0.5, i * 0.5 + 0.3, text))
+            settings = _settings(layout="center_crop", captions_enabled=False,
+                                 duration_mode="maximum", duration_seconds=8)
+            out = tmp / "out.mp4"
+            info = muse_worker.probe_summary(clip)
+            clip_dict = {"start": 0.0, "end": 8.0}
+            muse_worker.render_clip(clip, clip_dict, settings,
+                                    self._word_segments(words), out, info, tmp)
+            rendered = muse_worker.probe_summary(out)
+            # Two ~0.4s filler spans cut: 8s -> ~7.2s.
+            self.assertAlmostEqual(rendered["duration"], 7.2, delta=0.4)
+            self.assertEqual(clip_dict["_batch1_stats"]["fillers_cut"], 2)
+
+    def test_zoom_renders_real_clip(self):
+        demo = (Path(__file__).resolve().parents[3]
+                / "demo" / "demo-source-3min.mp4")
+        if not demo.exists():
+            self.skipTest(f"demo source missing: {demo}")
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            out = tmp / "zoom.mp4"
+            settings = _settings(layout="center_crop", captions_enabled=False)
+            info = muse_worker.probe_summary(demo)
+            clip_dict = {"start": 10.0, "end": 15.0,
+                         "_zoom_moments": [(11.0, 13.0)]}
+            muse_worker.render_clip(demo, clip_dict, settings, [], out,
+                                    info, tmp)
+            rendered = muse_worker.probe_summary(out)
+            self.assertEqual((rendered["width"], rendered["height"]),
+                             (1080, 1920))
+            self.assertAlmostEqual(rendered["duration"], 5.0, delta=0.5)
+            self.assertEqual(clip_dict["_batch1_stats"]["zoom_moments"], 1)
+
+    def test_face_tracking_falls_back_without_face(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            clip = tmp / "plain.mp4"
+            self._make_silence_clip(clip, 10, [])
+            settings = _settings(layout="center_crop", captions_enabled=False,
+                                 duration_mode="maximum", duration_seconds=5)
+            out = tmp / "out.mp4"
+            info = muse_worker.probe_summary(clip)
+            clip_dict = {"start": 0.0, "end": 5.0}
+            muse_worker.render_clip(clip, clip_dict, settings, [], out,
+                                    info, tmp)
+            rendered = muse_worker.probe_summary(out)
+            self.assertEqual((rendered["width"], rendered["height"]),
+                             (1080, 1920))
+            stats = clip_dict["_batch1_stats"]
+            self.assertFalse(stats["face_tracked"])
+            self.assertIsNotNone(stats["face_fallback"])
+
+    def test_all_off_renders_plain_clip(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            clip = tmp / "sil.mp4"
+            self._make_silence_clip(clip, 10, [(3, 5)])
+            words = [(i * 0.5, i * 0.5 + 0.3, f"w{i}") for i in range(10)]
+            settings = _settings(layout="center_crop", captions_enabled=False,
+                                 duration_mode="maximum", duration_seconds=5,
+                                 auto_zoom=False, face_tracking=False,
+                                 silence_removal=False, filler_removal=False)
+            out = tmp / "out.mp4"
+            info = muse_worker.probe_summary(clip)
+            clip_dict = {"start": 0.0, "end": 5.0}
+            muse_worker.render_clip(clip, clip_dict, settings,
+                                    self._word_segments(words), out, info, tmp)
+            rendered = muse_worker.probe_summary(out)
+            # Nothing cleaned, nothing zoomed: the full 5s window.
+            self.assertAlmostEqual(rendered["duration"], 5.0, delta=0.4)
+            stats = clip_dict["_batch1_stats"]
+            self.assertEqual(stats["silence_trimmed"], 0.0)
+            self.assertEqual(stats["fillers_cut"], 0)
+            self.assertEqual(stats["zoom_moments"], 0)
+            self.assertFalse(stats["face_tracked"])
+            self.assertIsNone(stats["face_fallback"])
+            self.assertIsNone(stats["cleaning_skipped"])
+
+    def test_extend_window_for_cleaning(self):
+        with tempfile.TemporaryDirectory() as d:
+            clip = Path(d) / "sil.mp4"
+            self._make_silence_clip(clip, 10, [(3, 5)])
+            words = [(i * 0.5, i * 0.5 + 0.3, f"w{i}") for i in range(20)]
+            settings = _settings(duration_mode="exact", duration_seconds=5)
+            # Window [0,5] cleans to ~3s; extending the end to ~7 restores 5s
+            # (silencedetect reports 3.019-5.015, so the exact end wobbles
+            # by a few hundredths — assert approximately).
+            ns, ne, cuts, _stats = muse_worker._extend_window_for_cleaning(
+                clip, self._word_segments(words), 0.0, 5.0, settings, 10.0)
+            self.assertAlmostEqual(ns, 0.0, delta=0.01)
+            self.assertAlmostEqual(ne, 7.0, delta=0.05)
+            self.assertEqual(len(cuts), 1)
+            # A window that cannot be extended far enough keeps its
+            # original bounds with no cuts (renders uncleaned).
+            small = Path(d) / "small.mp4"
+            self._make_silence_clip(small, 6, [(3, 5)])
+            ns, ne, cuts, _stats = muse_worker._extend_window_for_cleaning(
+                small, self._word_segments(words), 0.0, 5.0, settings, 6.0)
+            self.assertEqual((ns, ne), (0.0, 5.0))
+            self.assertEqual(cuts, [])
+
+    def test_ready_note_reports_enhancements(self):
+        rendered = [
+            {"_batch1_stats": {"silence_trimmed": 2.0, "fillers_cut": 3,
+                               "zoom_moments": 1, "face_tracked": True,
+                               "face_fallback": None, "cleaning_skipped": None}},
+            {"_batch1_stats": {"silence_trimmed": 0.0, "fillers_cut": 0,
+                               "zoom_moments": 0, "face_tracked": False,
+                               "face_fallback": "no face found in this clip — centre crop used",
+                               "cleaning_skipped": None}},
+        ]
+        note = muse_worker._ready_note(
+            [{"signals": []}, {"signals": []}], 2, [], rendered=rendered)
+        self.assertIn("trimmed 2.0s of silence", note)
+        self.assertIn("cut 3 filler word(s)", note)
+        self.assertIn("Auto-zoom punch-in applied to 1 clip(s)", note)
+        self.assertIn("Face tracking followed the speaker in 1 clip(s)", note)
+        self.assertIn("Face tracking fallback: no face found", note)
+        # No enhancements and a full count: no note at all.
+        self.assertIsNone(muse_worker._ready_note(
+            [{"signals": []}], 1, [], rendered=[{"_batch1_stats": {}}]))
+
+
 if __name__ == "__main__":
     unittest.main()

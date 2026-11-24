@@ -76,6 +76,12 @@ function settingRows(job: Job): Array<[string, string]> {
     ['Captions', s.captions_enabled ? `On (${language})` : 'Off'],
     ['Caption style', getCaptionStyle(s.caption_style).name],
     ['On-screen text', s.on_screen_text ? 'On' : 'Off'],
+    // Batch 1 enhancements — absent on jobs made before them, where the
+    // worker treats them as ON, so absent reads as On here too.
+    ['Auto zoom', s.auto_zoom === false ? 'Off' : 'On'],
+    ['Face tracking', s.face_tracking === false ? 'Off' : 'On'],
+    ['Silence removal', s.silence_removal === false ? 'Off' : 'On'],
+    ['Filler removal', s.filler_removal === false ? 'Off' : 'On'],
     ['Job type', s.job_type === 'campaign' ? 'For a campaign' : 'For myself'],
     [
       'Layout',

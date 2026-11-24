@@ -2306,6 +2306,515 @@ def face_profile(source: Path, duration: float, step: float = 3.0) -> list[tuple
 
 
 # ---------------------------------------------------------------------------
+# Clip enhancement — Batch 1 (2026-11-25)
+#
+# Four per-job boolean settings, all DEFAULT ON (a job created before
+# them, or one whose stored settings omit them, behaves as ON):
+#   auto_zoom       — slow punch-in (1.00 -> 1.08) on high-energy moments
+#   face_tracking   — the layout crop follows the speaker's face
+#   silence_removal — trim leading silence, cut internal silences > 0.7s
+#   filler_removal  — cut um/uh/hmm/erm spans (word-timestamped)
+#
+# Silence/filler cutting happens BEFORE captions are built: the segment
+# is cleaned first and the transcript is re-mapped onto the cleaned
+# timeline, so burned captions stay in sync with the audio that is
+# actually in the clip. When all four are OFF the render path is
+# unchanged (the chains below are built exactly as before).
+# ---------------------------------------------------------------------------
+
+def _feature_on(settings: dict, key: str) -> bool:
+    """A Batch-1 enhancement flag: ON unless the job explicitly set it
+    OFF. Old jobs (no key stored) get the new behaviour; a stored
+    False is honoured."""
+    return bool(settings.get(key, True))
+
+
+FILLER_WORDS = frozenset({
+    "um", "umm", "uh", "uhh", "hmm", "hmmm", "erm", "mmm",
+})
+
+
+def detect_silences(source: Path, start: float, end: float,
+                    min_duration: float = 0.7, noise_db: int = -40) -> list[tuple[float, float]]:
+    """Silence spans inside [start, end] (source times), via ffmpeg
+    silencedetect. Only spans >= min_duration are returned. A trailing
+    silence (silence_start with no silence_end — the audio ends silent)
+    runs to the window end. [] when the source has no audio or
+    detection fails — silence removal then simply has nothing to cut,
+    never an error."""
+    duration = max(0.0, end - start)
+    if duration <= 0:
+        return []
+    proc = run([FFMPEG, "-y", "-v", "info",
+                "-ss", str(start), "-t", str(duration), "-i", str(source),
+                "-af", f"silencedetect=noise={noise_db}dB:d={min_duration}",
+                "-f", "null", "-"], timeout=300)
+    spans: list[tuple[float, float]] = []
+    cur_start: float | None = None
+    for line in (proc.stderr or "").splitlines():
+        m = re.search(r"silence_start:\s*([0-9.]+)", line)
+        if m:
+            cur_start = float(m.group(1))
+            continue
+        m = re.search(r"silence_end:\s*([0-9.]+)\s*\|\s*silence_duration:\s*([0-9.]+)", line)
+        if m and cur_start is not None:
+            s, e = start + cur_start, start + float(m.group(1))
+            if e - s >= min_duration - 1e-6:
+                spans.append((max(start, s), min(end, e)))
+            cur_start = None
+    if cur_start is not None:
+        # Audio ends in silence: the span runs to the window end.
+        s = start + cur_start
+        if end - s >= min_duration - 1e-6:
+            spans.append((max(start, s), end))
+    return spans
+
+
+def filler_spans(segments: list[dict], start: float, end: float,
+                 pad: float = 0.05) -> tuple[list[tuple[float, float]], int]:
+    """(spans, count) for filler words inside [start, end] (source
+    times). Words match case-insensitively after stripping punctuation;
+    each span is padded by ``pad`` but never into a neighbouring word,
+    so a cut never clips the word before/after the filler."""
+    words: list[dict] = []
+    for seg in segments:
+        for w in (seg.get("words") or []):
+            if start <= w["start"] < end:
+                words.append(w)
+    words.sort(key=lambda w: w["start"])
+    spans: list[tuple[float, float]] = []
+    for i, w in enumerate(words):
+        clean = re.sub(r"^[^a-z]+|[^a-z]+$", "", (w.get("word") or "").lower())
+        if clean not in FILLER_WORDS:
+            continue
+        lo = w["start"] - pad
+        hi = w["end"] + pad
+        if i > 0:
+            lo = max(lo, words[i - 1]["end"])
+        if i + 1 < len(words):
+            hi = min(hi, words[i + 1]["start"])
+        lo = max(lo, start)
+        hi = min(hi, end)
+        if hi - lo > 0.05:
+            spans.append((lo, hi))
+    return spans, len(spans)
+
+
+def merge_cuts(cuts: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Merge overlapping / adjacent cut spans (gap < 0.05s), sorted."""
+    merged: list[tuple[float, float]] = []
+    for s, e in sorted(cuts):
+        if e <= s:
+            continue
+        if merged and s <= merged[-1][1] + 0.05:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def compute_clip_cuts(source: Path, segments: list[dict], start: float,
+                      end: float, settings: dict) -> tuple[list[tuple[float, float]], dict]:
+    """Cut list (source times) for one clip window + stats. Silence
+    spans come from the audio; filler spans from the transcript's word
+    timestamps. [] when both flags are off, or when there is nothing to
+    cut — cleaning is a no-op then, never a failure."""
+    cuts: list[tuple[float, float]] = []
+    fillers_cut = 0
+    if _feature_on(settings, "silence_removal"):
+        cuts += detect_silences(source, start, end)
+    if _feature_on(settings, "filler_removal"):
+        spans, fillers_cut = filler_spans(segments, start, end)
+        cuts += spans
+    cuts = merge_cuts(cuts)
+    cut_seconds = sum(e - s for s, e in cuts)
+    leading = cuts[0][1] - cuts[0][0] if cuts and cuts[0][0] <= start + 0.05 else 0.0
+    stats = {"cut_seconds": round(cut_seconds, 2),
+             "fillers_cut": fillers_cut,
+             "leading_trimmed": round(leading, 2)}
+    return cuts, stats
+
+
+def _remap_time(t: float, start: float, cuts: list[tuple[float, float]]) -> float | None:
+    """Map a source-time t onto the cleaned timeline (0-based at the
+    window start), or None when t falls inside a removed span."""
+    if t < start:
+        return 0.0
+    removed = 0.0
+    for cs, ce in cuts:
+        if t < cs:
+            break
+        if cs <= t < ce:
+            return None
+        removed += ce - cs
+    return (t - start) - removed
+
+
+def _remap_span(s: float, e: float, start: float,
+                cuts: list[tuple[float, float]]) -> tuple[float, float] | None:
+    """Map a source-time span onto the cleaned timeline. Returns
+    (new_s, new_e) or None when the span is fully removed. A span that
+    starts inside a cut resumes at the cut's end; one that ends inside
+    a cut stops at the cut's start — so a word straddling a cut keeps
+    only the part that is still audible."""
+    ns = _remap_time(s, start, cuts)
+    if ns is None:
+        for cs, ce in cuts:
+            if cs <= s < ce:
+                ns = _remap_time(ce, start, cuts)
+                break
+    ne = _remap_time(e, start, cuts)
+    if ne is None:
+        # e inside a cut: the kept part ends at the cut's start. That
+        # boundary maps to (cs - start) minus the cuts fully before it
+        # (_remap_time(cs) itself is None — cs is inside its own cut).
+        for cs, ce in cuts:
+            if cs <= e < ce:
+                removed = sum(c2 - c1 for c1, c2 in cuts if c2 <= cs)
+                ne = (cs - start) - removed
+                break
+    if ns is None or ne is None or ne - ns < 0.01:
+        return None
+    return (ns, ne)
+
+
+def remap_segments(segments: list[dict], start: float,
+                   cuts: list[tuple[float, float]]) -> list[dict]:
+    """Transcript re-mapped onto the cleaned timeline (0-based at the
+    window start). Words inside removed spans are dropped; segment text
+    is rebuilt from the surviving words, so captions match the audio
+    that is actually in the clip."""
+    if not cuts:
+        return segments
+    out: list[dict] = []
+    for seg in segments:
+        words: list[dict] = []
+        for w in (seg.get("words") or []):
+            span = _remap_span(w["start"], w["end"], start, cuts)
+            if span is None:
+                continue
+            text = (w.get("word") or "").strip()
+            if text:
+                words.append({"start": span[0], "end": span[1], "word": text})
+        if not words:
+            continue
+        out.append({"start": words[0]["start"], "end": words[-1]["end"],
+                    "text": " ".join(w["word"] for w in words), "words": words})
+    return out
+
+
+def remap_spans(spans: list[tuple[float, float]], start: float,
+                cuts: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Source-time spans (e.g. zoom moments) onto the cleaned timeline;
+    spans shorter than 0.3s after the mapping are dropped. With no cuts
+    this is just a shift to window-relative time."""
+    if not cuts:
+        return [(a - start, b - start) for a, b in spans]
+    out: list[tuple[float, float]] = []
+    for a, b in spans:
+        mapped = _remap_span(a, b, start, cuts)
+        if mapped is not None and mapped[1] - mapped[0] >= 0.3:
+            out.append(mapped)
+    return out
+
+
+def _cleaning_keeps_duration(cleaned_dur: float, settings: dict) -> bool:
+    """Would the cleaned duration still validate? Exact/minimum need
+    the target (within tolerance); maximum needs >= min when one is
+    set. Anything else renders uncleaned rather than failing the clip."""
+    mode = (settings.get("duration_mode") or "exact").lower()
+    target = float(settings.get("duration_seconds", 30))
+    min_s = settings.get("duration_min_seconds")
+    min_s = float(min_s) if min_s not in (None, "") else None
+    max_s = settings.get("duration_max_seconds")
+    max_s = float(max_s) if max_s not in (None, "") else None
+    if mode == "exact":
+        return abs(cleaned_dur - target) <= DURATION_TOLERANCE
+    if mode == "minimum":
+        return (cleaned_dur >= target - DURATION_TOLERANCE
+                and (not max_s or cleaned_dur <= max_s + DURATION_TOLERANCE))
+    return (cleaned_dur <= target + DURATION_TOLERANCE
+            and (not min_s or cleaned_dur >= min_s - DURATION_TOLERANCE))
+
+
+def clean_clip_segment(source: Path, start: float, end: float,
+                       cuts: list[tuple[float, float]], out_path: Path) -> Path:
+    """Re-encode [start, end] with the cut spans removed (trim + concat,
+    video + audio together so A/V stay in sync). CRF 18 for the
+    intermediate, to limit the double-encode loss before the final
+    render. Returns out_path. Raises on ffmpeg failure — the caller
+    falls back to the uncleaned clip and says so in the note."""
+    kept: list[tuple[float, float]] = []
+    cursor = start
+    for cs, ce in cuts:
+        if cs > cursor:
+            kept.append((cursor, cs))
+        cursor = max(cursor, ce)
+    if cursor < end:
+        kept.append((cursor, end))
+    if not kept:
+        raise RuntimeError("Cleaning would remove the whole clip window.")
+    v_parts, a_parts = [], []
+    for j, (ks, ke) in enumerate(kept):
+        v_parts.append(f"[0:v]trim={ks:.3f}:{ke:.3f},setpts=PTS-STARTPTS[v{j}]")
+        a_parts.append(f"[0:a]atrim={ks:.3f}:{ke:.3f},asetpts=PTS-STARTPTS[a{j}]")
+    join = "".join(f"[v{j}][a{j}]" for j in range(len(kept)))
+    fc = ";".join(v_parts + a_parts) + f";{join}concat=n={len(kept)}:v=1:a=1[cv][ca]"
+    proc = run([FFMPEG, "-y", "-v", "error", "-i", str(source),
+                "-filter_complex", fc, "-map", "[cv]", "-map", "[ca]",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                str(out_path)], timeout=1800)
+    if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
+        raise RuntimeError(
+            f"Cleaning pass failed for clip {start:.1f}-{end:.1f}s: "
+            f"{(proc.stderr or '').strip()[:300]}")
+    return out_path
+
+
+def _extend_window_for_cleaning(source: Path, segments: list[dict],
+                                start: float, end: float, settings: dict,
+                                source_duration: float) -> tuple[float, float, list, dict]:
+    """Extend [start, end] so the cleaned clip still meets its duration
+    promise. The window grows into neighbouring source (end first, then
+    start) until the cleaned duration is within 0.05s of the need, or
+    the source runs out. Returns (start, end, cuts, stats); cuts is []
+    when cleaning cannot be kept even after extending — the caller then
+    renders the window uncleaned instead of failing the clip."""
+    mode = (settings.get("duration_mode") or "exact").lower()
+    target = float(settings.get("duration_seconds", 30))
+    min_s = settings.get("duration_min_seconds")
+    min_s = float(min_s) if min_s not in (None, "") else None
+    need = target if mode in ("exact", "minimum") else (min_s or 0.0)
+    orig_start, orig_end = start, end
+    cuts, stats = compute_clip_cuts(source, segments, start, end, settings)
+    if need <= 0:
+        return start, end, cuts, stats
+    for _ in range(4):
+        cleaned = (end - start) - sum(e - s for s, e in cuts)
+        if cleaned >= need - 0.05:
+            return start, end, cuts, stats
+        deficit = need - cleaned
+        if end < source_duration:
+            end = round(end + min(deficit, source_duration - end), 3)
+        elif start > 0:
+            start = round(start - min(deficit, start), 3)
+        else:
+            break
+        cuts, stats = compute_clip_cuts(source, segments, start, end, settings)
+    cleaned = (end - start) - sum(e - s for s, e in cuts)
+    if cleaned < need - DURATION_TOLERANCE:
+        # Cleaning cannot be kept even after extending: return the
+        # ORIGINAL window with no cuts — the clip renders uncleaned.
+        return orig_start, orig_end, [], stats
+    return start, end, cuts, stats
+
+
+def zoom_moments(energy_profile: list[float], start: float, end: float,
+                 threshold_frac: float = 0.6, min_len: float = 1.0,
+                 max_moments: int = 3, max_len: float = 6.0) -> list[tuple[float, float]]:
+    """High-energy moments inside [start, end] (SOURCE times), from the
+    per-second RMS profile — the same signal the selector uses as a
+    supporting term. A moment is a run of seconds at >= 60% of the
+    window's peak RMS, at least 1s long; runs < 1s apart merge; at most
+    the 3 longest moments, each capped at 6s. [] when the profile is
+    empty or flat — no moment, no zoom, honestly reported."""
+    if not energy_profile:
+        return []
+    lo = max(0, int(start))
+    hi = min(len(energy_profile), int(end) + 1)
+    vals = energy_profile[lo:hi]
+    if not vals:
+        return []
+    peak = max(vals)
+    if peak <= 0:
+        return []
+    thresh = threshold_frac * peak
+    runs: list[list[float]] = []
+    run_start: float | None = None
+    for i, v in enumerate(vals):
+        t = float(lo + i)
+        if v >= thresh:
+            if run_start is None:
+                run_start = t
+        elif run_start is not None:
+            runs.append([run_start, t])
+            run_start = None
+    if run_start is not None:
+        runs.append([run_start, float(lo + len(vals))])
+    merged: list[list[float]] = []
+    for r in runs:
+        s, e = max(r[0], start), min(r[1], end)
+        if e - s < 0.05:
+            continue
+        if merged and s - merged[-1][1] < 1.0:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    moments = [(s, min(e, s + max_len)) for s, e in merged if e - s >= min_len]
+    moments.sort(key=lambda m: m[1] - m[0], reverse=True)
+    moments = moments[:max_moments]
+    moments.sort()
+    return moments
+
+
+def zoompan_filter(moments: list[tuple[float, float]], tw: int, th: int,
+                   fps: int = 30) -> str | None:
+    """zoompan chain for a slow punch-in (1.00 -> 1.08, 0.5s ease in/out)
+    over each moment. ``in`` is the input frame number, so in/fps is
+    clip time — the render chain runs fps=30 before this filter, so
+    that conversion is exact. None when there are no moments."""
+    if not moments:
+        return None
+    envs = []
+    for a, b in moments:
+        envs.append(
+            f"(clip((in/{fps}-{a:.3f})/0.5,0,1)*clip(({b:.3f}-in/{fps})/0.5,0,1))")
+    env = envs[0]
+    for extra in envs[1:]:
+        env = f"max({env},{extra})"
+    return (f"zoompan=z='1+0.08*{env}':x='iw/2-(iw/zoom/2)':"
+            f"y='ih/2-(ih/zoom/2)':d=1:s={tw}x{th}:fps={fps}")
+
+
+def face_track_trajectory(source: Path, start: float, duration: float,
+                          sw: int, sh: int, step: float = 2.0) -> list[tuple]:
+    """Face-centre trajectory across the clip window, smoothed.
+
+    Samples one frame every ``step`` seconds (at most ~45 samples),
+    runs the same Haar cascade + size guard as detect_face_box, keeps
+    the largest plausible face per frame, and smooths the centres with
+    a 3-sample moving average. Returns [(rel_t, fx, fy, fw, fh)] with
+    fractions of the source frame, or [] when fewer than 2 samples
+    contain a face — the caller falls back to the static crop and says
+    so. Never raises: detection failure is a fallback, not a job
+    failure. Sample times are approximate (frame index * step)."""
+    try:
+        import cv2
+    except ImportError:
+        return []
+    cascade, _ = _load_face_cascade()
+    if cascade is None or duration <= 0:
+        return []
+    step = max(step, duration / 45.0)
+    frames_dir = WORK_DIR / f"face_track_{uuid.uuid4().hex}"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        proc = run([FFMPEG, "-y", "-v", "error",
+                    "-ss", str(start), "-i", str(source),
+                    "-t", str(duration),
+                    "-vf", f"fps=1/{step:.6f},scale=640:-1",
+                    str(frames_dir / "f_%04d.jpg")], timeout=300)
+        if proc.returncode != 0:
+            log.warning("face_track: frame extraction failed (ffmpeg rc=%s); "
+                        "falling back to a static crop.", proc.returncode)
+            return []
+        frames = sorted(frames_dir.glob("f_*.jpg"))
+        samples: list[tuple[float, float, float, float, float]] = []
+        for i, frame_path in enumerate(frames):
+            img = cv2.imread(str(frame_path))
+            if img is None:
+                continue
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            faces = cascade.detectMultiScale(gray, 1.1, 5, minSize=(30, 30))
+            fw_px, fh_px = img.shape[1], img.shape[0]
+            best = None
+            for (x, y, w, h) in faces:
+                w_frac, h_frac = w / fw_px, h / fh_px
+                if 0.03 <= w_frac <= 0.35 and 0.03 <= h_frac <= 0.5:
+                    if best is None or w * h > best[0] * best[1]:
+                        best = (x, y, w, h)
+            if best is None:
+                continue
+            x, y, w, h = best
+            samples.append((i * step, (x + w / 2) / fw_px, (y + h / 2) / fh_px,
+                            w / fw_px, h / fh_px))
+        if len(samples) < 2:
+            return []
+        return _smooth_trajectory(samples)
+    finally:
+        shutil.rmtree(frames_dir, ignore_errors=True)
+
+
+def _smooth_trajectory(samples: list[tuple]) -> list[tuple]:
+    """3-sample moving average over the face centres (positions only;
+    sizes keep the per-sample value — a smoothed size would breathe).
+    The median size is what the static layout decisions use."""
+    out = []
+    n = len(samples)
+    for i, (t, fx, fy, fw, fh) in enumerate(samples):
+        lo = max(0, i - 1)
+        hi = min(n, i + 2)
+        window = samples[lo:hi]
+        out.append((t,
+                    sum(s[1] for s in window) / len(window),
+                    sum(s[2] for s in window) / len(window),
+                    fw, fh))
+    return out
+
+
+def _pan_expr(samples: list[tuple], axis: int) -> str:
+    """ffmpeg expression for the face fraction (axis 0 = x, 1 = y) at
+    time t, linearly interpolated between trajectory samples, held
+    outside the sampled range."""
+    vals = [(s[0], s[1 + axis]) for s in samples]
+    if len(vals) == 1:
+        return f"{vals[0][1]:.4f}"
+    expr = f"{vals[-1][1]:.4f}"
+    for i in range(len(vals) - 2, -1, -1):
+        t0, f0 = vals[i]
+        t1, f1 = vals[i + 1]
+        span = max(t1 - t0, 0.001)
+        seg = f"({f0:.4f}+({f1:.4f}-{f0:.4f})*(t-{t0:.3f})/{span:.3f})"
+        expr = f"if(lt(t,{t1:.3f}),{seg},{expr})"
+    t_first, f_first = vals[0]
+    return f"if(lt(t,{t_first:.3f}),{f_first:.4f},{expr})"
+
+
+def _tracked_crop(sw: int, sh: int, tw: int, th: int,
+                  face_track: list[tuple]) -> str:
+    """Crop-to-cover filter following the face trajectory (Batch 1).
+    Same cover geometry as _center_crop_filter, but the crop offset is
+    a time-varying expression from the trajectory instead of a fixed
+    centre. Returns the filter string (without scale)."""
+    src_ar = sw / sh if sh else 16 / 9
+    target_ar = tw / th
+    if src_ar > target_ar:
+        cw = f"ih*{target_ar:.6f}"
+        x = f"min(max({_pan_expr(face_track, 0)}*iw-({cw})/2,0),iw-({cw}))"
+        return f"crop={cw}:ih:{x}:0"
+    ch = f"iw/{target_ar:.6f}"
+    y = f"min(max({_pan_expr(face_track, 1)}*ih-({ch})/2,0),ih-({ch}))"
+    return f"crop=iw:{ch}:0:{y}"
+
+
+def _tracked_inset_crop(box, sw: int, sh: int, face_track: list[tuple]) -> str | None:
+    """Facecam inset crop following the trajectory: same inset size as
+    _facecam_inset_crop (from the median face), but the inset window
+    moves with the face instead of sitting on the median position."""
+    if box is None:
+        return None
+    fx, fy, fw, fh = box
+    top_w = int(min(sw, max(fw * sw * 3.0, sw * 0.25)))
+    top_h_src = int(top_w * 0.8)
+    x = f"min(max({_pan_expr(face_track, 0)}*iw-{top_w}/2,0),iw-{top_w})"
+    y = f"min(max({_pan_expr(face_track, 1)}*ih-{top_h_src}*0.45,0),ih-{top_h_src})"
+    return f"crop={top_w}:{top_h_src}:{x}:{y}"
+
+
+def _median_face_box(face_track: list[tuple]) -> tuple[float, float, float, float]:
+    """Median (fx, fy, fw, fh) of a trajectory — the static layout
+    decisions (inset size, the split bottom-shift rule) use it."""
+    def _median(vals: list[float]) -> float:
+        vals = sorted(vals)
+        return vals[len(vals) // 2]
+    return (_median([s[1] for s in face_track]),
+            _median([s[2] for s in face_track]),
+            _median([s[3] for s in face_track]),
+            _median([s[4] for s in face_track]))
+
+
+# ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
 
@@ -2337,7 +2846,8 @@ def _facecam_inset_crop(box, sw: int, sh: int) -> str | None:
 
 def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
                         ratio: str, layout: str, start: float, duration: float,
-                        face_box=_DETECT_FACE) -> list[str]:
+                        face_box=_DETECT_FACE, face_track=None,
+                        face_tracking=False) -> list[str]:
     """FFmpeg filter chains turning [0:v] into [v0] for the job's layout.
 
     Layouts (all 9:16-only, like split — any other ratio, or an unknown
@@ -2350,13 +2860,27 @@ def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
     (the face layouts fall back honestly), or the default sentinel to
     detect it here from 5 samples across the clip window. Callers and
     tests may inject a box instead of running detection.
+    Batch 1 face tracking: when ``face_tracking`` is on and
+    ``face_track`` holds a trajectory, the crops that centre on the
+    subject follow it over time instead of sitting on the median box
+    (split top inset, pip base, streamer_full inset, centre crop).
+    blur_fill has no crop to track — it is unaffected. When tracking is
+    on but no trajectory exists, the static behaviour below is used
+    unchanged and the caller reports the fallback.
     """
     layout = (layout or "center_crop").lower()
     box = None
+    tracked = bool(face_tracking) and bool(face_track)
     if layout in ("split", "pip_facecam", "streamer_full") and ratio == "9:16":
-        box = (detect_face_box(
-            source, [start + duration * f for f in (0.15, 0.3, 0.5, 0.7, 0.85)], sw, sh)
-            if face_box is _DETECT_FACE else face_box)
+        if tracked:
+            # Median face from the trajectory — the static decisions
+            # (inset size, the split bottom-shift rule) use it; the
+            # crops themselves follow the trajectory.
+            box = _median_face_box(face_track)
+        else:
+            box = (detect_face_box(
+                source, [start + duration * f for f in (0.15, 0.3, 0.5, 0.7, 0.85)], sw, sh)
+                if face_box is _DETECT_FACE else face_box)
 
     if layout == "split" and ratio == "9:16":
         # Streamer-top / gameplay-bottom, TRUE split (reference style):
@@ -2374,7 +2898,8 @@ def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
             # Facecam inset estimate: ~3x the face width, 0.6x as tall.
             inset_w = int(min(sw, max(fw * sw * 3.0, sw * 0.25)))
             inset_h = int(inset_w * 0.6)
-            top_crop = _facecam_inset_crop(box, sw, sh)
+            top_crop = (_tracked_inset_crop(box, sw, sh, face_track)
+                        if tracked else _facecam_inset_crop(box, sw, sh))
             # Bottom: centred gameplay crop, shifted away from the inset
             # only when the inset actually overlaps it — and only when the
             # detected face is a SMALL inset face (fw < 0.12). A big
@@ -2405,13 +2930,16 @@ def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
         ow = tw // 3
         oh = int(ow * 0.8)
         ox, oy = tw - ow - 24, 24
-        face_crop = _facecam_inset_crop(box, sw, sh)
+        face_crop = (_tracked_inset_crop(box, sw, sh, face_track)
+                     if tracked else _facecam_inset_crop(box, sw, sh))
         if face_crop is None:
             log.warning("pip_facecam: no face detected in this clip window; "
                         "falling back to centre crop.")
             return [f"[0:v]{_center_crop_filter(sw, sh, tw, th)}[v0]"]
+        base_crop = (_tracked_crop(sw, sh, tw, th, face_track)
+                     if tracked else _center_crop_filter(sw, sh, tw, th))
         return [f"[0:v]split=2[base][face];"
-                f"[base]{_center_crop_filter(sw, sh, tw, th)}[bg];"
+                f"[base]{base_crop}[bg];"
                 f"[face]{face_crop},scale={ow}:{oh},"
                 f"drawbox=x=0:y=0:w=iw:h=ih:color=white@0.85:t=4[fg];"
                 f"[bg][fg]overlay={ox}:{oy}[v0]"]
@@ -2428,7 +2956,8 @@ def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
     if layout == "streamer_full" and ratio == "9:16":
         # The streamer region fills the whole frame (cover-scaled, no
         # stretch). No face found -> the top 45% of the frame instead.
-        top_crop = _facecam_inset_crop(box, sw, sh)
+        top_crop = (_tracked_inset_crop(box, sw, sh, face_track)
+                    if tracked else _facecam_inset_crop(box, sw, sh))
         if top_crop is None:
             log.info("streamer_full: no face detected in this clip window; "
                      "using the top 45% of the frame.")
@@ -2437,19 +2966,93 @@ def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
                 f"force_original_aspect_ratio=increase,crop={tw}:{th}[v0]"]
 
     # Centre crop (crop-to-cover for the requested ratio), no stretch.
-    return [f"[0:v]{_center_crop_filter(sw, sh, tw, th)}[v0]"]
+    # With face tracking on, the crop follows the trajectory.
+    centre = (_tracked_crop(sw, sh, tw, th, face_track)
+              if tracked else _center_crop_filter(sw, sh, tw, th))
+    return [f"[0:v]{centre}[v0]"]
 
 
 def render_clip(source: Path, clip: dict, settings: dict,
                 segments: list[dict], out_path: Path,
                 source_info: dict, job_dir: Path) -> Path:
-    """Render one clip with FFmpeg. Returns out_path. Raises on failure."""
+    """Render one clip with FFmpeg. Returns out_path. Raises on failure.
+
+    Batch 1 enhancements (all default ON; see _feature_on):
+    - silence/filler removal: the window is cleaned first (trim+concat
+      pre-pass) and the transcript is re-mapped onto the cleaned
+      timeline, so captions are built on the cleaned timeline. When the
+      cleaned clip would break the duration promise it renders
+      uncleaned instead, and the skip is recorded in the stats.
+    - auto-zoom: a zoompan punch-in over the high-energy moments
+      stashed on the clip dict by process_job (source times; re-mapped
+      through any cuts here), applied after the layout so captions
+      stay crisp.
+    - face tracking: the layout crops follow the smoothed face
+      trajectory sampled from the render source.
+    Per-clip stats are stashed on ``clip["_batch1_stats"]`` for the job
+    note. With all four flags OFF the filter graph is built exactly as
+    before.
+    """
     ratio = settings.get("aspect_ratio", "9:16")
     tw, th = RATIO_TARGETS.get(ratio, (1080, 1920))
     layout = (settings.get("layout") or "center_crop").lower()
     captions_on = bool(settings.get("captions_enabled", True))
     start, end = clip["start"], clip["end"]
     duration = end - start
+    stats = {"silence_trimmed": 0.0, "fillers_cut": 0, "zoom_moments": 0,
+             "face_tracked": False, "face_fallback": None, "cleaning_skipped": None}
+    clip["_batch1_stats"] = stats
+
+    # --- Cleaning pre-pass (silence + filler removal) ---
+    # The cleaned intermediate becomes the render source; the transcript
+    # is re-mapped onto its timeline before ANY caption is built.
+    render_source = source
+    render_start, render_end = start, end
+    render_segments = segments
+    render_duration = duration
+    cuts: list[tuple[float, float]] = []
+    do_clean = source_info["has_audio"] and (
+        _feature_on(settings, "silence_removal")
+        or _feature_on(settings, "filler_removal"))
+    if do_clean:
+        cuts, cstats = compute_clip_cuts(source, segments, start, end, settings)
+        if cuts:
+            cleaned_dur = duration - sum(e - s for s, e in cuts)
+            if not _cleaning_keeps_duration(cleaned_dur, settings):
+                stats["cleaning_skipped"] = (
+                    f"cleaning would leave {cleaned_dur:.1f}s "
+                    f"(target {float(settings.get('duration_seconds', 30)):.0f}s)")
+                log.info("Clip %.1f-%.1fs: %s; rendering uncleaned.",
+                         start, end, stats["cleaning_skipped"])
+                cuts = []
+            else:
+                try:
+                    cleaned_path = job_dir / f"clip_{uuid.uuid4().hex}_cleaned.mp4"
+                    clean_clip_segment(source, start, end, cuts, cleaned_path)
+                    render_source = cleaned_path
+                    render_start, render_end = 0.0, cleaned_dur
+                    render_duration = cleaned_dur
+                    render_segments = remap_segments(segments, start, cuts)
+                    stats["silence_trimmed"] = cstats.get("cut_seconds", 0.0)
+                    stats["fillers_cut"] = cstats.get("fillers_cut", 0)
+                    log.info("Clip %.1f-%.1fs: cleaned %.2fs -> %.2fs "
+                             "(trimmed %.2fs, %d filler(s) cut).",
+                             start, end, duration, cleaned_dur,
+                             stats["silence_trimmed"], stats["fillers_cut"])
+                except Exception as clean_exc:  # noqa: BLE001 - cleaning never fails the clip
+                    log.warning("Clip %.1f-%.1fs: cleaning failed (%s); "
+                                "rendering the uncleaned window.",
+                                start, end, clean_exc)
+                    stats["cleaning_skipped"] = f"cleaning failed ({clean_exc})"
+                    cuts = []
+                    render_source, render_start, render_end = source, start, end
+                    render_segments = segments
+                    render_duration = duration
+
+    # The headline reads the clip window, so it gets a render-time view
+    # of the clip (0-based on the cleaned timeline, source-time when
+    # uncleaned) — never the pre-cleaning window on cleaned segments.
+    render_clip_view = {"start": render_start, "end": render_end}
 
     # Caption style: the selected sample from Captions Studio (default
     # 'punchy'). 'classic' keeps the old SRT behaviour; every other style
@@ -2464,12 +3067,12 @@ def render_clip(source: Path, clip: dict, settings: dict,
     if captions_on:
         if style_id == "classic":
             candidate = job_dir / f"clip_{uuid.uuid4().hex}.srt"
-            if write_clip_srt(segments, start, end, candidate):
+            if write_clip_srt(render_segments, render_start, render_end, candidate):
                 captions_path = candidate
         else:
             candidate = job_dir / f"clip_{uuid.uuid4().hex}.ass"
             divider = 864 if (layout == "split" and ratio == "9:16") else None
-            if write_clip_ass(segments, start, end, style_id, candidate,
+            if write_clip_ass(render_segments, render_start, render_end, style_id, candidate,
                               divider, tw, th, layout):
                 captions_path = candidate
                 captions_is_ass = True
@@ -2481,12 +3084,12 @@ def render_clip(source: Path, clip: dict, settings: dict,
     # ASS, classic SRT, or off entirely.
     headline_path: Path | None = None
     if bool(settings.get("on_screen_text", False)):
-        headline = derive_on_screen_text(clip, segments, settings)
+        headline = derive_on_screen_text(render_clip_view, render_segments, settings)
         if headline:
             log.info("Clip %.1f-%.1fs on-screen headline: %r",
                      start, end, headline)
             candidate = job_dir / f"clip_{uuid.uuid4().hex}_headline.ass"
-            if write_headline_ass(headline, duration, candidate, tw, th):
+            if write_headline_ass(headline, render_duration, candidate, tw, th):
                 headline_path = candidate
         else:
             log.info("Clip %.1f-%.1fs: on-screen text on, but no headline "
@@ -2495,11 +3098,53 @@ def render_clip(source: Path, clip: dict, settings: dict,
 
     sw, sh = source_info["width"], source_info["height"]
 
+    # --- Face tracking: sample the trajectory from the render source
+    # (cleaned file when cleaning ran, else the original source at the
+    # window offset), then hand it to the layout chains.
+    face_track: list[tuple] = []
+    do_track = _feature_on(settings, "face_tracking")
+    if do_track:
+        if layout == "blur_fill" and ratio == "9:16":
+            # blur_fill has no crop to track — honest no-op, not faked.
+            stats["face_fallback"] = (
+                "face tracking does not apply to the blurred-background layout")
+        else:
+            face_track = face_track_trajectory(
+                render_source, render_start, render_duration, sw, sh)
+            if face_track:
+                stats["face_tracked"] = True
+                log.info("Clip %.1f-%.1fs: face tracking on (%d samples).",
+                         start, end, len(face_track))
+            else:
+                stats["face_fallback"] = (
+                    "no face found in this clip — centre crop used")
+                log.info("Clip %.1f-%.1fs: face tracking on, but no face "
+                         "found; using the static crop.", start, end)
+
     # Build the filter graph as a list of "; "-joined filter chains.
-    chains = build_layout_chains(source, sw, sh, tw, th, ratio, layout,
-                                 start, duration)
+    chains = build_layout_chains(render_source, sw, sh, tw, th, ratio, layout,
+                                 render_start, render_duration,
+                                 face_track=face_track or None,
+                                 face_tracking=do_track)
 
     video_label = "[v0]"
+    # --- Auto-zoom: punch in over the high-energy moments (stashed by
+    # process_job in source time; re-mapped through any cuts). Applied
+    # after the layout and before the captions, so the text never zooms.
+    # fps=30 runs here so in/30 is exact clip time in the zoompan
+    # expression; the final chain then only sets the pixel format.
+    fps_applied = False
+    if _feature_on(settings, "auto_zoom"):
+        moments = clip.get("_zoom_moments") or []
+        render_moments = remap_spans(moments, start, cuts) if moments else []
+        zoom_filter = zoompan_filter(render_moments, tw, th)
+        if zoom_filter:
+            stats["zoom_moments"] = len(render_moments)
+            chains.append(f"{video_label}fps=30,{zoom_filter}[vz]")
+            video_label = "[vz]"
+            fps_applied = True
+            log.info("Clip %.1f-%.1fs: auto-zoom punch-in over %d moment(s).",
+                     start, end, len(render_moments))
     if captions_path is not None:
         if captions_is_ass:
             chains.append(
@@ -2525,18 +3170,18 @@ def render_clip(source: Path, clip: dict, settings: dict,
             f"{video_label}subtitles={escape_ffmpeg_path(headline_path)}{next_label}"
         )
         video_label = next_label
-    chains.append(f"{video_label}fps=30,format=yuv420p[vout]")
+    chains.append(f"{video_label}{'format=yuv420p' if fps_applied else 'fps=30,format=yuv420p'}[vout]")
     filter_complex = ";".join(chains)
 
     cmd = [FFMPEG, "-y", "-v", "error",
-           "-ss", str(start), "-i", str(source),
+           "-ss", str(render_start), "-i", str(render_source),
            "-filter_complex", filter_complex,
            "-map", "[vout]"]
     if source_info["has_audio"]:
         cmd += ["-map", "0:a"]
         cmd += ["-c:a", "aac", "-b:a", "128k"]
     cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-movflags", "+faststart", "-t", str(duration), str(out_path)]
+            "-movflags", "+faststart", "-t", str(render_duration), str(out_path)]
     proc = run(cmd, timeout=1800)
     if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
         raise RuntimeError(
@@ -2826,12 +3471,18 @@ def _throw_if_cancelled(api: "JobApi", job_id) -> None:
         raise JobCancelled(f"Job {job_id} was cancelled by the user.")
 
 
-def _ready_note(clips: list[dict], requested: int, failed: list[str]) -> str | None:
+def _ready_note(clips: list[dict], requested: int, failed: list[str],
+                rendered: list[dict] | None = None) -> str | None:
     """The note the job page shows when a job finishes Ready but the
     result is not the full request: fewer clips than asked for (speech
     was scarce, visual moments may have filled some slots), or some
     clips failed to render and were skipped. Returns None when the job
     delivered exactly what was asked with no failures.
+
+    Batch 1: when ``rendered`` (the clips that actually uploaded) is
+    given, the note also reports the enhancements honestly — seconds of
+    silence trimmed, fillers cut, zoom/face-tracking counts, and any
+    fallback or skip — from the per-clip stats render_clip stashed.
     """
     notes: list[str] = []
     if len(clips) < requested:
@@ -2858,6 +3509,35 @@ def _ready_note(clips: list[dict], requested: int, failed: list[str]) -> str | N
         notes.append(
             f"{len(failed)} clip(s) failed to render and were skipped: "
             + "; ".join(failed[:3]))
+    if rendered:
+        def _stats(c: dict) -> dict:
+            return c.get("_batch1_stats") or {}
+        trimmed = sum(_stats(c).get("silence_trimmed", 0.0) for c in rendered)
+        fillers = sum(_stats(c).get("fillers_cut", 0) for c in rendered)
+        zoomed = sum(1 for c in rendered if _stats(c).get("zoom_moments", 0))
+        tracked = sum(1 for c in rendered if _stats(c).get("face_tracked"))
+        fallbacks = sorted({_stats(c).get("face_fallback")
+                            for c in rendered} - {None})
+        skipped = sorted({_stats(c).get("cleaning_skipped")
+                          for c in rendered} - {None})
+        if trimmed > 0 or fillers > 0:
+            bits = []
+            if trimmed > 0:
+                bits.append(f"trimmed {trimmed:.1f}s of silence")
+            if fillers > 0:
+                bits.append(f"cut {fillers} filler word(s)")
+            notes.append("Enhancements: " + " and ".join(bits) + ".")
+        if zoomed:
+            notes.append(f"Auto-zoom punch-in applied to {zoomed} clip(s).")
+        if tracked:
+            notes.append(
+                f"Face tracking followed the speaker in {tracked} clip(s).")
+        if fallbacks:
+            notes.append("Face tracking fallback: " + "; ".join(fallbacks) + ".")
+        if skipped:
+            notes.append(
+                "Silence/filler removal skipped for a clip: "
+                + "; ".join(skipped) + ".")
     return " ".join(notes) if notes else None
 
 
@@ -2903,6 +3583,16 @@ def process_rerender(api: JobApi, rerender: dict) -> None:
             lang = LANGUAGE_MAP.get(
                 (settings.get("captions_language") or "auto").lower(), None)
             segments = transcribe(wav_path, lang)
+            # Batch 1: the re-render keeps the job's enhancements — the
+            # auto-zoom moments come from this clip's own audio energy.
+            # (Silence/filler cleaning is computed inside render_clip
+            # for the fixed window; it renders uncleaned rather than
+            # breaking the clip's duration.)
+            if _feature_on(settings, "auto_zoom"):
+                energy = wav_rms_profile(wav_path)
+                if energy:
+                    clip["_zoom_moments"] = zoom_moments(
+                        energy, clip["start"], clip["end"])
         out_path = job_dir / "clip.mp4"
         render_clip(source, clip, settings, segments, out_path,
                     source_info, job_dir)
@@ -3030,6 +3720,35 @@ def process_job(api: JobApi, job: dict) -> None:
                     job_id, clip["start"], clip["end"],
                     clip.get("coverage", 0.0) * 100)
 
+        # Batch 1: silence/filler cleaning shortens a clip, so extend
+        # each window first (into neighbouring source) until the cleaned
+        # clip still meets its duration promise. A window that cannot be
+        # extended far enough keeps its original bounds and renders
+        # uncleaned instead of failing.
+        if source_info["has_audio"] and (
+                _feature_on(settings, "silence_removal")
+                or _feature_on(settings, "filler_removal")):
+            for clip in clips:
+                ns, ne, _cuts, _cstats = _extend_window_for_cleaning(
+                    source, segments, clip["start"], clip["end"], settings,
+                    source_info["duration"])
+                if _cuts and (ns, ne) != (clip["start"], clip["end"]):
+                    log.info("Job %s: clip window %.1f-%.1fs extended to "
+                             "%.1f-%.1fs so silence/filler cleaning keeps "
+                             "the duration promise.", job_id, clip["start"],
+                             clip["end"], ns, ne)
+                    clip["start"], clip["end"] = ns, ne
+                    clip["duration"] = round(ne - ns, 3)
+
+        # Batch 1: high-energy moments for the auto-zoom punch-in, from
+        # the same RMS profile the selector already uses. Stashed on the
+        # clip dict in source time; render_clip re-maps them through any
+        # silence/filler cuts.
+        if _feature_on(settings, "auto_zoom") and energy:
+            for clip in clips:
+                clip["_zoom_moments"] = zoom_moments(
+                    energy, clip["start"], clip["end"])
+
         api.set_status(job_id, "Processing", stage="rendering", progress=60)
         rendered: list[tuple[Path, dict, dict, Path | None]] = []
         failed: list[str] = []
@@ -3119,7 +3838,8 @@ def process_job(api: JobApi, job: dict) -> None:
             ready_kwargs["intro_applied"] = intro_applied
             ready_kwargs["outro_applied"] = outro_applied
         api.set_status(job_id, "Ready", stage="ready", progress=100,
-                       note=_ready_note(clips, requested, failed),
+                       note=_ready_note(clips, requested, failed,
+                                        rendered=[c for _, c, _, _ in rendered]),
                        **ready_kwargs)
         log.info("Job %s is Ready (%d clip(s)).", job_id, len(rendered))
     except JobCancelled:

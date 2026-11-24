@@ -34,6 +34,13 @@ class JobSettingsRules
             'caption_style' => ['sometimes', 'nullable', 'string', Rule::in(UserSetting::CAPTION_STYLES)],
             'selection_mode' => ['sometimes', 'string', Rule::in(['interesting_only', 'fill_any'])],
             'on_screen_text' => ['sometimes', 'boolean'],
+            // Batch 1 enhancements (2026-11-25): all default ON for new
+            // jobs (JobController::store applies ?? true); the worker
+            // also treats a missing key as ON, for jobs made before them.
+            'auto_zoom' => ['sometimes', 'boolean'],
+            'face_tracking' => ['sometimes', 'boolean'],
+            'silence_removal' => ['sometimes', 'boolean'],
+            'filler_removal' => ['sometimes', 'boolean'],
             'job_type' => ['sometimes', 'string', Rule::in(['myself', 'campaign'])],
             'campaign_requirements' => ['sometimes', 'nullable', 'string', 'max:5000'],
             'notes' => ['sometimes', 'nullable', 'string', 'max:5000'],
