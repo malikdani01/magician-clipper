@@ -38,6 +38,7 @@ export function ProjectsPage() {
   // Real server-side clip counts + first clip (for the thumbnail),
   // joined by the Laravel project id. Unsynced projects have 0.
   const [serverCounts, setServerCounts] = useState<Map<number, number>>(new Map())
+  const [serverJobs, setServerJobs] = useState<Map<number, number>>(new Map())
   const [countsLoaded, setCountsLoaded] = useState(false)
   const [firstClips, setFirstClips] = useState<
     Map<string, { id: number; hasThumbnail: boolean; totalDuration: number }>
@@ -49,6 +50,7 @@ export function ProjectsPage() {
       const laravel = await listLaravelProjects()
       if (cancelled) return
       setServerCounts(new Map(laravel.map((p) => [p.id, p.clips_count])))
+      setServerJobs(new Map(laravel.map((p) => [p.id, p.processing_jobs_count])))
       setCountsLoaded(true)
       const withClips = projects.filter(
         (p) => p.laravelId !== null && (laravel.find((l) => l.id === p.laravelId)?.clips_count ?? 0) > 0,
@@ -104,7 +106,17 @@ export function ProjectsPage() {
   }
 
   function confirmDelete(p: ProjectRecord) {
-    if (window.confirm(`Delete project "${p.title}"? This cannot be undone.`)) {
+    // Deleting a project cascades to its jobs and clips on the server
+    // (foreign keys) — the old confirm never said so, and jobs vanished
+    // with their projects without the user being told. Name the exact
+    // counts when they are known; otherwise warn generically.
+    const jobs = p.laravelId !== null ? serverJobs.get(p.laravelId) : undefined
+    const clips = p.laravelId !== null ? serverCounts.get(p.laravelId) : undefined
+    const detail =
+      jobs !== undefined && clips !== undefined
+        ? ` This will also delete its ${jobs} job${jobs === 1 ? '' : 's'} and ${clips} clip${clips === 1 ? '' : 's'}.`
+        : ' Its jobs and clips will be deleted too.'
+    if (window.confirm(`Delete project "${p.title}"?${detail} This cannot be undone.`)) {
       removeProject(p.id)
     }
   }
