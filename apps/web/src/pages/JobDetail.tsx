@@ -201,7 +201,7 @@ function ClipRerenderControl({
 export function JobDetailPage() {
   const { id } = useParams<{ id: string }>()
   const jobId = Number(id)
-  const { user } = useAuth()
+  const { user, loading: authLoading } = useAuth()
   const [job, setJob] = useState<Job | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -279,6 +279,20 @@ export function JobDetailPage() {
     const result = await downloadClip(clip)
     setDownloadingId(null)
     if (!result.ok) setDownloadError(result.error)
+  }
+
+  // While the stored session is still being verified, show a loading
+  // state — never the sign-in prompt for a signed-in user.
+  if (authLoading) {
+    return (
+      <div>
+        <PageHeader title="Job" subtitle="Checking sign-in…" />
+        <div className="flex items-center gap-3 rounded-2xl border border-ink-border bg-ink-panel p-6 text-sm text-white">
+          <Loader2 className="h-5 w-5 animate-spin text-brand-light" />
+          Checking sign-in…
+        </div>
+      </div>
+    )
   }
 
   if (!user) {

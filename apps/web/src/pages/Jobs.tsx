@@ -42,7 +42,7 @@ function sourceLabel(job: Job): string {
  * status, reading meta.total) — no invented numbers anywhere.
  */
 export function JobsPage() {
-  const { user } = useAuth()
+  const { user, loading: authLoading } = useAuth()
   const [filter, setFilter] = useState<StatusFilter>('all')
   const [jobs, setJobs] = useState<Job[]>([])
   const [total, setTotal] = useState(0)
@@ -112,7 +112,12 @@ export function JobsPage() {
         }
       />
 
-      {!user ? (
+      {authLoading ? (
+        <div className="flex items-center gap-3 rounded-2xl border border-ink-border bg-ink-panel p-6 text-sm text-white">
+          <Loader2 className="h-5 w-5 animate-spin text-brand-light" />
+          Checking sign-in…
+        </div>
+      ) : !user ? (
         <EmptyState
           title="Sign in to see your jobs"
           description="Jobs are tied to your account. Sign in or register to see the jobs you created."
