@@ -223,6 +223,11 @@ class JobController extends Controller
             'face_tracking' => $validated['face_tracking'] ?? true,
             'silence_removal' => $validated['silence_removal'] ?? true,
             'filler_removal' => $validated['filler_removal'] ?? true,
+            // Batch 2: headline look + caption position — defaults are
+            // the pre-Batch-2 behaviour (bold_bar headline, bottom
+            // captions), so old API clients are unaffected.
+            'headline_style' => $validated['headline_style'] ?? 'bold_bar',
+            'caption_position' => $validated['caption_position'] ?? 'bottom',
             'job_type' => $validated['job_type'] ?? 'myself',
             'campaign_requirements' => $validated['campaign_requirements'] ?? null,
             'notes' => $validated['notes'] ?? null,

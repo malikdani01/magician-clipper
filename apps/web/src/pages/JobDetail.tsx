@@ -23,14 +23,18 @@ import { formatBytes, formatDuration } from '../lib/format'
 import { VIRAL_TONE_CLASS, viralScore } from '../lib/viralScore'
 import {
   cancelJob,
+  CAPTION_POSITION_LABELS,
   downloadClip,
   downloadClipAudio,
   getClipRerenders,
   getJob,
+  HEADLINE_STYLE_LABELS,
   requestClipRerender,
   retryJob,
   SELECTION_MODE_LABELS,
+  type CaptionPosition,
   type ClipRerender,
+  type HeadlineStyle,
   type Job,
   type JobClip,
 } from '../lib/jobs'
@@ -82,6 +86,20 @@ function settingRows(job: Job): Array<[string, string]> {
     ['Face tracking', s.face_tracking === false ? 'Off' : 'On'],
     ['Silence removal', s.silence_removal === false ? 'Off' : 'On'],
     ['Filler removal', s.filler_removal === false ? 'Off' : 'On'],
+    // Batch 2 (2026-11-25) — absent on older jobs means the defaults
+    // (bold bar, bottom), which is what the worker renders for them.
+    [
+      'Headline style',
+      HEADLINE_STYLE_LABELS[
+        (s.headline_style as HeadlineStyle | undefined) ?? 'bold_bar'
+      ] ?? 'Bold bar (top)',
+    ],
+    [
+      'Caption position',
+      CAPTION_POSITION_LABELS[
+        (s.caption_position as CaptionPosition | undefined) ?? 'bottom'
+      ] ?? 'Bottom',
+    ],
     ['Job type', s.job_type === 'campaign' ? 'For a campaign' : 'For myself'],
     [
       'Layout',

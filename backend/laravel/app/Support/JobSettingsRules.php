@@ -41,6 +41,11 @@ class JobSettingsRules
             'face_tracking' => ['sometimes', 'boolean'],
             'silence_removal' => ['sometimes', 'boolean'],
             'filler_removal' => ['sometimes', 'boolean'],
+            // Batch 2 (2026-11-25): headline look + caption position.
+            // Defaults are the pre-Batch-2 behaviour (bold_bar top
+            // headline, captions at the bottom / on the divider).
+            'headline_style' => ['sometimes', 'string', Rule::in(['bold_bar', 'lower_third', 'big_centre'])],
+            'caption_position' => ['sometimes', 'string', Rule::in(['bottom', 'top', 'middle'])],
             'job_type' => ['sometimes', 'string', Rule::in(['myself', 'campaign'])],
             'campaign_requirements' => ['sometimes', 'nullable', 'string', 'max:5000'],
             'notes' => ['sometimes', 'nullable', 'string', 'max:5000'],

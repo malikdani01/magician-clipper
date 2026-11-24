@@ -52,6 +52,30 @@ export const SELECTION_MODE_DESCRIPTIONS: Record<SelectionMode, string> = {
     'Always the full count — fills with any part of the video when good parts run out.',
 }
 
+/** On-screen headline look (Batch 2, 2026-11-25). */
+export type HeadlineStyle = 'bold_bar' | 'lower_third' | 'big_centre'
+
+export const HEADLINE_STYLE_LABELS: Record<HeadlineStyle, string> = {
+  bold_bar: 'Bold bar (top)',
+  lower_third: 'Lower third (bottom)',
+  big_centre: 'Big centre',
+}
+
+export const HEADLINE_STYLE_DESCRIPTIONS: Record<HeadlineStyle, string> = {
+  bold_bar: 'The current look — bold white text on a dark bar at the top.',
+  lower_third: 'A band along the bottom, below the captions.',
+  big_centre: 'Large centred text in the middle of the frame.',
+}
+
+/** Where the burn-in captions sit (Batch 2, 2026-11-25). */
+export type CaptionPosition = 'bottom' | 'top' | 'middle'
+
+export const CAPTION_POSITION_LABELS: Record<CaptionPosition, string> = {
+  bottom: 'Bottom',
+  top: 'Top',
+  middle: 'Middle',
+}
+
 export interface JobSettings {
   platform: 'tiktok' | 'instagram'
   aspect_ratio: '9:16' | '16:9' | '1:1' | '4:5'
@@ -73,6 +97,10 @@ export interface JobSettings {
   face_tracking?: boolean
   silence_removal?: boolean
   filler_removal?: boolean
+  /** Batch 2 headline look + caption position (2026-11-25); absent on
+   * older jobs, where the worker uses bold_bar / bottom. */
+  headline_style?: string
+  caption_position?: string
   job_type: 'myself' | 'campaign'
   campaign_requirements: string | null
   /** Free-text notes for Muse (campaign brief, extra instructions). */
@@ -159,6 +187,10 @@ export interface CreateJobInput {
   faceTracking: boolean
   silenceRemoval: boolean
   fillerRemoval: boolean
+  /** Batch 2 headline look (see HEADLINE_STYLE_LABELS); default 'bold_bar'. */
+  headlineStyle: HeadlineStyle
+  /** Batch 2 caption position; default 'bottom'. */
+  captionPosition: CaptionPosition
   jobType: 'myself' | 'campaign'
   campaignRequirements?: string
   /** Free-text notes for Muse (campaign brief, extra instructions). */
@@ -251,6 +283,8 @@ export async function createJob(input: CreateJobInput): Promise<JobResult> {
       form.append('face_tracking', String(input.faceTracking))
       form.append('silence_removal', String(input.silenceRemoval))
       form.append('filler_removal', String(input.fillerRemoval))
+      form.append('headline_style', input.headlineStyle)
+      form.append('caption_position', input.captionPosition)
       form.append('job_type', input.jobType)
       if (input.jobType === 'campaign' && input.campaignRequirements) {
         form.append('campaign_requirements', input.campaignRequirements)
@@ -289,6 +323,8 @@ export async function createJob(input: CreateJobInput): Promise<JobResult> {
           face_tracking: input.faceTracking,
           silence_removal: input.silenceRemoval,
           filler_removal: input.fillerRemoval,
+          headline_style: input.headlineStyle,
+          caption_position: input.captionPosition,
           job_type: input.jobType,
           campaign_requirements:
             input.jobType === 'campaign' ? (input.campaignRequirements ?? null) : null,

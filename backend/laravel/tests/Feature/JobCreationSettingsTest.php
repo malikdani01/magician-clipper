@@ -145,4 +145,56 @@ class JobCreationSettingsTest extends TestCase
             ->assertJsonPath('job.settings.silence_removal', false)
             ->assertJsonPath('job.settings.filler_removal', true);
     }
+
+    /** Batch 2 (2026-11-25): headline style + caption position default to the pre-Batch-2 behaviour. */
+    public function test_batch2_headline_style_and_caption_position_default(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/jobs', $this->payload())
+            ->assertStatus(201)
+            ->assertJsonPath('job.settings.headline_style', 'bold_bar')
+            ->assertJsonPath('job.settings.caption_position', 'bottom');
+    }
+
+    /** Batch 2: explicit non-default values are stored. */
+    public function test_batch2_headline_style_and_caption_position_explicit_values_are_stored(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/jobs', $this->payload([
+                'headline_style' => 'big_centre',
+                'caption_position' => 'top',
+            ]))
+            ->assertStatus(201)
+            ->assertJsonPath('job.settings.headline_style', 'big_centre')
+            ->assertJsonPath('job.settings.caption_position', 'top');
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/jobs', $this->payload([
+                'headline_style' => 'lower_third',
+                'caption_position' => 'middle',
+            ]))
+            ->assertStatus(201)
+            ->assertJsonPath('job.settings.headline_style', 'lower_third')
+            ->assertJsonPath('job.settings.caption_position', 'middle');
+    }
+
+    /** Batch 2: an unknown headline style or caption position is rejected with 422. */
+    public function test_batch2_headline_style_and_caption_position_invalid_values_are_rejected(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/jobs', $this->payload(['headline_style' => 'neon']))
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['headline_style']);
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/jobs', $this->payload(['caption_position' => 'sideways']))
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['caption_position']);
+    }
 }

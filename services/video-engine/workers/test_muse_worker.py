@@ -12,6 +12,7 @@ Covers the Stronger Clipper round (2026-11-23):
     fails the whole job; the job ends Ready with a note).
 """
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -130,7 +131,7 @@ class VisualMomentTests(unittest.TestCase):
 class ScoreBreakdownTests(unittest.TestCase):
     """Every selected window carries a score_breakdown of the signals
     the selector actually computed for it (viral score feature 3):
-    speech windows get all seven, visual-moment / any-part windows
+    speech windows get all eight, visual-moment / any-part windows
     only energy/gameplay/stability, the uniform fallback only energy —
     never a padded or invented signal. upload_clip sends the breakdown
     as a JSON-encoded multipart field."""
@@ -147,7 +148,7 @@ class ScoreBreakdownTests(unittest.TestCase):
         self.assertEqual(
             set(breakdown),
             {"Speech", "Coverage", "Completeness", "Silence",
-             "Energy", "Gameplay", "Stability"})
+             "Energy", "Gameplay", "Stability", "Hook"})
         for value in breakdown.values():
             self.assertIsInstance(value, int)
             self.assertGreaterEqual(value, 0)
@@ -157,10 +158,12 @@ class ScoreBreakdownTests(unittest.TestCase):
         # exact 30s target mid-thought (Completeness 40); speech
         # covers 29.5 of the 30s (Coverage 98); both silence gaps are
         # long (Silence 100); flat energy is the max (Energy 100);
-        # no face profile means neutral gameplay/stability (50 each).
+        # no face profile means neutral gameplay/stability (50 each);
+        # the lone candidate is its own best opening (Hook 100).
         self.assertEqual(breakdown, {
             "Speech": 100, "Coverage": 98, "Completeness": 40,
             "Silence": 100, "Energy": 100, "Gameplay": 50, "Stability": 50,
+            "Hook": 100,
         })
 
     def test_visual_moment_window_carries_only_visual_signals(self):
@@ -177,11 +180,11 @@ class ScoreBreakdownTests(unittest.TestCase):
         visual = [c for c in clips if "visual_moment" in c["signals"]]
         self.assertEqual(len(speech), 1)
         self.assertEqual(len(visual), 2)
-        # The speech window still carries all seven signals.
+        # The speech window still carries all eight signals.
         self.assertEqual(
             set(speech[0]["score_breakdown"]),
             {"Speech", "Coverage", "Completeness", "Silence",
-             "Energy", "Gameplay", "Stability"})
+             "Energy", "Gameplay", "Stability", "Hook"})
         # Visual moments carry ONLY what was computed for them — no
         # speech signals, never padded with fabricated values.
         for c in visual:
@@ -369,12 +372,12 @@ class ProcessJobIsolationTests(unittest.TestCase):
         self.assertEqual(calls["rendered"], 3)
         self.assertEqual(len(api.uploads), 2)
         # Both uploaded clips carry their window's breakdown as a dict:
-        # the speech window has all seven signals, the visual moment
+        # the speech window has all eight signals, the visual moment
         # only the three visual ones — the call site passes it through.
         self.assertEqual(
             set(api.uploads[0]["score_breakdown"]),
             {"Speech", "Coverage", "Completeness", "Silence",
-             "Energy", "Gameplay", "Stability"})
+             "Energy", "Gameplay", "Stability", "Hook"})
         self.assertEqual(
             set(api.uploads[1]["score_breakdown"]),
             {"Energy", "Gameplay", "Stability"})
@@ -1426,6 +1429,277 @@ class ClipEnhancementTests(unittest.TestCase):
         # No enhancements and a full count: no note at all.
         self.assertIsNone(muse_worker._ready_note(
             [{"signals": []}], 1, [], rendered=[{"_batch1_stats": {}}]))
+
+
+class Batch2Tests(unittest.TestCase):
+    """Batch 2 (2026-11-25): quality boost (CRF 18, unsharp, loudnorm
+    -14 LUFS, AAC 192k), hook bonus in highlight selection, headline
+    styles + smarter headline picking, caption auto-fit, caption
+    position selector."""
+
+    def _words_at(self, pairs):
+        return [{"start": s, "end": e, "word": w} for s, e, w in pairs]
+
+    def _manual_segment(self, start, end, pairs):
+        words = self._words_at(pairs)
+        return {"start": start, "end": end,
+                "text": " ".join(w[2] for w in pairs), "words": words}
+
+    # --- Hook bonus ---
+
+    def test_hook_bonus_prefers_strong_opening(self):
+        # Two 20s speech windows, equal overall density/coverage, but
+        # A opens on dense loud speech while B opens on a pause and
+        # gets dense later. A must out-score B and be chosen first.
+        a_words = [(5.0 + i * 0.25, 5.25 + i * 0.25, f"a{i}")
+                   for i in range(12)]
+        a_words += [(8.0 + i, 8.8 + i, f"a{i + 12}") for i in range(17)]
+        b_words = [(35.0, 35.5, "b0"), (36.5, 37.0, "b1")]
+        b_words += [(38.0 + i * 0.63, 38.5 + i * 0.63, f"b{i + 2}")
+                    for i in range(27)]
+        segments = [self._manual_segment(5.0, 25.0, a_words),
+                    self._manual_segment(35.0, 55.0, b_words)]
+        energy = [0.1] * 60
+        for i in (5, 6, 7):
+            energy[i] = 0.9
+        for i in range(8, 25):
+            energy[i] = 0.3
+        for i in range(38, 55):
+            energy[i] = 0.41
+        clips = muse_worker.select_highlights(
+            segments, 60.0,
+            _settings(clip_count=2, duration_seconds=20), energy, [])
+        self.assertEqual(len(clips), 2)
+        a, b = clips[0], clips[1]
+        self.assertAlmostEqual(a["start"], 4.5, delta=0.01)
+        self.assertAlmostEqual(b["start"], 34.5, delta=0.01)
+        self.assertGreater(a["score"], b["score"])
+        self.assertGreaterEqual(a["hook"], 0.9)
+        self.assertLess(b["hook"], 0.3)
+        self.assertIn("strong_opening", a["signals"])
+        self.assertNotIn("strong_opening", b["signals"])
+        self.assertEqual(a["score_breakdown"]["Hook"], 100)
+        self.assertIn("opening hook", a["reason"])
+
+    # --- Caption auto-fit ---
+
+    def test_auto_fit_scales_a_long_word(self):
+        # One 28-letter word at punchy size 96 would be ~1400px wide
+        # in a 1080px frame — libass cannot break it, so the event
+        # must carry a smaller {\fs} override (96 -> 65 by the
+        # estimator: 28 chars x 0.52em x 96 = 1398px > 960px).
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "fit.ass"
+            segments = [_segment(10.0, 20.0, "antidisestablishmentarianism")]
+            self.assertTrue(muse_worker.write_clip_ass(
+                segments, 10.0, 40.0, "punchy", path, 864, 1080, 1920, "split"))
+            text = path.read_text()
+            self.assertIn("{\\fs65}", text)
+
+    def test_auto_fit_leaves_normal_phrases_alone(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "nofit.ass"
+            segments = [_segment(10.0, 20.0, "we climb the tower")]
+            self.assertTrue(muse_worker.write_clip_ass(
+                segments, 10.0, 40.0, "punchy", path, 864, 1080, 1920, "split"))
+            self.assertNotIn("{\\fs", path.read_text())
+
+    # --- Headline picking ---
+
+    def test_headline_picker_prefers_content_over_filler(self):
+        segments = [
+            _segment(10.0, 20.0, "um uh hmm yeah so"),
+            _segment(22.0, 32.0, "climb the tower now"),
+        ]
+        headline = muse_worker.derive_on_screen_text(
+            {"start": 10.0, "end": 40.0}, segments, {})
+        self.assertEqual(headline, "CLIMB THE TOWER NOW")
+
+    def test_headline_picker_rejects_repeated_word(self):
+        # "tower" x4 spoken fast (dense) vs "we climb the tower"
+        # spoken slow: without the repeat penalty the dense repeat
+        # would win; with it, the real phrase wins.
+        words = [(10.0 + i * 0.4, 10.4 + i * 0.4, "tower") for i in range(4)]
+        words += [(14.0, 15.5, "we"), (15.5, 17.0, "climb"),
+                  (17.0, 18.5, "the"), (18.5, 20.0, "tower")]
+        segments = [self._manual_segment(10.0, 20.0, words)]
+        headline = muse_worker.derive_on_screen_text(
+            {"start": 10.0, "end": 20.0}, segments, {})
+        self.assertEqual(headline, "WE CLIMB THE TOWER")
+
+    # --- Headline styles ---
+
+    def test_headline_styles_render_differently(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            for style, needle in (
+                    ("bold_bar", ",8,40,40,120,1"),
+                    ("lower_third", ",2,40,40,40,1"),
+                    ("big_centre", ",5,40,40,0,1")):
+                path = tmp / f"{style}.ass"
+                self.assertTrue(muse_worker.write_headline_ass(
+                    "WIN THE PS5 TODAY", 30.0, path, 1080, 1920, style))
+                self.assertIn(needle, path.read_text())
+            # lower_third uses an opaque box (BorderStyle 3).
+            self.assertIn(",3,2,0,2,40,40,40,1",
+                          (tmp / "lower_third.ass").read_text())
+            # Unknown style falls back to the bold bar.
+            path = tmp / "unknown.ass"
+            muse_worker.write_headline_ass(
+                "WIN THE PS5 TODAY", 30.0, path, 1080, 1920, "nope")
+            self.assertIn(",8,40,40,120,1", path.read_text())
+
+    # --- Caption position ---
+
+    def test_caption_positions_move_captions(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            segments = [_segment(10.0, 20.0, "we climb the tower")]
+            # bottom (default): on the split divider (864 - 96/2 = 816).
+            path = tmp / "bottom.ass"
+            muse_worker.write_clip_ass(segments, 10.0, 40.0, "punchy", path,
+                                       864, 1080, 1920, "split")
+            self.assertIn(",8,40,40,816,1", path.read_text())
+            # top: below the headline band.
+            path = tmp / "top.ass"
+            muse_worker.write_clip_ass(segments, 10.0, 40.0, "punchy", path,
+                                       864, 1080, 1920, "split", "top")
+            self.assertIn(",8,40,40,300,1", path.read_text())
+            # middle: vertically centred (1920/2 - 96/2 = 912).
+            path = tmp / "middle.ass"
+            muse_worker.write_clip_ass(segments, 10.0, 40.0, "punchy", path,
+                                       864, 1080, 1920, "split", "middle")
+            self.assertIn(",8,40,40,912,1", path.read_text())
+            # middle + big_centre headline: dropped to 62% (1190) so
+            # the captions never overlap the centred headline.
+            path = tmp / "middle_big.ass"
+            muse_worker.write_clip_ass(segments, 10.0, 40.0, "punchy", path,
+                                       864, 1080, 1920, "split",
+                                       "middle", "big_centre")
+            self.assertIn(",8,40,40,1190,1", path.read_text())
+            # Unknown position falls back to bottom.
+            path = tmp / "unknown.ass"
+            muse_worker.write_clip_ass(segments, 10.0, 40.0, "punchy", path,
+                                       864, 1080, 1920, "split", "sideways")
+            self.assertIn(",8,40,40,816,1", path.read_text())
+
+    def test_caption_position_bottom_keeps_clean_subs_spot(self):
+        # clean_subs keeps its established bottom-centre spot (2, 40)
+        # at the default position — it does not move to the divider.
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "clean.ass"
+            segments = [_segment(10.0, 20.0, "we climb the tower")]
+            self.assertTrue(muse_worker.write_clip_ass(
+                segments, 10.0, 40.0, "clean_subs", path,
+                864, 1080, 1920, "split"))
+            self.assertIn(",2,40,40,40,1", path.read_text())
+
+    # --- Quality boost ---
+
+    def test_tracked_crop_quotes_its_time_expression(self):
+        # Regression (found by proof Job #39, 2026-11-25): the
+        # face-tracking crop offset is a nested if()/min()/max()
+        # expression full of commas. Unquoted, ffmpeg's filtergraph
+        # parser split it into separate filters and the render died
+        # with "No such filter: '0.000)'" — but only when a face was
+        # actually found, which is why Batch 1's proofs (no face in
+        # frame) never saw it. The offsets must be single-quoted.
+        track = [(0.0, 0.5, 0.5, 0.1, 0.1), (2.0, 0.6, 0.5, 0.1, 0.1),
+                 (4.0, 0.55, 0.5, 0.1, 0.1)]
+        wide = muse_worker._tracked_crop(1280, 720, 1080, 1920, track)
+        self.assertIn(":'", wide)
+        self.assertIn("':0,scale=1080:1920", wide)
+        tall = muse_worker._tracked_crop(720, 1280, 1080, 1920, track)
+        self.assertIn(":0:'", tall)
+        self.assertIn("',scale=1080:1920", tall)
+        inset = muse_worker._tracked_inset_crop(
+            (0.5, 0.5, 0.1, 0.1), 1280, 720, track)
+        self.assertIsNotNone(inset)
+        self.assertEqual(inset.count("'"), 4)
+
+    def test_render_with_face_tracking_trajectory(self):
+        # The tracked crop must render through real ffmpeg — this is
+        # the end-to-end half of the quoting regression test above.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            clip = tmp / "src.mp4"
+            cmd = [muse_worker.FFMPEG, "-y", "-v", "error",
+                   "-f", "lavfi", "-i", "color=c=green:s=640x360:d=5:r=30",
+                   "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                   "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                   "-shortest", str(clip)]
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=120)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            settings = _settings(layout="center_crop", captions_enabled=False,
+                                 duration_mode="maximum", duration_seconds=5,
+                                 auto_zoom=False, face_tracking=True,
+                                 silence_removal=False, filler_removal=False)
+            out = tmp / "out.mp4"
+            info = muse_worker.probe_summary(clip)
+            track = [(0.0, 0.5, 0.5, 0.1, 0.1), (2.0, 0.6, 0.5, 0.1, 0.1),
+                     (4.0, 0.55, 0.5, 0.1, 0.1)]
+            with mock.patch.object(muse_worker, "face_track_trajectory",
+                                   return_value=track):
+                muse_worker.render_clip(clip, {"start": 0.0, "end": 5.0},
+                                        settings, [], out, info, tmp)
+            rendered = muse_worker.probe_summary(out)
+            self.assertEqual((rendered["width"], rendered["height"]),
+                             (1080, 1920))
+            self.assertAlmostEqual(rendered["duration"], 5.0, delta=0.4)
+
+    def test_render_loudness_near_minus_14_lufs(self):
+        # A real render with default settings: 5s sine-audio clip.
+        # The output must measure about -14 LUFS integrated (±2),
+        # be 1080x1920 h264 + aac, and last the promised 5s.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            clip = tmp / "src.mp4"
+            cmd = [muse_worker.FFMPEG, "-y", "-v", "error",
+                   "-f", "lavfi", "-i", "color=c=green:s=640x360:d=5:r=30",
+                   "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                   "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                   "-shortest", str(clip)]
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=120)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            settings = _settings(layout="center_crop", captions_enabled=False,
+                                 duration_mode="maximum", duration_seconds=5,
+                                 auto_zoom=False, face_tracking=False,
+                                 silence_removal=False, filler_removal=False)
+            out = tmp / "out.mp4"
+            info = muse_worker.probe_summary(clip)
+            muse_worker.render_clip(clip, {"start": 0.0, "end": 5.0},
+                                    settings, [], out, info, tmp)
+            rendered = muse_worker.probe_summary(out)
+            self.assertEqual((rendered["width"], rendered["height"]),
+                             (1080, 1920))
+            self.assertEqual(rendered["video_codec"], "h264")
+            self.assertEqual(rendered["audio_codec"], "aac")
+            self.assertTrue(rendered["has_audio"])
+            self.assertAlmostEqual(rendered["duration"], 5.0, delta=0.4)
+            loud = self._measure_loudness(out)
+            self.assertIsNotNone(loud, "loudnorm measurement produced no JSON")
+            self.assertGreaterEqual(loud, -16.0)
+            self.assertLessEqual(loud, -12.0)
+
+    @staticmethod
+    def _measure_loudness(path: Path) -> float | None:
+        """Integrated loudness (LUFS) of a file, via ffmpeg loudnorm
+        in measure mode (its input_i is the file's own loudness)."""
+        proc = subprocess.run(
+            [muse_worker.FFMPEG, "-i", str(path), "-af",
+             "loudnorm=print_format=json", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=120)
+        m = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", proc.stderr or "", re.S)
+        if not m:
+            return None
+        try:
+            return float(json.loads(m.group(0))["input_i"])
+        except (ValueError, KeyError, TypeError):
+            return None
 
 
 if __name__ == "__main__":

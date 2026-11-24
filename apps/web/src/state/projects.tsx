@@ -43,6 +43,10 @@ export interface ClipSpec {
   faceTracking: boolean
   silenceRemoval: boolean
   fillerRemoval: boolean
+  /** Batch 2 headline look + caption position (2026-11-25); defaults
+   * bold_bar / bottom (the pre-Batch-2 behaviour). */
+  headlineStyle: 'bold_bar' | 'lower_third' | 'big_centre'
+  captionPosition: 'bottom' | 'top' | 'middle'
   /** How clips are picked: best parts only, or any parts to fill the count. */
   selectionMode: 'interesting_only' | 'fill_any'
   contentType:
@@ -70,6 +74,8 @@ export function defaultClipSpec(): ClipSpec {
     faceTracking: true,
     silenceRemoval: true,
     fillerRemoval: true,
+    headlineStyle: 'bold_bar',
+    captionPosition: 'bottom',
     selectionMode: 'interesting_only',
     contentType: 'general',
     keywords: '',

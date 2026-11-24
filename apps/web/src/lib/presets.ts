@@ -7,7 +7,7 @@
  */
 
 import { API_URL, getToken } from './api'
-import type { ClipLayout, SelectionMode } from './jobs'
+import type { CaptionPosition, ClipLayout, HeadlineStyle, SelectionMode } from './jobs'
 
 export interface PresetSettings {
   platform: 'tiktok' | 'instagram'
@@ -27,6 +27,10 @@ export interface PresetSettings {
   face_tracking: boolean
   silence_removal: boolean
   filler_removal: boolean
+  /** Batch 2 headline look + caption position (2026-11-25); defaults
+   * bold_bar / bottom. */
+  headline_style: HeadlineStyle
+  caption_position: CaptionPosition
   job_type: 'myself' | 'campaign'
   campaign_requirements: string | null
   notes: string | null

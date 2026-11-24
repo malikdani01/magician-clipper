@@ -158,13 +158,28 @@ LANGUAGE_MAP = {"english": "en", "roman_urdu": "ur", "hindi": "hi", "auto": None
 # that stay in ONE scene: a window spanning a facecam->gameplay switch
 # cannot be split correctly with one static crop, so mixed windows score
 # lower than single-scene windows.
-W_DENSITY = 0.25
+W_DENSITY = 0.20
 W_COVERAGE = 0.20
 W_COMPLETENESS = 0.20
 W_SILENCE = 0.05
 W_ENERGY = 0.05
 W_GAMEPLAY = 0.15
 W_STABILITY = 0.10
+# Batch 2 (2026-11-25): the hook term — how strong a window OPENS
+# (first ~3s: speech density + audio energy there). It is a bonus, not
+# a rule: 0.05 of the score, taken from density (0.25 -> 0.20) so the
+# weights still sum to 1.00. A clip that opens on a dense, loud line
+# hooks the viewer; one that opens on a pause does not — but a
+# genuinely better later window still wins.
+W_HOOK = 0.05
+
+# Batch 2 headline styles (per-job setting `headline_style`, default
+# "bold_bar" = the look every job used before Batch 2).
+HEADLINE_STYLES = ("bold_bar", "lower_third", "big_centre")
+
+# Batch 2 caption positions (per-job setting `caption_position`,
+# default "bottom" = where captions always sat before Batch 2).
+CAPTION_POSITIONS = ("bottom", "top", "middle")
 # Visual-moment windows (speech-scarce sources): the score is built only
 # from what a wordless window honestly has — loud audio, gameplay on
 # screen, a stable scene. No speech terms: a visual moment must never
@@ -884,6 +899,7 @@ _SCORE_BREAKDOWN_LABELS = {
     "energy": "Energy",
     "gameplay": "Gameplay",
     "stability": "Stability",
+    "hook": "Hook",
 }
 
 
@@ -1129,12 +1145,14 @@ def select_highlights(segments: list[dict], source_duration: float,
       are filled with evenly-spaced windows from anywhere in the
       source (labelled 'any_part'), so the job delivers the full count
       whenever the source is physically long enough.
-    Scoring (documented weights): speech density 0.25, audio coverage
+    Scoring (documented weights): speech density 0.20, audio coverage
     0.20, sentence completeness 0.20, silence boundaries 0.05, audio
     energy 0.05 (supporting only), gameplay presence 0.15 (real gameplay
     on screen beats a full-facecam talking stretch), scene stability
     0.10 (a window staying in one scene beats one spanning a
-    facecam->gameplay switch, which one static split crop cannot serve).
+    facecam->gameplay switch, which one static split crop cannot serve),
+    hook 0.05 (how strong the window OPENS — speech density + audio
+    energy in its first ~3s; a bonus, not a rule).
     Raises if zero valid windows exist; returns fewer than requested
     only when the source genuinely has too little usable content, with
     the reason recorded on each clip. ``face_profile`` is a list of
@@ -1299,6 +1317,14 @@ def select_highlights(segments: list[dict], source_duration: float,
                 continue
             word_count = len(words)
             density = word_count / span if span else 0.0
+            # Hook (Batch 2): how strong the window OPENS. Words spoken
+            # in the first 3s + audio energy there. Raw values only
+            # here — normalised against the best candidate in the
+            # scoring pass below, like density.
+            opening_words = [w for w in words
+                             if start <= w["start"] < start + 3.0]
+            hook_density = len(opening_words) / 3.0
+            hook_energy = energy_in(start, min(window_end, start + 3.0))
             # Normalise density against the densest candidate (computed below).
             # Coverage is measured on the FINAL window (after any extension
             # into nearby context for the duration mode), so a window padded
@@ -1310,6 +1336,8 @@ def select_highlights(segments: list[dict], source_duration: float,
                 "coverage": speech_coverage(units, start, window_end),
                 "silence": min(2.0, gap_before(start) + gap_after(window_end)) / 2.0,
                 "energy": energy_in(start, window_end),
+                "hook_density": hook_density,
+                "hook_energy": hook_energy,
                 "gameplay": gameplay_in(start, window_end),
                 "stability": stability_in(start, window_end),
                 "text": " ".join(u["text"] for u in units[i:j + 1])[:300],
@@ -1318,10 +1346,17 @@ def select_highlights(segments: list[dict], source_duration: float,
 
     if candidates:
         max_density = max(c["density"] for c in candidates) or 1.0
+        max_hook_density = max(c["hook_density"] for c in candidates) or 1.0
+        max_hook_energy = max(c["hook_energy"] for c in candidates) or 1.0
         for c in candidates:
             density_n = min(1.0, c["density"] / max_density)
             completeness = 1.0 if c["complete"] else 0.4
             silence_n = min(1.0, c["silence"])
+            # Hook: half opening speech density, half opening energy,
+            # each normalised against the best candidate's opening.
+            hook_n = round(0.5 * min(1.0, c["hook_density"] / max_hook_density)
+                           + 0.5 * min(1.0, c["hook_energy"] / max_hook_energy), 4)
+            c["hook"] = hook_n
             c["score"] = round(
                 W_DENSITY * density_n
                 + W_COVERAGE * c["coverage"]
@@ -1329,7 +1364,8 @@ def select_highlights(segments: list[dict], source_duration: float,
                 + W_SILENCE * silence_n
                 + W_ENERGY * min(1.0, c["energy"])
                 + W_GAMEPLAY * c["gameplay"]
-                + W_STABILITY * c["stability"], 4)
+                + W_STABILITY * c["stability"]
+                + W_HOOK * hook_n, 4)
             # The breakdown is the same normalised per-signal values
             # the score above was just built from — nothing invented,
             # nothing re-derived.
@@ -1341,11 +1377,14 @@ def select_highlights(segments: list[dict], source_duration: float,
                 "energy": min(1.0, c["energy"]),
                 "gameplay": c["gameplay"],
                 "stability": c["stability"],
+                "hook": hook_n,
             })
             c["signals"] = ["speech_density", "sentence_complete" if c["complete"] else "trimmed_to_duration",
                             "silence_boundary", "audio_coverage"]
             if c["energy"] > 0:
                 c["signals"].append("audio_energy_supporting")
+            if c["hook"] >= 0.7:
+                c["signals"].append("strong_opening")
             if c["gameplay"] >= 0.5:
                 c["signals"].append("gameplay_present")
             if c["stability"] >= 0.8:
@@ -1356,7 +1395,8 @@ def select_highlights(segments: list[dict], source_duration: float,
                 f"audio coverage {c['coverage']:.2f}, "
                 f"sentence {'complete' if c['complete'] else 'trimmed'}, "
                 f"silence boundary {silence_n:.2f}, audio energy (supporting) {c['energy']:.2f}, "
-                f"gameplay {c['gameplay']:.2f}, scene stability {c['stability']:.2f}."
+                f"gameplay {c['gameplay']:.2f}, scene stability {c['stability']:.2f}, "
+                f"opening hook {hook_n:.2f}."
             )
         chosen = _select_usable_windows(candidates, count)
         if len(chosen) < count:
@@ -1569,6 +1609,72 @@ def _fmt_ass_time(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
+def _estimate_text_width_px(text: str, fs: int) -> float:
+    """Conservative rendered width of one line of DejaVu Sans Bold at
+    font size ``fs`` (pixels), from per-character width factors.
+
+    No PIL in the worker venv, so this is a heuristic — deliberately
+    pessimistic (caps 0.68em, lowercase 0.52em, digits 0.56em, space
+    0.28em, other punctuation 0.32em), so a line judged to fit has
+    real headroom and a line judged too wide is scaled down. Used by
+    the Batch 2 caption auto-fit: a long word must never overflow the
+    frame just because libass cannot break it.
+    """
+    total = 0.0
+    for ch in text:
+        if ch == " ":
+            total += 0.28
+        elif ch.isupper():
+            total += 0.68
+        elif ch.isdigit():
+            total += 0.56
+        elif ch.isalpha():
+            total += 0.52
+        else:
+            total += 0.32
+    return total * fs
+
+
+def _fit_font_size(text: str, fs: int, max_width: float) -> int | None:
+    """Smaller font size that fits ``text`` in ``max_width`` px, or
+    None when ``fs`` already fits. Floored at 24 so captions stay
+    readable — a word that still would not fit at 24 is left at 24
+    (libass then wraps it; a 24pt overflow is a one-word edge case,
+    not a silent clip of the frame)."""
+    if _estimate_text_width_px(text, fs) <= max_width:
+        return None
+    fitted = int(fs * max_width / _estimate_text_width_px(text, fs))
+    return max(24, fitted)
+
+
+def _caption_align_mv(position: str, fs: int, tw: int, th: int,
+                      divider_y: int | None, layout: str,
+                      headline_style: str = "bold_bar") -> tuple[int, int]:
+    """(ASS alignment, MarginV) for captions at ``position``.
+
+    - "bottom" (default, pre-Batch-2 behaviour): on the split divider
+      when split, lower-centre otherwise (out of the face).
+    - "top": near the top, below the headline band (MarginV 300 clears
+      the bold-bar headline at 120), so headline and captions stack
+      instead of colliding.
+    - "middle": vertically centred (top alignment at th/2 - fs/2).
+      When the headline is the big centred one, the first 4s would
+      collide, so middle captions drop to 62% down for those 4s' sake
+      — the setting still reads "Middle" everywhere; the shift is a
+      layout guard, not a different position.
+    """
+    split = layout == "split" and divider_y is not None
+    if position == "top":
+        return 8, 300
+    if position == "middle":
+        if headline_style == "big_centre":
+            return 8, int(th * 0.62)
+        return 8, max(0, th // 2 - fs // 2)
+    if split:
+        return 8, max(0, divider_y - fs // 2)
+    return 2, 140
+
+
 def _clip_words(segments: list[dict], start: float, end: float) -> list[dict]:
     """Word-level timings inside [start, end], shifted to 0-based."""
     words: list[dict] = []
@@ -1688,9 +1794,16 @@ def _campaign_on_screen_text(settings: dict) -> str | None:
 def _transcript_headline(clip: dict, segments: list[dict]) -> str | None:
     """Headline from the clip's own transcript (max 6 words / 60 chars).
 
-    The phrase holding the most emphatic/frequent content word wins;
-    without one, the window's first phrase. None when the window has
-    no transcript words at all — silence gets no invented headline.
+    Batch 2: each phrase in the window is SCORED, not just the one
+    holding the most frequent word. A phrase wins on emphasis presence
+    (one strong word makes a headline; repeating it does not), how
+    often its best word recurs in the window, speech density, and how
+    many distinct content words it carries — minus penalties for
+    filler-heavy phrases (um/uh/hmm), phrases trailing off on a
+    stopword ("... view is"), and phrases that are one word repeated
+    ("go go go"). Without a scored winner, the window's first phrase.
+    None when the window has no transcript words at all — silence gets
+    no invented headline.
     """
     words = _clip_words(segments, clip["start"], clip["end"])
     if not words:
@@ -1710,21 +1823,39 @@ def _transcript_headline(clip: dict, segments: list[dict]) -> str | None:
         text = " ".join(w["word"] for w in phrases[0][:6])
         return _cap_headline(text.upper()) if text else None
 
-    def word_score(word: str) -> tuple[int, int]:
-        clean = word.strip(_PUNCT).lower()
-        emphasis = 2 if clean in EMPHASIS_WORDS else 0
-        return (emphasis, counts.get(clean, 0))
+    def phrase_score(phrase: list[dict]) -> float:
+        if not phrase:
+            return -1.0
+        dur = max(0.1, phrase[-1]["end"] - phrase[0]["start"])
+        density = len(phrase) / dur
+        content = [w for w in phrase
+                   if w["word"].strip(_PUNCT).lower() not in _ON_SCREEN_STOPWORDS
+                   and w["word"].strip(_PUNCT)]
+        distinct = {w["word"].strip(_PUNCT).lower() for w in content}
+        # Presence, not count: one emphasis word makes a headline
+        # ("highest", "insane"), but saying it five times does not make
+        # it five times better — that is what let plain repetition win.
+        emphasis = 2.0 if any(
+            w["word"].strip(_PUNCT).lower() in EMPHASIS_WORDS for w in content) else 0.0
+        best_count = max((counts.get(w, 0) for w in distinct), default=0)
+        fillers = sum(1 for w in phrase
+                      if w["word"].strip(_PUNCT).lower() in FILLER_WORDS)
+        filler_frac = fillers / max(1, len(phrase))
+        # A headline that trails off on "is"/"the" reads unfinished.
+        trailing_stop = 1.0 if (
+            phrase[-1]["word"].strip(_PUNCT).lower() in _ON_SCREEN_STOPWORDS) else 0.0
+        # One word repeated is not a headline ("go go go go").
+        repeat_penalty = 1.0 if content and len(distinct) <= 1 and len(content) >= 3 else 0.0
+        return (emphasis + min(best_count, 2) * 0.5 + density * 0.3
+                + min(len(distinct), 4) * 0.2 - filler_frac * 2.0
+                - trailing_stop - repeat_penalty)
 
-    best = max(words, key=lambda w: word_score(w["word"]))
-    best_clean = best["word"].strip(_PUNCT).lower()
-    # The phrase holding the best word; a one-word phrase gets its
-    # neighbours so the headline reads as a phrase, not a lone word
-    # ("HIGHEST POINT OF THE TOWER", not "TOWER").
-    phrase_idx = 0
-    for i, phrase in enumerate(phrases):
-        if any(w["word"].strip(_PUNCT).lower() == best_clean for w in phrase):
-            phrase_idx = i
-            break
+    scored = sorted(range(len(phrases)),
+                    key=lambda i: (-phrase_score(phrases[i]), i))
+    phrase_idx = scored[0]
+    log.debug("Headline pick: phrase %d of %d scored %.2f: %r",
+              phrase_idx, len(phrases), phrase_score(phrases[phrase_idx]),
+              " ".join(w["word"] for w in phrases[phrase_idx]))
     parts = list(phrases[phrase_idx])
     if len(parts) < 3 and phrase_idx > 0:
         parts = list(phrases[phrase_idx - 1]) + parts
@@ -1750,18 +1881,48 @@ def derive_on_screen_text(clip: dict, segments: list[dict],
 
 
 def write_headline_ass(text: str, duration: float, ass_path: Path,
-                       tw: int, th: int) -> bool:
-    """Write a minimal ASS file with one top-centre headline event.
+                       tw: int, th: int, style: str = "bold_bar") -> bool:
+    """Write a minimal ASS file with one headline event.
 
-    Shown for the first 4 seconds of the clip only, near the top
-    (MarginV 120) so it never collides with the split divider
-    captions (divider y=864 at 1080x1920). Returns False when there
-    is nothing to show.
+    Shown for the first 4 seconds of the clip only. Batch 2 styles
+    (per-job setting ``headline_style``; unknown values fall back to
+    "bold_bar", the look every job used before Batch 2):
+    - "bold_bar": top-centre, huge bold white on a translucent bar
+      (the original look; MarginV 120).
+    - "lower_third": a bottom band (opaque box, Alignment 2, MarginV
+      40) — sits below bottom captions (MarginV 140), so the two stack
+      instead of colliding.
+    - "big_centre": very large, vertically centred (Alignment 5) —
+      the clip's hook as a title card. Middle captions drop to 62%
+      while it shows (see _caption_align_mv), so they never overlap it.
+    A single very long word is scaled down (auto-fit) so it cannot
+    overflow the frame; ordinary text wraps as before. Returns False
+    when there is nothing to show.
     """
     if not text or duration <= 0:
         return False
-    fs = 84 if tw >= 1080 else 60
+    style = style if style in HEADLINE_STYLES else "bold_bar"
     show = min(4.0, duration)
+    if style == "lower_third":
+        fs = 64 if tw >= 1080 else 48
+        align, mv = 2, 40
+        border, outline_w, shadow = 3, 2, 0
+        back = "&HCC000000"
+    elif style == "big_centre":
+        fs = 110 if tw >= 1080 else 80
+        align, mv = 5, 0
+        border, outline_w, shadow = 1, 5, 1
+        back = "&H80000000"
+    else:  # bold_bar
+        fs = 84 if tw >= 1080 else 60
+        align, mv = 8, 120
+        border, outline_w, shadow = 1, 4, 0
+        back = "&H80000000"
+    # Auto-fit: a single long word must fit on one line; the rest of
+    # the headline may wrap (WrapStyle 0) as before.
+    longest = max(text.split(), key=len) if text.split() else text
+    fitted = _fit_font_size(longest, fs, tw - 120)
+    fs_prefix = f"{{\\fs{fitted}}}" if fitted is not None else ""
     header = (
         "[Script Info]\n"
         "; Magician Clipper — on-screen headline\n"
@@ -1776,11 +1937,11 @@ def write_headline_ass(text: str, duration: float, ass_path: Path,
         "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: Headline,DejaVu Sans,{fs},&H00FFFFFF,&H000000FF,&H00000000,"
-        f"&H80000000,-1,0,0,0,100,100,0,0,1,4,0,8,40,40,120,1\n"
+        f"{back},-1,0,0,0,100,100,0,0,{border},{outline_w},{shadow},{align},40,40,{mv},1\n"
         "\n[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
         "Effect, Text\n"
-        f"Dialogue: 0,0:00:00.00,{_fmt_ass_time(show)},Headline,,0,0,0,,{_ass_escape(text)}\n"
+        f"Dialogue: 0,0:00:00.00,{_fmt_ass_time(show)},Headline,,0,0,0,,{fs_prefix}{_ass_escape(text)}\n"
     )
     ass_path.write_text(header, encoding="utf-8")
     return True
@@ -1789,24 +1950,51 @@ def write_headline_ass(text: str, duration: float, ass_path: Path,
 def write_clip_ass(segments: list[dict], start: float, end: float,
                    style_id: str, ass_path: Path,
                    divider_y: int | None, tw: int, th: int,
-                   layout: str) -> bool:
+                   layout: str, caption_position: str = "bottom",
+                   headline_style: str = "bold_bar") -> bool:
     """Write an ASS caption file for the clip window (0-based times).
 
     ``divider_y`` is the y of the streamer/gameplay divider in output
     pixels (split layout); None for layouts without a divider. Returns
     True when at least one event was written. ``classic`` is NOT handled
     here — it uses the legacy SRT path in render_clip.
+
+    Batch 2 ``caption_position`` ("bottom" default = the pre-Batch-2
+    spot, "top", "middle") moves the captions via _caption_align_mv;
+    ``headline_style`` only matters for the middle-vs-big-centre
+    collision guard. Batch 2 auto-fit: a line that would overflow the
+    frame is scaled down with a per-event {\\fs} override — the whole
+    line for the big single-line styles (punchy, word pop, animated),
+    the longest word only for full-sentence styles (clean_subs), which
+    may wrap. A fitted size never goes below 24.
     """
     duration = end - start
     big = tw >= 1080
     split = layout == "split" and divider_y is not None
+    position = caption_position if caption_position in CAPTION_POSITIONS else "bottom"
+    headline_style = headline_style if headline_style in HEADLINE_STYLES else "bold_bar"
 
     def margin_for(font_size: int) -> tuple[int, int]:
-        """(alignment, marginV) — captions sit ON the divider when split,
-        lower-centre otherwise (out of the face)."""
-        if split:
-            return 8, max(0, divider_y - font_size // 2)
-        return 2, 140
+        """(alignment, marginV) — Batch 2 caption position; "bottom"
+        is the pre-Batch-2 behaviour (on the divider when split,
+        lower-centre otherwise)."""
+        return _caption_align_mv(position, font_size, tw, th, divider_y,
+                                 layout, headline_style)
+
+    # Batch 2 auto-fit: scale a line down so it fits the frame.
+    # max_w is the frame minus the caption side margins plus safety.
+    max_w = tw - 120
+
+    def fit(text: str, fs: int, whole_line: bool = True) -> str:
+        """"{\\fsN}" prefix when ``text`` would overflow at ``fs`` —
+        the whole line for single-line styles, the longest word only
+        for full-sentence styles. "" when it already fits."""
+        probe = text
+        if not whole_line:
+            words = text.split()
+            probe = max(words, key=len) if words else text
+        fitted = _fit_font_size(probe, fs, max_w)
+        return f"{{\\fs{fitted}}}" if fitted is not None else ""
 
     styles: dict[str, str] = {}
     if style_id == "punchy":
@@ -1830,14 +2018,23 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
             f"Style: Title,DejaVu Sans,{fs},&H00000000,&H000000FF,&H00FFFFFF,"
             f"&H00FFFFFF,-1,0,0,0,100,100,0,0,3,0,0,{align},40,40,{mv},1"
         )
+        # The Title event is the hook title (its own spot); only the
+        # CleanSubs captions follow the position setting — and "bottom"
+        # keeps the established (2, 40) subtitle spot, not the divider.
+        cs_align, cs_mv = ((2, 40) if position == "bottom" else
+                           _caption_align_mv(position, 36, tw, th, divider_y,
+                                             layout, headline_style))
         styles["CleanSubs"] = (
             "Style: CleanSubs,DejaVu Sans,36,&H00FFFFFF,&H000000FF,&H00000000,"
-            "&H80000000,0,0,0,0,100,100,0,0,1,2,0,2,40,40,40,1"
+            f"&H80000000,0,0,0,0,100,100,0,0,1,2,0,{cs_align},40,40,{cs_mv},1"
         )
     elif style_id == "clean_subs":
+        cs_align, cs_mv = ((2, 40) if position == "bottom" else
+                           _caption_align_mv(position, 36, tw, th, divider_y,
+                                             layout, headline_style))
         styles["CleanSubs"] = (
             "Style: CleanSubs,DejaVu Sans,36,&H00FFFFFF,&H000000FF,&H00000000,"
-            "&H80000000,0,0,0,0,100,100,0,0,1,2,0,2,40,40,40,1"
+            f"&H80000000,0,0,0,0,100,100,0,0,1,2,0,{cs_align},40,40,{cs_mv},1"
         )
     elif style_id in ("karaoke", "bounce", "typewriter", "sweep",
                       "neon", "slam", "outline", "gradient",
@@ -1900,9 +2097,10 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                     e = min(e, duration)
                     if e <= s:
                         continue
+                    phrase_text = " ".join(w["word"] for w in phrase)
                     events.append(
                         f"Dialogue: 0,{_fmt_ass_time(s)},{_fmt_ass_time(e)},"
-                        f"Punchy,,0,0,0,,{_punchy_text(phrase)}"
+                        f"Punchy,,0,0,0,,{fit(phrase_text, fs)}{_punchy_text(phrase)}"
                     )
             else:
                 for i, w in enumerate(words):
@@ -1916,7 +2114,7 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                         continue
                     events.append(
                         f"Dialogue: 0,{_fmt_ass_time(s)},{_fmt_ass_time(e)},"
-                        f"WordPop,,0,0,0,,{_ass_escape(w['word'])}"
+                        f"WordPop,,0,0,0,,{fit(w['word'], fs)}{_ass_escape(w['word'])}"
                     )
         if not events:
             # No word timings: fall back to segment text, chunked 4 words.
@@ -1932,7 +2130,7 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                     phrase = [{"word": w, "start": cs, "end": ce} for w in chunk]
                     events.append(
                         f"Dialogue: 0,{_fmt_ass_time(cs)},{_fmt_ass_time(ce)},"
-                        f"Punchy,,0,0,0,,{_punchy_text(phrase)}"
+                        f"Punchy,,0,0,0,,{fit(' '.join(chunk), fs)}{_punchy_text(phrase)}"
                     )
     elif style_id in ("karaoke", "bounce", "typewriter", "sweep",
                       "neon", "slam", "outline", "gradient",
@@ -1947,18 +2145,20 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                 s, e = phrase[0]["start"], phrase[-1]["end"]
                 if e <= s:
                     continue
+                phrase_text = " ".join(w["word"] for w in phrase)
                 parts = []
                 for w in phrase:
                     cs = max(10, int(round((w["end"] - w["start"]) * 100)))
                     parts.append("{\\k%d}%s" % (cs, _ass_escape(w["word"])))
                 events.append(
                     f"Dialogue: 0,{_fmt_ass_time(s)},{_fmt_ass_time(min(e, duration))},"
-                    f"Karaoke,,0,0,0,,{' '.join(parts)}"
+                    f"Karaoke,,0,0,0,,{fit(phrase_text, fs)}{' '.join(parts)}"
                 )
         elif style_id == "sweep":
             # Full phrase always visible; one event per word, with the
             # active word coloured yellow — the highlight sweeps across.
             for phrase in _group_phrases(words):
+                phrase_text = " ".join(w["word"] for w in phrase)
                 for i, w in enumerate(phrase):
                     s = w["start"]
                     e = (phrase[i + 1]["start"] if i + 1 < len(phrase)
@@ -1974,16 +2174,19 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                             parts.append(text)
                     events.append(
                         f"Dialogue: 0,{_fmt_ass_time(s)},{_fmt_ass_time(min(e, duration))},"
-                        f"Sweep,,0,0,0,,{' '.join(parts)}"
+                        f"Sweep,,0,0,0,,{fit(phrase_text, fs)}{' '.join(parts)}"
                     )
         elif style_id == "typewriter":
             # Letters appear one by one: each event holds the phrase
-            # typed so far, ending when the phrase ends.
+            # typed so far, ending when the phrase ends. The fit is
+            # computed on the FULL phrase, once, so the size never
+            # jumps as letters appear.
             for phrase in _group_phrases(words):
                 text = " ".join(w["word"] for w in phrase)
                 s, e = phrase[0]["start"], phrase[-1]["end"]
                 if e <= s or not text:
                     continue
+                phrase_fit = fit(text, fs)
                 per_char = (e - s) / max(1, len(text))
                 for k in range(len(text)):
                     cs = s + k * per_char
@@ -1992,7 +2195,7 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                         break
                     events.append(
                         f"Dialogue: 0,{_fmt_ass_time(cs)},{_fmt_ass_time(ce)},"
-                        f"Typewriter,,0,0,0,,{_ass_escape(text[:k + 1])}"
+                        f"Typewriter,,0,0,0,,{phrase_fit}{_ass_escape(text[:k + 1])}"
                     )
         else:
             # Word-at-a-time styles: bounce / slam / neon / outline /
@@ -2039,7 +2242,7 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                     prefix = ""
                 events.append(
                     f"Dialogue: 0,{_fmt_ass_time(s)},{_fmt_ass_time(e)},"
-                    f"{sname},,0,0,0,,{prefix}{_ass_escape(w['word'])}"
+                    f"{sname},,0,0,0,,{fit(w['word'], fs)}{prefix}{_ass_escape(w['word'])}"
                 )
         if not events:
             # No word timings: fall back to segment text, chunked into
@@ -2056,7 +2259,7 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                     cs, ce = s - start + j * span, s - start + (j + 1) * span
                     events.append(
                         f"Dialogue: 0,{_fmt_ass_time(cs)},{_fmt_ass_time(ce)},"
-                        f"{sname},,0,0,0,,{_ass_escape(' '.join(chunk))}"
+                        f"{sname},,0,0,0,,{fit(' '.join(chunk), fs)}{_ass_escape(' '.join(chunk))}"
                     )
     elif style_id == "title_card":
         # Hook title: the clip's first 8 words, uppercased, on the divider
@@ -2071,7 +2274,7 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
             title = _ass_escape(" ".join(first_words)).upper()
             events.append(
                 f"Dialogue: 0,0:00:00.00,{_fmt_ass_time(min(4.0, duration))},"
-                f"Title,,0,0,0,,{title}"
+                f"Title,,0,0,0,,{fit(' '.join(first_words).upper(), fs)}{title}"
             )
         for seg in segments:
             s, e = max(seg["start"], start), min(seg["end"], end)
@@ -2079,7 +2282,7 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                 continue
             events.append(
                 f"Dialogue: 0,{_fmt_ass_time(s - start)},{_fmt_ass_time(e - start)},"
-                f"CleanSubs,,0,0,0,,{_ass_escape(seg['text'])}"
+                f"CleanSubs,,0,0,0,,{fit(seg['text'], 36, whole_line=False)}{_ass_escape(seg['text'])}"
             )
     elif style_id == "clean_subs":
         for seg in segments:
@@ -2088,7 +2291,7 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                 continue
             events.append(
                 f"Dialogue: 0,{_fmt_ass_time(s - start)},{_fmt_ass_time(e - start)},"
-                f"CleanSubs,,0,0,0,,{_ass_escape(seg['text'])}"
+                f"CleanSubs,,0,0,0,,{fit(seg['text'], 36, whole_line=False)}{_ass_escape(seg['text'])}"
             )
 
     if not events:
@@ -2776,16 +2979,21 @@ def _tracked_crop(sw: int, sh: int, tw: int, th: int,
     """Crop-to-cover filter following the face trajectory (Batch 1).
     Same cover geometry as _center_crop_filter, but the crop offset is
     a time-varying expression from the trajectory instead of a fixed
-    centre. Returns the filter string (without scale)."""
+    centre. Includes the scale to the target size, like
+    _center_crop_filter — without it the clip would come out at crop
+    size whenever auto-zoom (whose zoompan also scales) is off."""
     src_ar = sw / sh if sh else 16 / 9
     target_ar = tw / th
     if src_ar > target_ar:
         cw = f"ih*{target_ar:.6f}"
         x = f"min(max({_pan_expr(face_track, 0)}*iw-({cw})/2,0),iw-({cw}))"
-        return f"crop={cw}:ih:{x}:0"
+        # The x expression holds commas (nested if()/min()/max()) so it
+        # MUST be single-quoted: unquoted, ffmpeg's filtergraph parser
+        # splits it into separate filters ("No such filter: '0.000)'").
+        return f"crop={cw}:ih:'{x}':0,scale={tw}:{th}"
     ch = f"iw/{target_ar:.6f}"
     y = f"min(max({_pan_expr(face_track, 1)}*ih-({ch})/2,0),ih-({ch}))"
-    return f"crop=iw:{ch}:0:{y}"
+    return f"crop=iw:{ch}:0:'{y}',scale={tw}:{th}"
 
 
 def _tracked_inset_crop(box, sw: int, sh: int, face_track: list[tuple]) -> str | None:
@@ -2799,7 +3007,9 @@ def _tracked_inset_crop(box, sw: int, sh: int, face_track: list[tuple]) -> str |
     top_h_src = int(top_w * 0.8)
     x = f"min(max({_pan_expr(face_track, 0)}*iw-{top_w}/2,0),iw-{top_w})"
     y = f"min(max({_pan_expr(face_track, 1)}*ih-{top_h_src}*0.45,0),ih-{top_h_src})"
-    return f"crop={top_w}:{top_h_src}:{x}:{y}"
+    # Same quoting rule as _tracked_crop: the if()/min()/max()
+    # expressions hold commas, so both offsets are single-quoted.
+    return f"crop={top_w}:{top_h_src}:'{x}':'{y}'"
 
 
 def _median_face_box(face_track: list[tuple]) -> tuple[float, float, float, float]:
@@ -3062,6 +3272,14 @@ def render_clip(source: Path, clip: dict, settings: dict,
     style_id = (settings.get("caption_style") or "punchy").lower()
     if style_id not in CAPTION_STYLES:
         style_id = "punchy"
+    # Batch 2: headline look + caption position (unknown values fall
+    # back to the pre-Batch-2 defaults, so old jobs render as before).
+    headline_style = (settings.get("headline_style") or "bold_bar")
+    if headline_style not in HEADLINE_STYLES:
+        headline_style = "bold_bar"
+    caption_position = (settings.get("caption_position") or "bottom")
+    if caption_position not in CAPTION_POSITIONS:
+        caption_position = "bottom"
     captions_path: Path | None = None
     captions_is_ass = False
     if captions_on:
@@ -3073,7 +3291,7 @@ def render_clip(source: Path, clip: dict, settings: dict,
             candidate = job_dir / f"clip_{uuid.uuid4().hex}.ass"
             divider = 864 if (layout == "split" and ratio == "9:16") else None
             if write_clip_ass(render_segments, render_start, render_end, style_id, candidate,
-                              divider, tw, th, layout):
+                              divider, tw, th, layout, caption_position, headline_style):
                 captions_path = candidate
                 captions_is_ass = True
 
@@ -3086,10 +3304,11 @@ def render_clip(source: Path, clip: dict, settings: dict,
     if bool(settings.get("on_screen_text", False)):
         headline = derive_on_screen_text(render_clip_view, render_segments, settings)
         if headline:
-            log.info("Clip %.1f-%.1fs on-screen headline: %r",
-                     start, end, headline)
+            log.info("Clip %.1f-%.1fs on-screen headline: %r (style %s)",
+                     start, end, headline, headline_style)
             candidate = job_dir / f"clip_{uuid.uuid4().hex}_headline.ass"
-            if write_headline_ass(headline, render_duration, candidate, tw, th):
+            if write_headline_ass(headline, render_duration, candidate, tw, th,
+                                  headline_style):
                 headline_path = candidate
         else:
             log.info("Clip %.1f-%.1fs: on-screen text on, but no headline "
@@ -3145,6 +3364,10 @@ def render_clip(source: Path, clip: dict, settings: dict,
             fps_applied = True
             log.info("Clip %.1f-%.1fs: auto-zoom punch-in over %d moment(s).",
                      start, end, len(render_moments))
+    # Batch 2: mild sharpening after layout/zoom, before captions —
+    # the text stays crisp because it is burned in after this.
+    chains.append(f"{video_label}unsharp=5:5:0.5:5:5:0.0[vu]")
+    video_label = "[vu]"
     if captions_path is not None:
         if captions_is_ass:
             chains.append(
@@ -3152,10 +3375,23 @@ def render_clip(source: Path, clip: dict, settings: dict,
             )
         else:
             font_size = 46 if tw >= 1080 else 34
+            # Batch 2: the legacy SRT path honours the caption position
+            # too; "bottom" keeps the established Alignment 2 / MarginV 70.
+            # (The divider is only defined on the ASS path, so it is
+            # recomputed here — middle does not use it, but the helper
+            # takes it for the shared signature.)
+            srt_divider = 864 if (layout == "split" and ratio == "9:16") else None
+            if caption_position == "top":
+                srt_align, srt_mv = 8, 300
+            elif caption_position == "middle":
+                srt_align, srt_mv = _caption_align_mv(
+                    "middle", font_size, tw, th, srt_divider, layout, headline_style)
+            else:
+                srt_align, srt_mv = 2, 70
             style = (
                 "FontName=DejaVu Sans,FontSize=%d,PrimaryColour=&HFFFFFF,"
                 "OutlineColour=&H000000,BorderStyle=1,Outline=2,Shadow=0,"
-                "Bold=1,Alignment=2,MarginV=70" % font_size
+                f"Bold=1,Alignment={srt_align},MarginV={srt_mv}" % font_size
             )
             chains.append(
                 f"{video_label}subtitles={escape_ffmpeg_path(captions_path)}"
@@ -3178,9 +3414,16 @@ def render_clip(source: Path, clip: dict, settings: dict,
            "-filter_complex", filter_complex,
            "-map", "[vout]"]
     if source_info["has_audio"]:
+        # Batch 2: loudness-normalised to -14 LUFS (the level TikTok /
+        # Instagram expect) and AAC 192k. Single-pass loudnorm on the
+        # trimmed clip; it does not change the duration.
         cmd += ["-map", "0:a"]
-        cmd += ["-c:a", "aac", "-b:a", "128k"]
-    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        cmd += ["-af", "loudnorm=I=-14:TP=-1.5:LRA=11"]
+        cmd += ["-c:a", "aac", "-b:a", "192k"]
+    # Batch 2: CRF 18 (was 20) with a 16 Mbps ceiling — visibly cleaner
+    # on busy gameplay, same preset so render time barely moves.
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-maxrate", "16000k", "-bufsize", "32000k",
             "-movflags", "+faststart", "-t", str(render_duration), str(out_path)]
     proc = run(cmd, timeout=1800)
     if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
@@ -3340,7 +3583,7 @@ def apply_brand_assets(clip_path: Path, intro_path: Path | None = None,
     audio stream gets a silent anullsrc track of its own duration, so a
     missing audio stream can never fail the concat. The segments are
     joined with the concat filter (n=2 or 3) and re-encoded libx264 +
-    aac with the same preset/crf render_clip uses (veryfast / 20).
+    aac with the same preset/crf render_clip uses (veryfast / 18, Batch 2).
 
     Returns (final_path, intro_applied, outro_applied). With no usable
     brand segment the original clip_path is returned untouched — no
@@ -3415,8 +3658,8 @@ def apply_brand_assets(clip_path: Path, intro_path: Path | None = None,
         cmd += ["-i", str(path)]
     cmd += ["-filter_complex", ";".join(chains),
             "-map", "[vout]", "-map", "[aout]",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-c:a", "aac", "-b:a", "128k",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart", str(out_path)]
     try:
         proc = run(cmd, timeout=1800)

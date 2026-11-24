@@ -24,9 +24,14 @@ import { PageHeader } from '../components/PageHeader'
 import { ENGINE_URL, extractAudio, probeVideo, type ProbeResult } from '../lib/api'
 import { formatBytes, formatDuration } from '../lib/format'
 import {
+  CAPTION_POSITION_LABELS,
   createJob,
+  HEADLINE_STYLE_DESCRIPTIONS,
+  HEADLINE_STYLE_LABELS,
   SELECTION_MODE_DESCRIPTIONS,
   SELECTION_MODE_LABELS,
+  type CaptionPosition,
+  type HeadlineStyle,
   type SelectionMode,
 } from '../lib/jobs'
 import { translateLegacyCaptionPreset } from '../lib/captionStyles'
@@ -391,6 +396,13 @@ export function ClipperPage() {
     if (typeof s.face_tracking === 'boolean') patch.faceTracking = s.face_tracking
     if (typeof s.silence_removal === 'boolean') patch.silenceRemoval = s.silence_removal
     if (typeof s.filler_removal === 'boolean') patch.fillerRemoval = s.filler_removal
+    // Batch 2 (2026-11-25): headline look + caption position.
+    if (s.headline_style === 'bold_bar' || s.headline_style === 'lower_third' || s.headline_style === 'big_centre') {
+      patch.headlineStyle = s.headline_style
+    }
+    if (s.caption_position === 'bottom' || s.caption_position === 'top' || s.caption_position === 'middle') {
+      patch.captionPosition = s.caption_position
+    }
     if (CONTENT_TYPES.some((c) => c.id === s.content_type)) {
       patch.contentType = s.content_type as ClipSpec['contentType']
     }
@@ -463,6 +475,8 @@ export function ClipperPage() {
       faceTracking: spec.faceTracking ?? true,
       silenceRemoval: spec.silenceRemoval ?? true,
       fillerRemoval: spec.fillerRemoval ?? true,
+      headlineStyle: spec.headlineStyle ?? 'bold_bar',
+      captionPosition: spec.captionPosition ?? 'bottom',
       jobType: 'myself',
       notes: keywordsAvoid.trim()
         ? `Keywords to avoid: ${keywordsAvoid.trim()}`
@@ -1475,6 +1489,48 @@ export function ClipperPage() {
                   </span>
                 </div>
               </div>
+
+              {/* Batch 2 headline style + caption position — defaults
+                  are the pre-Batch-2 behaviour (bold bar, bottom). */}
+              <label className="block">
+                <span className="text-sm font-medium text-white">Headline style</span>
+                <select
+                  value={spec.headlineStyle ?? 'bold_bar'}
+                  onChange={(e) =>
+                    updateSpec({ headlineStyle: e.target.value as HeadlineStyle })
+                  }
+                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
+                >
+                  {(Object.keys(HEADLINE_STYLE_LABELS) as HeadlineStyle[]).map((s) => (
+                    <option key={s} value={s}>
+                      {HEADLINE_STYLE_LABELS[s]}
+                    </option>
+                  ))}
+                </select>
+                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
+                  {HEADLINE_STYLE_DESCRIPTIONS[spec.headlineStyle ?? 'bold_bar']}
+                </span>
+              </label>
+
+              <label className="block">
+                <span className="text-sm font-medium text-white">Caption position</span>
+                <select
+                  value={spec.captionPosition ?? 'bottom'}
+                  onChange={(e) =>
+                    updateSpec({ captionPosition: e.target.value as CaptionPosition })
+                  }
+                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
+                >
+                  {(Object.keys(CAPTION_POSITION_LABELS) as CaptionPosition[]).map((p) => (
+                    <option key={p} value={p}>
+                      {CAPTION_POSITION_LABELS[p]}
+                    </option>
+                  ))}
+                </select>
+                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
+                  Where the burn-in captions sit — never over the headline.
+                </span>
+              </label>
 
               {/* Batch 1 clip enhancements — all default ON. A spec saved
                   before they existed has no value; `?? true` keeps the

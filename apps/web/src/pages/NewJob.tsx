@@ -20,12 +20,17 @@ import {
   isCaptionStyleId,
 } from '../lib/captionStyles'
 import {
+  CAPTION_POSITION_LABELS,
   createJob,
   getJob,
+  HEADLINE_STYLE_DESCRIPTIONS,
+  HEADLINE_STYLE_LABELS,
   LAYOUT_LABELS,
   SELECTION_MODE_DESCRIPTIONS,
   SELECTION_MODE_LABELS,
+  type CaptionPosition,
   type ClipLayout,
+  type HeadlineStyle,
   type JobSettings,
   type SelectionMode,
 } from '../lib/jobs'
@@ -235,6 +240,10 @@ export function NewJobPage() {
   const [faceTracking, setFaceTracking] = useState(true)
   const [silenceRemoval, setSilenceRemoval] = useState(true)
   const [fillerRemoval, setFillerRemoval] = useState(true)
+  // Batch 2 headline style + caption position — defaults are the
+  // pre-Batch-2 behaviour (bold bar, bottom).
+  const [headlineStyle, setHeadlineStyle] = useState<HeadlineStyle>('bold_bar')
+  const [captionPosition, setCaptionPosition] = useState<CaptionPosition>('bottom')
   const [jobType, setJobType] = useState<'myself' | 'campaign'>('myself')
   const [campaignRequirements, setCampaignRequirements] = useState('')
   // Notes for Muse: free-text brief for THIS job (campaign details,
@@ -363,6 +372,13 @@ export function NewJobPage() {
     if (typeof s.face_tracking === 'boolean') setFaceTracking(s.face_tracking)
     if (typeof s.silence_removal === 'boolean') setSilenceRemoval(s.silence_removal)
     if (typeof s.filler_removal === 'boolean') setFillerRemoval(s.filler_removal)
+    // Batch 2 (2026-11-25): headline style + caption position.
+    if (s.headline_style === 'bold_bar' || s.headline_style === 'lower_third' || s.headline_style === 'big_centre') {
+      setHeadlineStyle(s.headline_style)
+    }
+    if (s.caption_position === 'bottom' || s.caption_position === 'top' || s.caption_position === 'middle') {
+      setCaptionPosition(s.caption_position)
+    }
     if (s.job_type === 'myself' || s.job_type === 'campaign') setJobType(s.job_type)
     if (typeof s.campaign_requirements === 'string') setCampaignRequirements(s.campaign_requirements)
     if (typeof s.notes === 'string') setNotes(s.notes)
@@ -400,6 +416,8 @@ export function NewJobPage() {
     face_tracking: faceTracking,
     silence_removal: silenceRemoval,
     filler_removal: fillerRemoval,
+    headline_style: headlineStyle,
+    caption_position: captionPosition,
     job_type: jobType,
     campaign_requirements: campaignRequirements.trim() ? campaignRequirements : null,
     notes: notes.trim() ? notes : null,
@@ -517,6 +535,8 @@ export function NewJobPage() {
       faceTracking,
       silenceRemoval,
       fillerRemoval,
+      headlineStyle,
+      captionPosition,
       jobType,
       campaignRequirements: campaignRequirements.trim(),
       notes: notes.trim(),
@@ -1014,6 +1034,44 @@ export function NewJobPage() {
                 </div>
               </div>
 
+              {/* Batch 2 headline style + caption position — defaults are
+                  the pre-Batch-2 behaviour (bold bar, bottom). */}
+              <label className="block">
+                <span className="text-sm font-medium text-white">Headline style</span>
+                <select
+                  value={headlineStyle}
+                  onChange={(e) => setHeadlineStyle(e.target.value as HeadlineStyle)}
+                  className={`${selectClass} mt-2`}
+                >
+                  {(Object.keys(HEADLINE_STYLE_LABELS) as HeadlineStyle[]).map((s) => (
+                    <option key={s} value={s}>
+                      {HEADLINE_STYLE_LABELS[s]}
+                    </option>
+                  ))}
+                </select>
+                <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                  {HEADLINE_STYLE_DESCRIPTIONS[headlineStyle]}
+                </span>
+              </label>
+
+              <label className="block">
+                <span className="text-sm font-medium text-white">Caption position</span>
+                <select
+                  value={captionPosition}
+                  onChange={(e) => setCaptionPosition(e.target.value as CaptionPosition)}
+                  className={`${selectClass} mt-2`}
+                >
+                  {(Object.keys(CAPTION_POSITION_LABELS) as CaptionPosition[]).map((p) => (
+                    <option key={p} value={p}>
+                      {CAPTION_POSITION_LABELS[p]}
+                    </option>
+                  ))}
+                </select>
+                <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                  Where the burn-in captions sit — never over the headline.
+                </span>
+              </label>
+
               {/* Batch 1 clip enhancements — all default ON. */}
               <div>
                 <span className="text-sm font-medium text-white">Clip enhancements</span>
@@ -1216,6 +1274,8 @@ export function NewJobPage() {
                 ['Caption style', captionsEnabled ? getCaptionStyle(captionStyle).name : 'Off'],
                 ['Clip selection', SELECTION_MODE_LABELS[selectionMode]],
                 ['On-screen text', onScreenText ? 'On' : 'Off'],
+                ['Headline style', HEADLINE_STYLE_LABELS[headlineStyle]],
+                ['Caption position', CAPTION_POSITION_LABELS[captionPosition]],
                 ['Auto zoom', autoZoom ? 'On' : 'Off'],
                 ['Face tracking', faceTracking ? 'On' : 'Off'],
                 ['Silence removal', silenceRemoval ? 'On' : 'Off'],

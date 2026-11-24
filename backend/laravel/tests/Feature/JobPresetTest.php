@@ -115,6 +115,50 @@ class JobPresetTest extends TestCase
             ->assertJsonValidationErrors(['settings.silence_removal']);
     }
 
+    /**
+     * Batch 2 (2026-11-25): headline style + caption position round-trip
+     * through preset save and list; an invalid value is rejected by the
+     * same shared JobSettingsRules.
+     */
+    public function test_batch2_headline_style_and_caption_position_round_trip_through_preset(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/presets', [
+                'name' => 'Big centre top captions',
+                'settings' => $this->validSettings([
+                    'headline_style' => 'big_centre',
+                    'caption_position' => 'top',
+                ]),
+            ])
+            ->assertStatus(201)
+            ->assertJsonPath('preset.settings.headline_style', 'big_centre')
+            ->assertJsonPath('preset.settings.caption_position', 'top');
+
+        $this->actingAs($user, 'sanctum')
+            ->getJson('/api/v1/presets')
+            ->assertStatus(200)
+            ->assertJsonPath('presets.0.settings.headline_style', 'big_centre')
+            ->assertJsonPath('presets.0.settings.caption_position', 'top');
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/presets', [
+                'name' => 'Bad style',
+                'settings' => $this->validSettings(['headline_style' => 'neon']),
+            ])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['settings.headline_style']);
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/presets', [
+                'name' => 'Bad position',
+                'settings' => $this->validSettings(['caption_position' => 'sideways']),
+            ])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['settings.caption_position']);
+    }
+
     public function test_duplicate_name_for_same_user_is_422_but_other_users_may_reuse_it(): void
     {
         $user = User::factory()->create();

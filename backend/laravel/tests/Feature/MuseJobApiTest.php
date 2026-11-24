@@ -259,6 +259,10 @@ class MuseJobApiTest extends TestCase
         $this->assertSame(true, $data[0]['settings']['face_tracking']);
         $this->assertSame(true, $data[0]['settings']['silence_removal']);
         $this->assertSame(true, $data[0]['settings']['filler_removal']);
+        // Batch 2 (2026-11-25): headline style + caption position ride
+        // the same payload, defaulting to the pre-Batch-2 behaviour.
+        $this->assertSame('bold_bar', $data[0]['settings']['headline_style']);
+        $this->assertSame('bottom', $data[0]['settings']['caption_position']);
     }
 
     /** Batch 1: a job created with the enhancements OFF carries OFF in the worker payload. */
