@@ -29,6 +29,7 @@ import {
   SELECTION_MODE_LABELS,
   type SelectionMode,
 } from '../lib/jobs'
+import { translateLegacyCaptionPreset } from '../lib/captionStyles'
 import {
   defaultClipSpec,
   setProjectFile,
@@ -76,23 +77,12 @@ const CAPTION_STYLES = [
 ] as const
 
 /**
- * These preset ids predate the 13 real caption styles the worker burns
- * in (see lib/captionStyles). Map each legacy preset to the real style
+ * These preset ids predate the real caption styles the worker burns in
+ * (see lib/captionStyles). The mapping lives there now —
+ * translateLegacyCaptionPreset maps each legacy preset to the real style
  * it most resembles — the job API rejects unknown style ids, so the
  * preset must never be sent as-is.
  */
-const CAPTION_PRESET_TO_STYLE: Record<string, string> = {
-  'bold-pop': 'punchy',
-  highlight: 'word_pop',
-  bounce: 'bounce',
-  karaoke: 'karaoke',
-  'neon-glow': 'neon',
-  'word-slam': 'slam',
-  modern: 'clean_subs',
-  podcast: 'classic',
-  cinematic: 'title_card',
-  minimal: 'clean_subs',
-}
 
 /** Processing mode → job quality (the worker renders at 'standard' unless told otherwise). */
 const PROCESSING_MODE_TO_QUALITY: Record<string, 'draft' | 'standard' | 'high'> = {
@@ -350,7 +340,7 @@ export function ClipperPage() {
       durationMaxSeconds: null,
       captionsEnabled: spec.captions,
       captionsLanguage: 'auto',
-      captionStyle: CAPTION_PRESET_TO_STYLE[captionPreset] ?? 'punchy',
+      captionStyle: translateLegacyCaptionPreset(captionPreset),
       selectionMode: spec.selectionMode ?? 'interesting_only',
       onScreenText: spec.onScreenText,
       jobType: 'myself',
@@ -625,7 +615,7 @@ export function ClipperPage() {
 
   const durationModeLabel =
     spec.durationMode === 'exact' ? 'exact' : spec.durationMode === 'minimum' ? 'min' : 'max'
-  const summary = `${spec.clipCount} clip${spec.clipCount === 1 ? '' : 's'} · ${durationModeLabel} ${spec.durationSeconds}s · ${spec.aspect} · ${spec.platform === 'tiktok' ? 'TikTok' : 'Instagram'} · captions ${spec.captions ? 'on' : 'off'}`
+  const summary = `${spec.clipCount} clip${spec.clipCount === 1 ? '' : 's'} · ${durationModeLabel} ${spec.durationSeconds}s · ${spec.aspect} · ${spec.platform === 'tiktok' ? 'TikTok' : 'Instagram'} · captions ${spec.captions ? 'on' : 'off'} · ${SELECTION_MODE_LABELS[spec.selectionMode ?? 'interesting_only']}`
   const captionLabel =
     CAPTION_STYLES.find((s) => s.id === captionPreset)?.label ?? captionPreset
   const contentLabel =

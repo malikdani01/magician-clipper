@@ -25,6 +25,7 @@ import {
   getJob,
   requestClipRerender,
   retryJob,
+  SELECTION_MODE_LABELS,
   type ClipRerender,
   type Job,
   type JobClip,
@@ -61,6 +62,12 @@ function settingRows(job: Job): Array<[string, string]> {
     ['Platform', s.platform === 'tiktok' ? 'TikTok' : 'Instagram'],
     ['Aspect ratio', s.aspect_ratio],
     ['Clips requested', String(s.clip_count)],
+    [
+      'Clip selection',
+      SELECTION_MODE_LABELS[
+        s.selection_mode === 'fill_any' ? 'fill_any' : 'interesting_only'
+      ],
+    ],
     ['Duration', duration],
     ['Captions', s.captions_enabled ? `On (${language})` : 'Off'],
     ['Caption style', getCaptionStyle(s.caption_style).name],

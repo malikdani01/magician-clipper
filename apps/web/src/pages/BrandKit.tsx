@@ -1,6 +1,10 @@
 import { useRef, useState } from 'react'
 import { Check, Clapperboard, ImagePlus, Palette, RotateCcw, Save } from 'lucide-react'
-import { CAPTION_PRESETS } from '../lib/captions'
+import {
+  CAPTION_STYLES,
+  getCaptionStyle,
+  translateLegacyCaptionPreset,
+} from '../lib/captionStyles'
 import { NotImplemented } from '../components/NotImplemented'
 import { PageHeader } from '../components/PageHeader'
 
@@ -19,7 +23,7 @@ const DEFAULTS: BrandKitSaved = {
   primary: '#7C3AED',
   accent: '#8B5CF6',
   font: 'Inter',
-  defaultCaptionPreset: 'bold-pop',
+  defaultCaptionPreset: 'punchy',
 }
 
 function loadSaved(): BrandKitSaved {
@@ -33,9 +37,11 @@ function loadSaved(): BrandKitSaved {
       accent: typeof parsed.accent === 'string' ? parsed.accent : DEFAULTS.accent,
       font: typeof parsed.font === 'string' ? parsed.font : DEFAULTS.font,
       defaultCaptionPreset:
-        typeof parsed.defaultCaptionPreset === 'string' &&
-        CAPTION_PRESETS.some((p) => p.id === parsed.defaultCaptionPreset)
-          ? parsed.defaultCaptionPreset
+        // The stored value is a REAL caption style id. Older saves
+        // hold a legacy wizard preset id (bold-pop, ...) — translate
+        // it to its real style; anything unknown falls back to Punchy.
+        typeof parsed.defaultCaptionPreset === 'string'
+          ? translateLegacyCaptionPreset(parsed.defaultCaptionPreset)
           : DEFAULTS.defaultCaptionPreset,
     }
   } catch {
@@ -99,8 +105,7 @@ export function BrandKitPage() {
     setSavedNote('Brand kit reset to defaults.')
   }
 
-  const activePreset =
-    CAPTION_PRESETS.find((p) => p.id === defaultCaptionPreset) ?? CAPTION_PRESETS[0]
+  const activePreset = getCaptionStyle(defaultCaptionPreset)
 
   return (
     <div>
@@ -188,9 +193,9 @@ export function BrandKitPage() {
                 }}
                 className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none"
               >
-                {CAPTION_PRESETS.map((preset) => (
-                  <option key={preset.id} value={preset.id}>
-                    {preset.label}
+                {CAPTION_STYLES.map((style) => (
+                  <option key={style.id} value={style.id}>
+                    {style.name}
                   </option>
                 ))}
               </select>
@@ -271,11 +276,9 @@ export function BrandKitPage() {
             <p className="text-lg font-bold text-white" style={{ fontFamily: font }}>
               {brandName || 'Your Brand'}
             </p>
-            <p className={`mt-1 text-sm ${activePreset.className}`}>
-              {activePreset.sample}
-            </p>
+            <p className="mt-1 text-sm font-bold text-white">{activePreset.sample}</p>
             <p className="mt-1 text-xs text-white/80">
-              Default caption style: {activePreset.label}
+              Default caption style: {activePreset.name}
             </p>
           </div>
           <p className="mt-3 text-xs leading-relaxed text-[var(--color-text-muted)]">

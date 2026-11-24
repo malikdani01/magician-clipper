@@ -5,8 +5,7 @@ import { EmptyState } from '../components/EmptyState'
 import { PageHeader } from '../components/PageHeader'
 import { ClipThumbnail } from '../components/ClipThumbnail'
 import { API_URL } from '../lib/api'
-import { CAPTION_PRESETS } from '../lib/captions'
-import { getCaptionStyle, isCaptionStyleId } from '../lib/captionStyles'
+import { CAPTION_STYLES, getCaptionStyle, isCaptionStyleId } from '../lib/captionStyles'
 import { downloadClip } from '../lib/jobs'
 import { createExport, downloadExport } from '../lib/exports'
 import { listProjectClips, type ProjectClipSummary } from '../lib/projects-api'
@@ -889,8 +888,9 @@ export function EditorPage() {
                   <h2 className="text-lg font-semibold text-white">Captions</h2>
                   <p className="mt-2 text-sm text-[var(--color-text-muted)]">
                     Caption styles are designed in Captions Studio and burned
-                    onto new jobs by the worker. Re-rendering a finished clip
-                    with a new style is not built yet.
+                    onto new jobs by the worker. To re-render a finished clip
+                    with a new style, open the clip on its job page — each
+                    clip has a Re-render control there.
                   </p>
                   <Link
                     to={`/captions?project=${project.id}`}
@@ -958,15 +958,15 @@ export function EditorPage() {
                 </p>
               </div>
               <div className="mt-3 grid grid-cols-2 gap-2">
-                {CAPTION_PRESETS.slice(0, 6).map((preset) => (
+                {CAPTION_STYLES.slice(0, 6).map((style) => (
                   <Link
-                    key={preset.id}
+                    key={style.id}
                     to={`/captions?project=${project.id}`}
-                    title={`Open ${preset.label} in Captions Studio`}
+                    title={`Open ${style.name} in Captions Studio`}
                     className="flex h-16 items-center justify-center rounded-xl border border-ink-border bg-ink-panel2 px-2 text-center transition-colors hover:border-brand/60"
                   >
-                    <span className={`text-sm leading-tight ${preset.className}`}>
-                      {preset.sample}
+                    <span className="text-sm font-bold leading-tight text-white">
+                      {style.sample}
                     </span>
                   </Link>
                 ))}

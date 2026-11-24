@@ -2,8 +2,7 @@ import { Fragment, useEffect, useState, type CSSProperties } from 'react'
 import { Captions, Type } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { API_URL } from '../lib/api'
-import { CAPTION_STYLES, getCaptionStyle, isCaptionStyleId, type CaptionStyle } from '../lib/captionStyles'
-import { CAPTION_PRESETS } from '../lib/captions'
+import { CAPTION_STYLES, getCaptionStyle, isCaptionStyleId, type CaptionPreviewAnim, type CaptionStyle } from '../lib/captionStyles'
 import { useAuth } from '../state/auth'
 import { getProject } from '../state/projects'
 import { PageHeader } from '../components/PageHeader'
@@ -27,6 +26,29 @@ const ANIMATION_OPTIONS: { id: AnimationChoice; label: string }[] = [
   { id: 'karaoke', label: 'Karaoke' },
   { id: 'glow', label: 'Glow' },
 ]
+
+/**
+ * Seed the sample-text animation control from a real style's anim.
+ * The control only offers none/bounce/pop/karaoke/glow, so styles
+ * with no close equivalent seed the nearest motion (sweep → karaoke
+ * fill; title/subs/typewriter → none; slam/outline/gradient/kinetic
+ * → pop). The burned-in look is the style's own anim, not this seed.
+ */
+const ANIMATION_FOR_STYLE: Record<CaptionPreviewAnim, AnimationChoice> = {
+  pop: 'pop',
+  title: 'none',
+  subs: 'none',
+  karaoke: 'karaoke',
+  bounce: 'bounce',
+  typewriter: 'none',
+  sweep: 'karaoke',
+  neon: 'glow',
+  slam: 'pop',
+  outline: 'pop',
+  gradient: 'pop',
+  kinetic: 'pop',
+  glow_pop: 'glow',
+}
 
 type StudioTab = 'styles' | 'customize' | 'preview'
 
@@ -260,8 +282,9 @@ function CaptionStylePreview({ style }: { style: CaptionStyle }) {
  * restyle sample text in the browser. The fifteen worker styles at
  * the top are the styles the worker actually burns onto new jobs —
  * each sample loops its real animation, and clicking one saves it as
- * the default. "Apply to Clip" stays disabled: re-rendering a
- * finished clip with a new style is not built yet.
+ * the default. "Apply to Clip" stays disabled — there is no clip in
+ * context on this page. Re-rendering a finished clip with a new style
+ * IS built: each clip on its job page has a Re-render control.
  * Layout follows the design reference: preset grid, a tall centre
  * preview, and a right-hand controls panel.
  */
@@ -337,33 +360,33 @@ export function CaptionsPage() {
   }
 
   const [tab, setTab] = useState<StudioTab>('styles')
-  const [selectedId, setSelectedId] = useState<string>('bold-pop')
-  const active = CAPTION_PRESETS.find((p) => p.id === selectedId) ?? CAPTION_PRESETS[0]
+  const [selectedId, setSelectedId] = useState<string>('punchy')
+  const active = getCaptionStyle(selectedId)
 
   const [sampleText, setSampleText] = useState('Like & Subscribe!')
-  const [fontFamily, setFontFamily] = useState<string>(active.fontFamily)
-  const [fontSizePx, setFontSizePx] = useState<number>(active.fontSizePx)
-  const [textColor, setTextColor] = useState<string>(active.color)
-  const [highlightColor, setHighlightColor] = useState<string>(active.highlightColor)
-  const [animation, setAnimation] = useState<AnimationChoice>(active.animation)
+  const [fontFamily, setFontFamily] = useState<string>('Inter')
+  const [fontSizePx, setFontSizePx] = useState<number>(56)
+  const [textColor, setTextColor] = useState<string>('#FFFFFF')
+  const [highlightColor, setHighlightColor] = useState<string>('#FACC15')
+  const [animation, setAnimation] = useState<AnimationChoice>('pop')
 
+  /** Picking a real style seeds the sample-text controls from it. */
   const selectPreset = (id: string) => {
-    const preset = CAPTION_PRESETS.find((p) => p.id === id)
-    if (!preset) return
-    setSelectedId(id)
-    setFontFamily(preset.fontFamily)
-    setFontSizePx(preset.fontSizePx)
-    setTextColor(preset.color)
-    setHighlightColor(preset.highlightColor)
-    setAnimation(preset.animation)
+    const style = getCaptionStyle(id)
+    setSelectedId(style.id)
+    setFontFamily('Inter')
+    setFontSizePx(56)
+    setTextColor('#FFFFFF')
+    setHighlightColor(style.id === 'punchy' ? '#FACC15' : '#7C3AED')
+    setAnimation(ANIMATION_FOR_STYLE[style.anim])
   }
 
-  // Highlight colour shows as the box behind "Highlight Box", the glow
-  // colour for "Neon Glow", and an underline accent for other styles.
+  // Highlight colour shows as the box behind the sweep style, the glow
+  // for neon/glow styles, and an underline accent for other styles.
   const highlightStyle =
-    active.id === 'highlight'
+    active.anim === 'sweep'
       ? { backgroundColor: highlightColor }
-      : active.id === 'neon-glow'
+      : active.anim === 'neon' || active.anim === 'glow_pop'
         ? { textShadow: `0 0 12px ${highlightColor}, 0 0 32px ${highlightColor}` }
         : { textDecoration: 'underline', textDecorationColor: highlightColor, textUnderlineOffset: 8 }
 
@@ -379,7 +402,7 @@ export function CaptionsPage() {
         Gameplay
       </span>
       <p
-        className={`relative ${active.className} ${ANIMATION_CLASS[animation]} leading-snug`}
+        className={`relative font-bold text-white ${ANIMATION_CLASS[animation]} leading-snug`}
         style={{
           fontFamily,
           fontSize: `${fontSizePx}px`,
@@ -470,8 +493,8 @@ export function CaptionsPage() {
         </label>
       </div>
       <p className="text-xs text-[var(--color-text-muted)]">
-        Highlight colour shows as the box behind Highlight Box, the glow for Neon Glow,
-        and an underline accent for other styles.
+        Highlight colour shows as the box behind the Highlight Sweep style, the glow
+        for Neon Glow, and an underline accent for other styles.
       </p>
 
       <label className="block">
@@ -497,8 +520,9 @@ export function CaptionsPage() {
         <Captions className="h-4 w-4" /> Apply to Clip →
       </button>
       <p className="text-center text-xs text-[var(--color-text-muted)]">
-        Re-rendering a finished clip with a new style is not built yet —
-        new jobs use the default style you save above.
+        To re-render a finished clip with a new style, open the clip on its
+        job page — each clip has a Re-render control there. New jobs use
+        the default style you save above.
       </p>
     </div>
   )
@@ -594,7 +618,7 @@ export function CaptionsPage() {
       {tab === 'preview' ? (
         <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
           <h2 className="flex items-center gap-2 text-lg font-semibold text-white">
-            <Type className="h-5 w-5 text-brand-light" /> Preview — {active.label}
+            <Type className="h-5 w-5 text-brand-light" /> Preview — {active.name}
           </h2>
           <div className="mt-4">{preview}</div>
           <p className="mt-3 text-xs text-[var(--color-text-muted)]">
@@ -607,33 +631,31 @@ export function CaptionsPage() {
           {tab === 'styles' ? (
             <div>
               <div className="grid grid-cols-2 gap-3">
-                {CAPTION_PRESETS.map((preset) => (
+                {CAPTION_STYLES.map((style) => (
                   <button
-                    key={preset.id}
+                    key={style.id}
                     type="button"
-                    onClick={() => selectPreset(preset.id)}
-                    aria-pressed={selectedId === preset.id}
+                    onClick={() => selectPreset(style.id)}
+                    aria-pressed={selectedId === style.id}
                     className={`rounded-2xl border bg-ink-panel p-3 text-center transition-colors ${
-                      selectedId === preset.id
+                      selectedId === style.id
                         ? 'border-brand ring-1 ring-brand'
                         : 'border-ink-border hover:border-brand/60'
                     }`}
                   >
-                    <span
-                      className={`flex h-16 items-center justify-center overflow-hidden text-lg leading-tight ${preset.className}`}
-                    >
-                      {preset.sample}
+                    <span className="flex h-16 items-center justify-center overflow-hidden px-1 text-sm font-bold leading-tight text-white">
+                      {style.sample}
                     </span>
                     <span className="mt-2 block text-xs font-medium text-[var(--color-text-muted)]">
-                      {preset.label}
+                      {style.name}
                     </span>
                   </button>
                 ))}
               </div>
               <p className="mt-3 text-xs text-[var(--color-text-muted)]">
-                Selected style: <span className="font-medium text-white">{active.label}</span>.
-                Design preview on sample text — the worker styles above are
-                the ones actually burned onto new jobs.
+                Selected style: <span className="font-medium text-white">{active.name}</span>.
+                These are the real worker styles — the animated samples
+                above are the ones actually burned onto new jobs.
               </p>
             </div>
           ) : null}
@@ -644,7 +666,7 @@ export function CaptionsPage() {
             </h2>
             <div className="mt-4">{preview}</div>
             <p className="mt-3 text-xs text-[var(--color-text-muted)]">
-              Style: <span className="font-medium text-white">{active.label}</span>
+              Style: <span className="font-medium text-white">{active.name}</span>
               {' '}· {fontFamily} {fontSizePx}px
             </p>
           </div>

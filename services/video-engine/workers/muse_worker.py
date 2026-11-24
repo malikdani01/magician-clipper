@@ -1145,11 +1145,22 @@ def select_highlights(segments: list[dict], source_duration: float,
             window_end = end + tail
             span = window_end - start
             if mode == "exact":
-                if span < target - DURATION_TOLERANCE:
-                    # Too short even with neighbours: extend into nearby
-                    # context where possible, else reject this candidate.
+                # Exact mode promises exactly `target` seconds: land on
+                # target, never above it. A natural span past target is
+                # trimmed (mid-thought); a short one is extended into
+                # nearby context when room exists. The old code only
+                # trimmed past target + 0.6s, so a window at 20.59s
+                # passed selection — and the render's container duration
+                # runs a hair past -t, so it then failed validation at
+                # the 0.6s boundary (Job #8 lost a 20.60s clip that way).
+                # A window that cannot reach target for lack of room is
+                # still accepted down to target - 0.6s, as before.
+                if span > target:
+                    window_end = start + target
+                    span = target
+                    complete = False  # trimmed mid-thought
+                elif span < target:
                     room_after = source_duration - window_end
-                    room_before = start
                     need = target - span
                     extend_after = min(room_after, need)
                     window_end += extend_after
@@ -1158,10 +1169,6 @@ def select_highlights(segments: list[dict], source_duration: float,
                     span = window_end - start
                     if span < target - DURATION_TOLERANCE:
                         continue
-                elif span > target + DURATION_TOLERANCE:
-                    window_end = start + target
-                    span = target
-                    complete = False  # trimmed mid-thought
             elif mode == "minimum":
                 if span < target:
                     continue
@@ -2440,7 +2447,11 @@ def validate_clip(clip_path: Path, expected: dict, source_info: dict) -> dict:
     max_s = float(max_s) if max_s not in (None, "") else None
     actual = info["duration"]
     if mode == "exact":
-        if abs(actual - target) > DURATION_TOLERANCE:
+        # The 1e-6s epsilon is float-noise protection only: a container
+        # duration of exactly target + 0.6s reads as 0.6000000000000014
+        # in binary and would otherwise fail by 1.4e-15s. It is not a
+        # tolerance change — one microsecond is below ffprobe precision.
+        if abs(actual - target) > DURATION_TOLERANCE + 1e-6:
             raise RuntimeError(
                 f"Clip {clip_path.name} failed validation: duration "
                 f"{actual:.2f}s is not within {DURATION_TOLERANCE}s of exact "

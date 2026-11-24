@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router-dom'
 import {
   Activity,
@@ -170,10 +170,18 @@ function useAdminFetch<T>(path: string | null) {
   const [loading, setLoading] = useState(path !== null)
   const [error, setError] = useState<string | null>(null)
   const [nonce, setNonce] = useState(0)
+  // Whether a fetch is in flight. retry() must not start a second one:
+  // on a cold Render container /admin/dashboard takes ~20s, and the
+  // Monitor's 10s re-fetch timer used to bump the nonce mid-flight —
+  // the effect cleanup then discarded the in-flight response, so the
+  // Jobs card showed "Loading job counts…" forever. A retry fired while
+  // a fetch is in flight is a no-op; the next tick retries again.
+  const inFlight = useRef(false)
 
   useEffect(() => {
     if (!path) return
     let cancelled = false
+    inFlight.current = true
     setLoading(true)
     setError(null)
     fetchAdmin<T>(path)
@@ -189,12 +197,17 @@ function useAdminFetch<T>(path: string | null) {
           setLoading(false)
         }
       })
+      .finally(() => {
+        inFlight.current = false
+      })
     return () => {
       cancelled = true
     }
   }, [path, nonce])
 
-  const retry = useCallback(() => setNonce((n) => n + 1), [])
+  const retry = useCallback(() => {
+    if (!inFlight.current) setNonce((n) => n + 1)
+  }, [])
   return { data, loading, error, retry }
 }
 
@@ -1483,7 +1496,7 @@ function LogsSection({ title, subtitle }: { title: string; subtitle: string }) {
 function MonitorSection({ title, subtitle }: { title: string; subtitle: string }) {
   const engine = useEngineHealth()
   const [backend, setBackend] = useState<{ ok: boolean; error?: string } | null>(null)
-  const { data, retry } = useAdminFetch<DashboardPayload>('/admin/dashboard')
+  const { data, error, retry } = useAdminFetch<DashboardPayload>('/admin/dashboard')
 
   useEffect(() => {
     let cancelled = false
@@ -1539,7 +1552,9 @@ function MonitorSection({ title, subtitle }: { title: string; subtitle: string }
           <p className="mt-2 text-sm text-[var(--color-text-muted)]">
             {data
               ? `${data.jobs.total} total · ${data.jobs.running} running · ${data.jobs.failed} failed`
-              : 'Loading job counts…'}
+              : error
+                ? `Could not load job counts — ${error}`
+                : 'Loading job counts…'}
           </p>
         </div>
         <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">

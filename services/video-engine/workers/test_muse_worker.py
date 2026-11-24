@@ -558,5 +558,72 @@ class CaptionStyleTests(unittest.TestCase):
             self.assertIn("\\fscx0\\fscy0", text)
 
 
+class ExactDurationTests(unittest.TestCase):
+    """Exact mode must land on target (Job #8, 2026-11-24): a 20.59s
+    natural span used to pass selection — inside the old 0.6s
+    tolerance — and the render's container duration runs a hair past
+    -t, so it then failed validation at the 0.6s boundary and the
+    clip was skipped (20.60s vs exact 20s)."""
+
+    def test_exact_mode_trims_overshoot_inside_tolerance_to_target(self):
+        # One sentence grouping spans 20.595s — inside the old
+        # tolerance, so the old code kept it and the render failed.
+        segments = [_segment(10.0, 29.595, "This is a long story here now.")]
+        clips = muse_worker.select_highlights(
+            segments, 200.0, _settings(duration_seconds=20, clip_count=1),
+            [0.05] * 200, [])
+        self.assertEqual(len(clips), 1)
+        self.assertEqual(clips[0]["duration"], 20.0)
+        self.assertEqual(clips[0]["start"], 9.5)
+        self.assertEqual(clips[0]["end"], 29.5)
+
+    def test_exact_mode_extends_short_window_to_target(self):
+        segments = [_segment(10.0, 28.0, "Short story here now.")]
+        clips = muse_worker.select_highlights(
+            segments, 200.0, _settings(duration_seconds=20, clip_count=1),
+            [0.05] * 200, [])
+        self.assertEqual(len(clips), 1)
+        self.assertEqual(clips[0]["duration"], 20.0)
+
+    def test_exact_mode_render_validates_on_target(self):
+        # Full chain on the Job #8 shape: exact 20s, split layout, a
+        # 20.595s natural span. The selected window must render to
+        # 20.0s and validate — on the old code the window stayed
+        # 20.595s and the render failed validation.
+        demo = (Path(__file__).resolve().parents[3]
+                / "demo" / "demo-source-3min.mp4")
+        if not demo.exists():
+            self.skipTest(f"demo source missing: {demo}")
+        segments = [_segment(10.0, 29.595, "This is a long story here now.")]
+        settings = _settings(duration_seconds=20, clip_count=1,
+                             layout="split", captions_enabled=False)
+        clips = muse_worker.select_highlights(
+            segments, 200.0, settings, [0.05] * 200, [])
+        self.assertEqual(len(clips), 1)
+        self.assertEqual(clips[0]["duration"], 20.0)
+        info = muse_worker.probe_summary(demo)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            out = tmp / "exact20.mp4"
+            muse_worker.render_clip(demo, clips[0], settings, segments,
+                                    out, info, tmp)
+            validated = muse_worker.validate_clip(
+                out, {"settings": settings}, info)
+            self.assertAlmostEqual(validated["duration"], 20.0, delta=0.1)
+
+    def test_validate_exact_boundary_float_noise_passes(self):
+        # A container duration of exactly target + 0.6s must not fail
+        # on float noise (20.6 - 20 == 0.6000000000000014 in binary).
+        with mock.patch.object(
+                muse_worker, "probe_summary",
+                return_value={"duration": 20.6, "width": 1080, "height": 1920,
+                              "has_audio": True, "size_bytes": 1000}):
+            info = muse_worker.validate_clip(
+                Path("clip.mp4"),
+                {"settings": _settings(duration_seconds=20)},
+                {"has_audio": True})
+        self.assertAlmostEqual(info["duration"], 20.6)
+
+
 if __name__ == "__main__":
     unittest.main()

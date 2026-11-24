@@ -189,6 +189,38 @@ export function getCaptionStyle(id: string | null | undefined): CaptionStyle {
   return CAPTION_STYLES.find((s) => s.id === id) ?? CAPTION_STYLES[0]
 }
 
+/**
+ * Legacy wizard preset ids (bold-pop, highlight, ...) predate the real
+ * caption styles above. They must never be sent to the worker as-is —
+ * each one maps to the real style it stood for. Used to translate
+ * stored defaults (Brand Kit) and wizard presets (Clipper) onto real
+ * style ids. (Moved here from Clipper.tsx so every translation uses
+ * this one map.)
+ */
+export const LEGACY_CAPTION_PRESET_TO_STYLE: Record<string, CaptionStyleId> = {
+  'bold-pop': 'punchy',
+  highlight: 'word_pop',
+  bounce: 'bounce',
+  karaoke: 'karaoke',
+  'neon-glow': 'neon',
+  'word-slam': 'slam',
+  modern: 'clean_subs',
+  podcast: 'classic',
+  cinematic: 'title_card',
+  minimal: 'clean_subs',
+}
+
+/**
+ * Resolve any stored caption-style value to a real style id: real ids
+ * pass through untouched, legacy preset ids translate via the map
+ * above, anything else falls back to Punchy.
+ */
+export function translateLegacyCaptionPreset(id: string | null | undefined): CaptionStyleId {
+  if (typeof id === 'string' && isCaptionStyleId(id)) return id
+  if (typeof id === 'string') return LEGACY_CAPTION_PRESET_TO_STYLE[id] ?? 'punchy'
+  return 'punchy'
+}
+
 /** True when the id is one of the known styles. */
 export function isCaptionStyleId(id: unknown): id is CaptionStyleId {
   return typeof id === 'string' && CAPTION_STYLES.some((s) => s.id === id)
