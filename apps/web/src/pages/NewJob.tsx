@@ -19,7 +19,14 @@ import {
   getCaptionStyle,
   isCaptionStyleId,
 } from '../lib/captionStyles'
-import { createJob, LAYOUT_LABELS, type ClipLayout } from '../lib/jobs'
+import {
+  createJob,
+  LAYOUT_LABELS,
+  SELECTION_MODE_DESCRIPTIONS,
+  SELECTION_MODE_LABELS,
+  type ClipLayout,
+  type SelectionMode,
+} from '../lib/jobs'
 import { formatBytes } from '../lib/format'
 import { useAuth } from '../state/auth'
 
@@ -166,6 +173,7 @@ export function NewJobPage() {
   const [captionsEnabled, setCaptionsEnabled] = useState(true)
   const [captionsLanguage, setCaptionsLanguage] = useState<'english' | 'roman_urdu' | 'hindi' | 'auto'>('english')
   const [captionStyle, setCaptionStyle] = useState('punchy')
+  const [selectionMode, setSelectionMode] = useState<SelectionMode>('interesting_only')
   const [onScreenText, setOnScreenText] = useState(false)
   const [jobType, setJobType] = useState<'myself' | 'campaign'>('myself')
   const [campaignRequirements, setCampaignRequirements] = useState('')
@@ -285,6 +293,7 @@ export function NewJobPage() {
       captionsEnabled,
       captionsLanguage,
       captionStyle,
+      selectionMode,
       onScreenText,
       jobType,
       campaignRequirements: campaignRequirements.trim(),
@@ -700,6 +709,25 @@ export function NewJobPage() {
                 </label>
               </div>
 
+              <label className="block">
+                <span className="text-sm font-medium text-white">Clip selection</span>
+                <select
+                  aria-label="Clip selection"
+                  value={selectionMode}
+                  onChange={(e) => setSelectionMode(e.target.value as SelectionMode)}
+                  className={`${selectClass} mt-2`}
+                >
+                  {(Object.keys(SELECTION_MODE_LABELS) as SelectionMode[]).map((id) => (
+                    <option key={id} value={id}>
+                      {SELECTION_MODE_LABELS[id]}
+                    </option>
+                  ))}
+                </select>
+                <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                  {SELECTION_MODE_DESCRIPTIONS[selectionMode]}
+                </span>
+              </label>
+
               {aspectRatio === '9:16' ? (
                 <label className="block">
                   <span className="text-sm font-medium text-white">Layout (9:16 only)</span>
@@ -819,6 +847,7 @@ export function NewJobPage() {
                 ['Duration', durationSummary],
                 ['Captions', captionsEnabled ? `On (${CAPTION_LANGUAGES.find((l) => l.id === captionsLanguage)?.label ?? captionsLanguage})` : 'Off'],
                 ['Caption style', captionsEnabled ? getCaptionStyle(captionStyle).name : 'Off'],
+                ['Clip selection', SELECTION_MODE_LABELS[selectionMode]],
                 ['On-screen text', onScreenText ? 'On' : 'Off'],
                 ['Job type', jobType === 'myself' ? 'For myself' : 'For a campaign'],
                 ['Layout', aspectRatio === '9:16' ? LAYOUT_LABELS[layout] : 'Centre crop'],

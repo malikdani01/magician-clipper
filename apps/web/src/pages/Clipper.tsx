@@ -23,7 +23,12 @@ import {
 import { PageHeader } from '../components/PageHeader'
 import { ENGINE_URL, extractAudio, probeVideo, type ProbeResult } from '../lib/api'
 import { formatBytes, formatDuration } from '../lib/format'
-import { createJob } from '../lib/jobs'
+import {
+  createJob,
+  SELECTION_MODE_DESCRIPTIONS,
+  SELECTION_MODE_LABELS,
+  type SelectionMode,
+} from '../lib/jobs'
 import {
   defaultClipSpec,
   setProjectFile,
@@ -346,6 +351,7 @@ export function ClipperPage() {
       captionsEnabled: spec.captions,
       captionsLanguage: 'auto',
       captionStyle: CAPTION_PRESET_TO_STYLE[captionPreset] ?? 'punchy',
+      selectionMode: spec.selectionMode ?? 'interesting_only',
       onScreenText: spec.onScreenText,
       jobType: 'myself',
       notes: keywordsAvoid.trim()
@@ -1036,6 +1042,26 @@ export function ClipperPage() {
                     ) : null}
                   </select>
                 </label>
+                <label className="mt-4 block">
+                  <span className="text-sm font-medium text-white">Clip selection</span>
+                  <select
+                    value={spec.selectionMode ?? 'interesting_only'}
+                    onChange={(e) =>
+                      updateSpec({ selectionMode: e.target.value as SelectionMode })
+                    }
+                    aria-label="Clip selection"
+                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none"
+                  >
+                    {(Object.keys(SELECTION_MODE_LABELS) as SelectionMode[]).map((id) => (
+                      <option key={id} value={id}>
+                        {SELECTION_MODE_LABELS[id]}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                    {SELECTION_MODE_DESCRIPTIONS[spec.selectionMode ?? 'interesting_only']}
+                  </span>
+                </label>
                 <div className="mt-5 space-y-3">
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-sm text-white">Vertical (9:16)</span>
@@ -1233,6 +1259,27 @@ export function ClipperPage() {
                         : 'Clips are at most this long.'}
                   </p>
                 )}
+              </fieldset>
+
+              <fieldset>
+                <legend className="text-sm font-medium text-white">Clip selection</legend>
+                <select
+                  value={spec.selectionMode ?? 'interesting_only'}
+                  onChange={(e) =>
+                    updateSpec({ selectionMode: e.target.value as SelectionMode })
+                  }
+                  aria-label="Clip selection"
+                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none"
+                >
+                  {(Object.keys(SELECTION_MODE_LABELS) as SelectionMode[]).map((id) => (
+                    <option key={id} value={id}>
+                      {SELECTION_MODE_LABELS[id]}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                  {SELECTION_MODE_DESCRIPTIONS[spec.selectionMode ?? 'interesting_only']}
+                </p>
               </fieldset>
 
               <div>

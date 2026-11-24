@@ -914,11 +914,119 @@ def _visual_moment_windows(energy_profile: list[float], source_duration: float,
     return picked
 
 
+def _any_part_windows(source_duration: float,
+                      span: float, mode: str,
+                      min_s: float | None, max_s: float | None,
+                      count: int,
+                      occupied: list[tuple[float, float]],
+                      energy_in, gameplay_in, stability_in) -> list[dict]:
+    """Evenly-spaced 'any part' windows (selection_mode=fill_any).
+
+    Used only when the user asked for the full count no matter what:
+    after speech + visual-moment selection, any remaining slots are
+    filled with windows spread evenly across the WHOLE source. A window
+    is exactly ``span`` long (the mode's bound, like visual moments),
+    must not overlap any ``occupied`` window or another any-part
+    window, and is labelled ``any_part`` with a reason ending "Any part
+    — not a highlight." — it is any footage, not a highlight, and the
+    label says so. Scored like a visual moment (energy/gameplay/
+    stability) so the clip still carries a real viral estimate.
+    Returns at most ``count`` windows, sorted by start time. When the
+    source is physically too short for more full windows, the shortfall
+    is returned as-is (fewer clips, honestly) — time is never invented.
+    """
+    if count <= 0:
+        return []
+    if mode in ("exact", "minimum") and span > source_duration + DURATION_TOLERANCE:
+        return []
+    if mode == "maximum" and min_s and min_s > source_duration + DURATION_TOLERANCE:
+        return []
+    # An any-part window is exactly ``span`` long (the mode's bound),
+    # except in maximum mode where the floor is min_s and span is the ceiling.
+    length = span
+    if mode == "maximum" and min_s and span < min_s:
+        length = min_s
+    if length > source_duration:
+        length = source_duration
+    if mode == "maximum" and min_s and length < min_s - DURATION_TOLERANCE:
+        return []
+    if mode in ("exact", "minimum") and length < span - DURATION_TOLERANCE:
+        return []
+
+    def overlaps(start: float, end: float, taken: list[tuple[float, float]]) -> bool:
+        return any(not (end <= o_start or start >= o_end)
+                   for (o_start, o_end) in taken)
+
+    picked: list[dict] = []
+    taken = list(occupied)
+    # Ideal even grid across the whole source; each ideal start is
+    # nudged (1s steps, outward) to the nearest free start so a
+    # chosen window never overlaps — and a slot with no free stretch
+    # is skipped, not padded with a short window.
+    if count == 1:
+        ideals = [(source_duration - length) / 2.0]
+    else:
+        ideals = [i * (source_duration - length) / (count - 1)
+                  for i in range(count)]
+    for ideal in ideals:
+        if len(picked) >= count:
+            break
+        start = None
+        for step in range(0, int(source_duration) + 2):
+            cands = [ideal] if step == 0 else [ideal + step, ideal - step]
+            for cand in cands:
+                c = round(float(cand), 3)
+                if c < 0 or c + length > source_duration + 1e-6:
+                    continue
+                if overlaps(c, c + length, taken):
+                    continue
+                start = c
+                break
+            if start is not None:
+                break
+        if start is None:
+            continue
+        end = start + length
+        energy = energy_in(start, end)
+        gameplay = gameplay_in(start, end)
+        stability = stability_in(start, end)
+        score = round(
+            W_VISUAL_ENERGY * min(1.0, energy)
+            + W_VISUAL_GAMEPLAY * gameplay
+            + W_VISUAL_STABILITY * stability, 4)
+        picked.append({
+            "start": round(start, 3), "end": round(end, 3),
+            "duration": round(end - start, 3), "words": 0,
+            "density": 0.0, "complete": False, "coverage": 0.0,
+            "silence": 0.0, "energy": energy,
+            "gameplay": gameplay, "stability": stability,
+            "score": score, "signals": ["any_part"], "text": "",
+            "reason": (
+                f"Any part of the video (viral {round(score * 100)}/100): "
+                f"the job asked for the full clip count, so this window "
+                f"fills a slot from anywhere in the source — it was not "
+                f"picked for speech or for a loud moment. "
+                f"Any part — not a highlight."),
+        })
+        taken.append((start, end))
+    picked.sort(key=lambda c: c["start"])
+    return picked
+
+
 def select_highlights(segments: list[dict], source_duration: float,
                       settings: dict, energy_profile: list[float],
                       face_profile: list[tuple[float, float]] | None = None) -> list[dict]:
     """Select exactly clip_count non-overlapping windows.
 
+    Selection mode (settings.selection_mode):
+    - 'interesting_only' (default): only speech + visual-moment
+      windows above the quality bar; fewer clips than requested when
+      the source has too little good content, with the reason recorded
+      on each clip and in the job note.
+    - 'fill_any': after speech + visual selection, any remaining slots
+      are filled with evenly-spaced windows from anywhere in the
+      source (labelled 'any_part'), so the job delivers the full count
+      whenever the source is physically long enough.
     Scoring (documented weights): speech density 0.25, audio coverage
     0.20, sentence completeness 0.20, silence boundaries 0.05, audio
     energy 0.05 (supporting only), gameplay presence 0.15 (real gameplay
@@ -933,6 +1041,8 @@ def select_highlights(segments: list[dict], source_duration: float,
     """
     count = int(settings.get("clip_count", 3))
     mode = (settings.get("duration_mode") or "exact").lower()
+    selection_mode = (settings.get("selection_mode") or "interesting_only").lower()
+    fill_any = selection_mode == "fill_any"
     target = float(settings.get("duration_seconds", 30))
     # The New Job form collects BOTH bounds for the non-exact modes
     # (and requires min < max): minimum mode promises clips >= min AND
@@ -1138,6 +1248,14 @@ def select_highlights(segments: list[dict], source_duration: float,
                 min_s, max_s, count - len(chosen),
                 [(c["start"], c["end"]) for c in chosen],
                 energy_in, gameplay_in, stability_in)
+        if fill_any and len(chosen) < count:
+            # 'Any parts' mode: top the count up with evenly-spaced
+            # windows from anywhere in the source, labelled any_part.
+            chosen = chosen + _any_part_windows(
+                source_duration, target, mode,
+                min_s, max_s, count - len(chosen),
+                [(c["start"], c["end"]) for c in chosen],
+                energy_in, gameplay_in, stability_in)
         if chosen:
             chosen.sort(key=lambda c: c["start"])
             return chosen
@@ -1150,11 +1268,18 @@ def select_highlights(segments: list[dict], source_duration: float,
         # silence, exactly the boring content the user does not want.
         # When even those cannot fit, return the honest shortfall
         # (possibly zero clips); the job page explains why fewer clips
-        # came back.
+        # came back. In 'fill_any' mode the any-part grid fills the
+        # rest (or the whole count when no visual moment fits).
         fill = _visual_moment_windows(
             energy_profile, source_duration, target, mode,
             min_s, max_s, count, [],
             energy_in, gameplay_in, stability_in)
+        if fill_any and len(fill) < count:
+            fill = fill + _any_part_windows(
+                source_duration, target, mode,
+                min_s, max_s, count - len(fill),
+                [(c["start"], c["end"]) for c in fill],
+                energy_in, gameplay_in, stability_in)
         if fill:
             return fill
         return []
@@ -1164,10 +1289,19 @@ def select_highlights(segments: list[dict], source_duration: float,
     # peaks) over uniform windows; uniform only when the source is
     # silent (energy all zero) — real footage either way, clearly
     # labelled so nobody mistakes it for a speech-driven highlight.
+    # In 'fill_any' mode the any-part grid fills any remaining slots
+    # (and replaces the uniform fallback: same even spread, but
+    # labelled any_part, not "no speech").
     visual = _visual_moment_windows(
         energy_profile, source_duration, target, mode,
         min_s, max_s, count, [],
         energy_in, gameplay_in, stability_in)
+    if fill_any and len(visual) < count:
+        visual = visual + _any_part_windows(
+            source_duration, target, mode,
+            min_s, max_s, count - len(visual),
+            [(c["start"], c["end"]) for c in visual],
+            energy_in, gameplay_in, stability_in)
     if visual:
         return visual
     if source_duration < target and mode in ("exact", "minimum"):
@@ -1235,8 +1369,8 @@ def write_clip_srt(segments: list[dict], start: float, end: float,
 
 
 # ---------------------------------------------------------------------------
-# Caption styles (13 total: 5 original + 8 CapCut-style animated,
-# added 2026-11-22)
+# Caption styles (15 total: 5 original + 10 CapCut-style animated,
+# added 2026-11-22, kinetic + glow_pop 2026-11-24)
 #
 # The styles are a DATA table shared with the frontend
 # (apps/web/src/lib/captionStyles.ts) — the Captions Studio page shows
@@ -1272,6 +1406,8 @@ CAPTION_STYLES = {
     "slam": "Word Slam",
     "outline": "Outline Only",
     "gradient": "Gradient Pop",
+    "kinetic": "Kinetic Slide",
+    "glow_pop": "Glow Pop",
 }
 
 # One bright colour per word, cycled (ASS BGR hex) — the Gradient Pop
@@ -1370,6 +1506,162 @@ def _punchy_text(phrase: list[dict]) -> str:
     return " ".join(parts)
 
 
+# On-screen text: stopwords for headline derivation (small, generic).
+_ON_SCREEN_STOPWORDS = {
+    "the", "a", "an", "and", "or", "but", "is", "are", "was", "were",
+    "it", "its", "this", "that", "these", "those", "with", "for",
+    "from", "you", "your", "we", "they", "he", "she", "of", "to",
+    "in", "on", "at", "so", "just", "like", "very", "really", "all",
+    "not", "no", "yes", "oh", "yeah", "hey", "ok", "okay", "um", "uh",
+    "i", "me", "my", "our", "us", "am", "be", "been", "do",
+    "does", "did", "have", "has", "had", "will", "would", "can",
+    "could", "should", "then", "than", "there", "here", "when",
+    "what", "who", "how", "why", "get", "got", "go", "going", "come",
+    "let", "lets", "let's",
+}
+
+_CAMPAIGN_TEXT_RE = re.compile(
+    r"(?im)^\s*(?:on[\s-]*screen(?:\s+text)?|ost|headline|title[\s-]*text)"
+    r"\s*[:\-–—]\s*(.+?)\s*$")
+
+
+def _cap_headline(text: str, limit: int = 60) -> str:
+    """Collapse whitespace and cap at ``limit`` chars (word boundary)."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    if " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+    return cut.strip() or text[:limit]
+
+
+def _campaign_on_screen_text(settings: dict) -> str | None:
+    """Explicit on-screen text from the job brief, verbatim.
+
+    Campaign jobs carry the brief in ``campaign_requirements``; any job
+    may carry extra instructions in ``notes``. An explicit line wins
+    ("on-screen text: ...", "OST: ...", "headline: ..."), else the
+    first double-quoted string. Capped at 60 chars; None when the brief
+    carries no explicit on-screen text — the transcript headline is
+    tried next, never invented text.
+    """
+    for source in (settings.get("campaign_requirements") or "",
+                   settings.get("notes") or ""):
+        if not source:
+            continue
+        for line in source.splitlines():
+            m = _CAMPAIGN_TEXT_RE.match(line)
+            if m and m.group(1).strip():
+                return _cap_headline(m.group(1).strip())
+        for m in re.finditer(r'"([^"]{3,60})"', source):
+            text = m.group(1).strip()
+            if text:
+                return _cap_headline(text)
+    return None
+
+
+def _transcript_headline(clip: dict, segments: list[dict]) -> str | None:
+    """Headline from the clip's own transcript (max 6 words / 60 chars).
+
+    The phrase holding the most emphatic/frequent content word wins;
+    without one, the window's first phrase. None when the window has
+    no transcript words at all — silence gets no invented headline.
+    """
+    words = _clip_words(segments, clip["start"], clip["end"])
+    if not words:
+        return None
+    phrases = _group_phrases(words) or [words]
+
+    def content_counts() -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for w in words:
+            clean = w["word"].strip(_PUNCT).lower()
+            if clean and clean not in _ON_SCREEN_STOPWORDS:
+                counts[clean] = counts.get(clean, 0) + 1
+        return counts
+
+    counts = content_counts()
+    if not counts:
+        text = " ".join(w["word"] for w in phrases[0][:6])
+        return _cap_headline(text.upper()) if text else None
+
+    def word_score(word: str) -> tuple[int, int]:
+        clean = word.strip(_PUNCT).lower()
+        emphasis = 2 if clean in EMPHASIS_WORDS else 0
+        return (emphasis, counts.get(clean, 0))
+
+    best = max(words, key=lambda w: word_score(w["word"]))
+    best_clean = best["word"].strip(_PUNCT).lower()
+    # The phrase holding the best word; a one-word phrase gets its
+    # neighbours so the headline reads as a phrase, not a lone word
+    # ("HIGHEST POINT OF THE TOWER", not "TOWER").
+    phrase_idx = 0
+    for i, phrase in enumerate(phrases):
+        if any(w["word"].strip(_PUNCT).lower() == best_clean for w in phrase):
+            phrase_idx = i
+            break
+    parts = list(phrases[phrase_idx])
+    if len(parts) < 3 and phrase_idx > 0:
+        parts = list(phrases[phrase_idx - 1]) + parts
+    if len(parts) < 3 and phrase_idx + 1 < len(phrases):
+        parts = parts + list(phrases[phrase_idx + 1])
+    text = " ".join(w["word"] for w in parts[:6])
+    return _cap_headline(text.upper()) if text else None
+
+
+def derive_on_screen_text(clip: dict, segments: list[dict],
+                          settings: dict) -> str | None:
+    """The on-screen headline for one clip, or None.
+
+    Order: (a) explicit campaign text from the job brief, verbatim;
+    (b) a headline from the clip's own transcript; (c) nothing when
+    the window has no transcript — a silent/visual clip gets no
+    invented text, and the worker logs that honestly.
+    """
+    campaign = _campaign_on_screen_text(settings)
+    if campaign:
+        return campaign
+    return _transcript_headline(clip, segments)
+
+
+def write_headline_ass(text: str, duration: float, ass_path: Path,
+                       tw: int, th: int) -> bool:
+    """Write a minimal ASS file with one top-centre headline event.
+
+    Shown for the first 4 seconds of the clip only, near the top
+    (MarginV 120) so it never collides with the split divider
+    captions (divider y=864 at 1080x1920). Returns False when there
+    is nothing to show.
+    """
+    if not text or duration <= 0:
+        return False
+    fs = 84 if tw >= 1080 else 60
+    show = min(4.0, duration)
+    header = (
+        "[Script Info]\n"
+        "; Magician Clipper — on-screen headline\n"
+        "ScriptType: v4.00+\n"
+        f"PlayResX: {tw}\n"
+        f"PlayResY: {th}\n"
+        "WrapStyle: 0\n"
+        "ScaledBorderAndShadow: yes\n"
+        "\n[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Headline,DejaVu Sans,{fs},&H00FFFFFF,&H000000FF,&H00000000,"
+        f"&H80000000,-1,0,0,0,100,100,0,0,1,4,0,8,40,40,120,1\n"
+        "\n[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
+        "Effect, Text\n"
+        f"Dialogue: 0,0:00:00.00,{_fmt_ass_time(show)},Headline,,0,0,0,,{_ass_escape(text)}\n"
+    )
+    ass_path.write_text(header, encoding="utf-8")
+    return True
+
+
 def write_clip_ass(segments: list[dict], start: float, end: float,
                    style_id: str, ass_path: Path,
                    divider_y: int | None, tw: int, th: int,
@@ -1424,11 +1716,17 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
             "&H80000000,0,0,0,0,100,100,0,0,1,2,0,2,40,40,40,1"
         )
     elif style_id in ("karaoke", "bounce", "typewriter", "sweep",
-                      "neon", "slam", "outline", "gradient"):
+                      "neon", "slam", "outline", "gradient",
+                      "kinetic", "glow_pop"):
         # (name, fs_big, fs_small, primary, secondary, outline_colour,
         #  back_colour, bold, border_style, outline, shadow)
         # Colours are ASS &HAABBGGRR. Neon shadow is BackColour magenta,
         # so the glow reads; Outline is hollow (primary fully transparent).
+        # Glow Pop's glow is its gold BackColour with Shadow 2 — steady
+        # in the burn (libass cannot pulse a shadow; the preview pulses
+        # it, the burn keeps the glow constant). Kinetic's slide is a
+        # straight linear \move (no easing curve in libass); the preview
+        # eases it — same spirit, not the same curve.
         _NEW_STYLE_PARAMS = {
             "karaoke": ("Karaoke", 96, 68, "&H0000FFFF", "&H00FFFFFF",
                         "&H00000000", "&H80000000", -1, 1, 3, 0),
@@ -1446,6 +1744,10 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                         "&H00FFFFFF", "&H80000000", -1, 1, 4, 0),
             "gradient": ("Gradient", 110, 78, "&H00FFFFFF", "&H0000FFFF",
                          "&H00000000", "&H80000000", -1, 1, 4, 0),
+            "kinetic": ("Kinetic", 100, 72, "&H00FFFFFF", "&H0000FFFF",
+                        "&H00000000", "&H80000000", -1, 1, 4, 0),
+            "glow_pop": ("GlowPop", 110, 78, "&H00FFFFFF", "&H0000FFFF",
+                         "&H00000000", "&H0000CCFF", -1, 1, 4, 2),
         }
         (sname, fs_big, fs_small, primary, secondary, outline_c, back_c,
          bold, border, outline_w, shadow) = _NEW_STYLE_PARAMS[style_id]
@@ -1509,7 +1811,8 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                         f"Punchy,,0,0,0,,{_punchy_text(phrase)}"
                     )
     elif style_id in ("karaoke", "bounce", "typewriter", "sweep",
-                      "neon", "slam", "outline", "gradient"):
+                      "neon", "slam", "outline", "gradient",
+                      "kinetic", "glow_pop"):
         # CapCut-style animated captions. Every branch produces events
         # in the SAME style the Captions Studio preview loops.
         sname = _NEW_STYLE_PARAMS[style_id][0]
@@ -1569,11 +1872,13 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                     )
         else:
             # Word-at-a-time styles: bounce / slam / neon / outline /
-            # gradient. Same timing loop as word_pop; only the entrance
-            # override (and, for gradient, the per-word colour) differs.
+            # gradient / kinetic / glow_pop. Same timing loop as
+            # word_pop; only the entrance override (and, for gradient,
+            # the per-word colour) differs.
             for i, w in enumerate(words):
                 s, e = w["start"], w["end"]
-                min_dur = 0.35 if style_id == "bounce" else 0.25
+                min_dur = 0.35 if style_id in ("bounce", "kinetic") else (
+                    0.30 if style_id == "glow_pop" else 0.25)
                 if e - s < min_dur:
                     e = s + min_dur
                 if i + 1 < len(words):
@@ -1588,6 +1893,24 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                     prefix = "{\\fscx180\\fscy180\\t(0,120,\\fscx100\\fscy100)}"
                 elif style_id == "gradient":
                     prefix = "{\\1c&H%s&}" % GRADIENT_PALETTE[i % len(GRADIENT_PALETTE)]
+                elif style_id == "kinetic":
+                    # Slide in from the left + scale overshoot. The
+                    # anchor is the caption line's own position
+                    # (divider-centred when split, bottom-centre
+                    # otherwise), so the slide lands exactly where the
+                    # plain caption would sit.
+                    k_align, k_mv = margin_for(fs)
+                    anchor_y = k_mv if k_align == 8 else th - k_mv
+                    cx = tw // 2
+                    prefix = ("{\\move(%d,%d,%d,%d,0,250)"
+                              "\\t(0,250,\\fscx110\\fscy110)"
+                              "\\t(250,350,\\fscx100\\fscy100)}"
+                              % (cx - 360, anchor_y, cx, anchor_y))
+                elif style_id == "glow_pop":
+                    # Pop in with overshoot; the glow is the style's
+                    # gold shadow (steady in the burn).
+                    prefix = ("{\\fscx0\\fscy0\\t(0,150,\\fscx118\\fscy118)"
+                              "\\t(150,280,\\fscx100\\fscy100)}")
                 else:  # neon, outline
                     prefix = ""
                 events.append(
@@ -2027,6 +2350,25 @@ def render_clip(source: Path, clip: dict, settings: dict,
                 captions_path = candidate
                 captions_is_ass = True
 
+    # On-screen text: a short headline burned onto the clip, derived
+    # from this clip's own analysis (campaign text verbatim first,
+    # else its transcript; silent windows get none — never invented).
+    # It goes in its own ASS file so it works whether captions are
+    # ASS, classic SRT, or off entirely.
+    headline_path: Path | None = None
+    if bool(settings.get("on_screen_text", False)):
+        headline = derive_on_screen_text(clip, segments, settings)
+        if headline:
+            log.info("Clip %.1f-%.1fs on-screen headline: %r",
+                     start, end, headline)
+            candidate = job_dir / f"clip_{uuid.uuid4().hex}_headline.ass"
+            if write_headline_ass(headline, duration, candidate, tw, th):
+                headline_path = candidate
+        else:
+            log.info("Clip %.1f-%.1fs: on-screen text on, but no headline "
+                     "could be derived (no campaign text, no transcript) — "
+                     "no headline burned.", start, end)
+
     sw, sh = source_info["width"], source_info["height"]
 
     # Build the filter graph as a list of "; "-joined filter chains.
@@ -2051,6 +2393,14 @@ def render_clip(source: Path, clip: dict, settings: dict,
                 f":force_style='{style}'[v1]"
             )
         video_label = "[v1]"
+    if headline_path is not None:
+        # Second subtitles filter, after the captions: the headline
+        # burns on top, first 4 seconds only, near the top of frame.
+        next_label = "[v2]" if captions_path is not None else "[v1]"
+        chains.append(
+            f"{video_label}subtitles={escape_ffmpeg_path(headline_path)}{next_label}"
+        )
+        video_label = next_label
     chains.append(f"{video_label}fps=30,format=yuv420p[vout]")
     filter_complex = ";".join(chains)
 
@@ -2185,12 +2535,20 @@ def _ready_note(clips: list[dict], requested: int, failed: list[str]) -> str | N
     notes: list[str] = []
     if len(clips) < requested:
         visual = sum(1 for c in clips if "visual_moment" in (c.get("signals") or []))
-        if visual:
+        any_part = sum(1 for c in clips if "any_part" in (c.get("signals") or []))
+        if visual or any_part:
+            filled: list[str] = []
+            if visual:
+                filled.append(f"{visual} visual moment(s) (loudest audio peaks)")
+            if any_part:
+                filled.append(
+                    f"{any_part} any-part window(s) (any part of the video, "
+                    f"not a highlight)")
             notes.append(
                 f"Only {len(clips)} of {requested} requested clips could be "
-                f"selected from speech; {visual} visual moment(s) (loudest "
-                f"audio peaks) filled the rest because the source has very "
-                f"little speech.")
+                f"selected from speech; {' and '.join(filled)} filled some "
+                f"slots because the source has very little speech and is too "
+                f"short for the full count.")
         else:
             notes.append(
                 f"Only {len(clips)} of {requested} requested clips could be "

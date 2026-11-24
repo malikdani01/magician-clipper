@@ -48,7 +48,8 @@ const SOFT_SHADOW = '0 1px 3px #000, 0 0 6px rgba(0,0,0,0.8)'
  * card loops. The motion mirrors what the worker burns onto the
  * video: pop = scale-in, karaoke = colour fill, sweep = highlight
  * box, bounce = drop with overshoot, type = char reveal, slam =
- * oversized slam, neon/outline/gradient = pop with their look.
+ * oversized slam, neon/outline/gradient = pop with their look,
+ * kinetic = slide in from the left, glow_pop = pop with a gold glow.
  * Rendered once (see the samples section) — the cards just use the
  * class names.
  */
@@ -61,9 +62,13 @@ const PREVIEW_CSS = `
 @keyframes cap-caret { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
 @keyframes cap-slam { 0% { opacity: 0; transform: scale(1.9); } 8% { opacity: 1; transform: scale(.93); } 12% { transform: scale(1); } 80% { opacity: 1; } 90%, 100% { opacity: 0; } }
 @keyframes cap-neon { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.3); } }
+@keyframes cap-kinetic { 0% { opacity: 0; transform: translateX(-18px) scale(.85); } 8% { opacity: 1; transform: translateX(2px) scale(1.06); } 13% { transform: translateX(0) scale(1); } 80% { opacity: 1; } 90%, 100% { opacity: 0; } }
+@keyframes cap-glow-pop { 0% { opacity: 0; transform: scale(.3); text-shadow: 0 0 0 rgba(250,204,21,0); } 7% { opacity: 1; transform: scale(1.15); text-shadow: 0 0 8px #FACC15, 0 0 18px #FACC15; } 12% { transform: scale(1); text-shadow: 0 0 6px #FACC15, 0 0 14px #FACC15; } 80% { opacity: 1; transform: scale(1); text-shadow: 0 0 6px #FACC15, 0 0 14px #FACC15; } 90%, 100% { opacity: 0; } }
 .cap-anim { display: inline-block; animation-duration: 3.4s; animation-iteration-count: infinite; animation-fill-mode: both; }
 .cap-word-pop { animation-name: cap-pop; }
 .cap-word-bounce { animation-name: cap-bounce; }
+.cap-word-kinetic { animation-name: cap-kinetic; }
+.cap-word-glow-pop { animation-name: cap-glow-pop; }
 .cap-word-karaoke { animation-name: cap-karaoke; }
 .cap-word-sweep { animation-name: cap-sweep; padding: 0 2px; border-radius: 3px; }
 .cap-char-type { animation-name: cap-type; }
@@ -211,6 +216,18 @@ function CaptionStylePreview({ style }: { style: CaptionStyle }) {
         </span>
       ) : null}
 
+      {style.anim === 'kinetic' ? (
+        <span className={`${frameClass} text-[15px]`} style={{ textShadow: OUTLINE_SHADOW }}>
+          {animatedWords('cap-word-kinetic', 0.32)}
+        </span>
+      ) : null}
+
+      {style.anim === 'glow_pop' ? (
+        <span className="absolute inset-x-1 top-1/2 -translate-y-1/2 text-center text-[18px] font-black uppercase leading-tight text-white">
+          {animatedWords('cap-word-glow-pop', 0.32)}
+        </span>
+      ) : null}
+
       {style.anim === 'title' ? (
         <>
           <span className="absolute inset-x-2 top-1/2 -translate-y-1/2 rounded-md bg-white px-2 py-1.5 text-center text-[11px] font-black uppercase leading-tight text-black">
@@ -240,7 +257,7 @@ function CaptionStylePreview({ style }: { style: CaptionStyle }) {
 /**
  * Captions Studio — redesign (same-to-same as the design collage).
  * Style cards, the live preview and all controls below are real: they
- * restyle sample text in the browser. The thirteen worker styles at
+ * restyle sample text in the browser. The fifteen worker styles at
  * the top are the styles the worker actually burns onto new jobs —
  * each sample loops its real animation, and clicking one saves it as
  * the default. "Apply to Clip" stays disabled: re-rendering a

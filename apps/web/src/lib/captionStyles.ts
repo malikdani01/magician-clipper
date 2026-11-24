@@ -30,6 +30,8 @@ export type CaptionStyleId =
   | 'slam'
   | 'outline'
   | 'gradient'
+  | 'kinetic'
+  | 'glow_pop'
 
 export type CaptionPreviewAnim =
   | 'pop'
@@ -43,6 +45,8 @@ export type CaptionPreviewAnim =
   | 'slam'
   | 'outline'
   | 'gradient'
+  | 'kinetic'
+  | 'glow_pop'
 
 export interface CaptionStyle {
   id: CaptionStyleId
@@ -161,6 +165,22 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     sample: 'COLOR RUSH',
     anim: 'gradient',
     wordColors: ['#FACC15', '#FB923C', '#F472B6', '#22D3EE'],
+  },
+  {
+    id: 'kinetic',
+    name: 'Kinetic Slide',
+    description:
+      'Words slide in from the left with a scale overshoot — fast, modern, kinetic motion.',
+    sample: 'SLIDE IN FAST',
+    anim: 'kinetic',
+  },
+  {
+    id: 'glow_pop',
+    name: 'Glow Pop',
+    description:
+      'Words pop in with a warm golden glow — bold white with a glowing edge.',
+    sample: 'GLOW UP',
+    anim: 'glow_pop',
   },
 ]
 

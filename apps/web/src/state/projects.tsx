@@ -38,6 +38,8 @@ export interface ClipSpec {
   durationSeconds: number
   captions: boolean
   onScreenText: boolean
+  /** How clips are picked: best parts only, or any parts to fill the count. */
+  selectionMode: 'interesting_only' | 'fill_any'
   contentType:
     | 'podcast'
     | 'interview'
@@ -59,6 +61,7 @@ export function defaultClipSpec(): ClipSpec {
     durationSeconds: 20,
     captions: true,
     onScreenText: false,
+    selectionMode: 'interesting_only',
     contentType: 'general',
     keywords: '',
     processingMode: 'balanced',

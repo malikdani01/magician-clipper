@@ -59,7 +59,8 @@ class JobController extends Controller
      * TikTok / Drive / direct MP4). Settings come ONLY from dropdowns /
      * toggles: platform, ratio, clip count, duration mode + seconds
      * (or min/max), captions + language, on-screen text, job type
-     * (+ campaign requirements), layout. No free-text settings except the
+     * (+ campaign requirements), layout, clip selection mode
+     * (interesting_only / fill_any). No free-text settings except the
      * campaign requirements text and an optional title.
      *
      * A project is created automatically when project_id is omitted.
@@ -97,7 +98,8 @@ class JobController extends Controller
             'duration_max_seconds' => ['sometimes', 'nullable', 'integer', 'min:5', 'max:180'],
             'captions_enabled' => ['sometimes', 'boolean'],
             'captions_language' => ['sometimes', 'string', Rule::in(['english', 'roman_urdu', 'hindi', 'auto'])],
-            'caption_style' => ['sometimes', 'nullable', 'string', Rule::in(['punchy', 'word_pop', 'title_card', 'clean_subs', 'classic', 'karaoke', 'bounce', 'typewriter', 'sweep', 'neon', 'slam', 'outline', 'gradient'])],
+            'caption_style' => ['sometimes', 'nullable', 'string', Rule::in(['punchy', 'word_pop', 'title_card', 'clean_subs', 'classic', 'karaoke', 'bounce', 'typewriter', 'sweep', 'neon', 'slam', 'outline', 'gradient', 'kinetic', 'glow_pop'])],
+            'selection_mode' => ['sometimes', 'string', Rule::in(['interesting_only', 'fill_any'])],
             'on_screen_text' => ['sometimes', 'boolean'],
             'job_type' => ['sometimes', 'string', Rule::in(['myself', 'campaign'])],
             'campaign_requirements' => ['sometimes', 'nullable', 'string', 'max:5000'],
@@ -227,6 +229,7 @@ class JobController extends Controller
             'captions_enabled' => $validated['captions_enabled'] ?? true,
             'captions_language' => $validated['captions_language'] ?? 'auto',
             'caption_style' => $validated['caption_style'] ?? 'punchy',
+            'selection_mode' => $validated['selection_mode'] ?? 'interesting_only',
             'on_screen_text' => $validated['on_screen_text'] ?? false,
             'job_type' => $validated['job_type'] ?? 'myself',
             'campaign_requirements' => $validated['campaign_requirements'] ?? null,

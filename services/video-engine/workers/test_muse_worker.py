@@ -377,5 +377,186 @@ class EngineVersionsTests(unittest.TestCase):
         )
 
 
+class SelectionModeTests(unittest.TestCase):
+    def test_interesting_only_returns_nothing_when_speech_unusable_and_silent(self):
+        # One 5s speech stretch, maximum mode with a 20s floor: no
+        # window can meet the bounds, and silent energy gives no
+        # visual moments — the honest shortfall is zero clips.
+        segments = [_segment(190.0, 195.0, "short line here")]
+        clips = muse_worker.select_highlights(
+            segments, 200.0,
+            _settings(clip_count=2, duration_mode="maximum",
+                      duration_seconds=30, duration_min_seconds=20,
+                      duration_max_seconds=30),
+            [0.0] * 200, [])
+        self.assertEqual(len(clips), 0)
+
+    def test_fill_any_fills_when_speech_unusable_and_silent(self):
+        # Same fixture, fill_any: the even grid fills the count.
+        segments = [_segment(190.0, 195.0, "short line here")]
+        clips = muse_worker.select_highlights(
+            segments, 200.0,
+            _settings(clip_count=2, duration_mode="maximum",
+                      duration_seconds=30, duration_min_seconds=20,
+                      duration_max_seconds=30, selection_mode="fill_any"),
+            [0.0] * 200, [])
+        self.assertEqual(len(clips), 2)
+        for c in clips:
+            self.assertEqual(c["signals"], ["any_part"])
+            self.assertAlmostEqual(c["duration"], 30.0, places=1)
+            self.assertTrue(c["reason"].endswith("Any part — not a highlight."))
+        ordered = sorted(clips, key=lambda c: c["start"])
+        for a, b in zip(ordered, ordered[1:]):
+            self.assertLessEqual(a["end"], b["start"])
+
+    def test_fill_any_zero_speech_silent_source_uses_any_part_not_uniform(self):
+        clips = muse_worker.select_highlights(
+            [], 200.0,
+            _settings(clip_count=2, selection_mode="fill_any"),
+            [0.0] * 200, [])
+        self.assertEqual(len(clips), 2)
+        for c in clips:
+            self.assertEqual(c["signals"], ["any_part"])
+            self.assertNotIn("no_speech_fallback", c["signals"])
+
+    def test_fill_any_delivers_what_fits_when_source_too_short(self):
+        # 100s source, 5x30s requested: only 3 full windows fit.
+        clips = muse_worker.select_highlights(
+            [], 100.0,
+            _settings(clip_count=5, selection_mode="fill_any"),
+            [0.0] * 100, [])
+        self.assertEqual(len(clips), 3)
+        for c in clips:
+            self.assertAlmostEqual(c["duration"], 30.0, places=1)
+            self.assertEqual(c["signals"], ["any_part"])
+        ordered = sorted(clips, key=lambda c: c["start"])
+        for a, b in zip(ordered, ordered[1:]):
+            self.assertLessEqual(a["end"], b["start"])
+        note = muse_worker._ready_note(clips, 5, [])
+        self.assertIn("Only 3 of 5", note)
+        self.assertIn("3 any-part window(s)", note)
+
+    def test_fill_any_honours_minimum_mode_bounds(self):
+        clips = muse_worker.select_highlights(
+            [], 200.0,
+            _settings(clip_count=3, duration_mode="minimum",
+                      duration_seconds=20, duration_min_seconds=20,
+                      duration_max_seconds=45, selection_mode="fill_any"),
+            [0.0] * 200, [])
+        self.assertEqual(len(clips), 3)
+        for c in clips:
+            self.assertGreaterEqual(c["duration"], 20.0 - 0.6)
+            self.assertLessEqual(c["duration"], 45.0 + 0.6)
+
+    def test_selection_mode_defaults_to_interesting_only(self):
+        # No selection_mode key at all: same behaviour as explicit
+        # interesting_only (zero clips on the unusable-speech fixture).
+        segments = [_segment(190.0, 195.0, "short line here")]
+        settings = _settings(clip_count=2, duration_mode="maximum",
+                             duration_seconds=30, duration_min_seconds=20,
+                             duration_max_seconds=30)
+        self.assertNotIn("selection_mode", settings)
+        clips = muse_worker.select_highlights(
+            segments, 200.0, settings, [0.0] * 200, [])
+        self.assertEqual(len(clips), 0)
+
+
+class OnScreenTextTests(unittest.TestCase):
+    def _clip(self):
+        return {"start": 10.0, "end": 40.0}
+
+    def _segs(self):
+        return [
+            _segment(10.0, 20.0, "we climb to the highest point of the tower"),
+            _segment(22.0, 30.0, "the tower view is insane guys"),
+        ]
+
+    def test_campaign_text_verbatim_wins(self):
+        settings = {"campaign_requirements":
+                    "Tone: hype.\nOn-screen text: WIN THE PS5 TODAY\nAvoid: spoilers",
+                    "notes": ""}
+        self.assertEqual(
+            muse_worker.derive_on_screen_text(self._clip(), self._segs(), settings),
+            "WIN THE PS5 TODAY")
+
+    def test_ost_marker_in_notes(self):
+        settings = {"campaign_requirements": "",
+                    "notes": "OST: biggest drop ever\nSome other line."}
+        self.assertEqual(
+            muse_worker.derive_on_screen_text(self._clip(), self._segs(), settings),
+            "biggest drop ever")
+
+    def test_quoted_string_used(self):
+        settings = {"campaign_requirements": "",
+                    "notes": 'The brief says "climb the tower" for the hook.'}
+        self.assertEqual(
+            muse_worker.derive_on_screen_text(self._clip(), self._segs(), settings),
+            "climb the tower")
+
+    def test_campaign_beats_notes(self):
+        settings = {"campaign_requirements": "On-screen text: FROM THE BRIEF",
+                    "notes": "On-screen text: FROM THE NOTES"}
+        self.assertEqual(
+            muse_worker.derive_on_screen_text(self._clip(), self._segs(), settings),
+            "FROM THE BRIEF")
+
+    def test_transcript_headline_from_emphatic_word(self):
+        headline = muse_worker.derive_on_screen_text(self._clip(), self._segs(), {})
+        self.assertEqual(headline, "HIGHEST POINT OF THE TOWER")
+        self.assertLessEqual(len(headline.split()), 6)
+        self.assertLessEqual(len(headline), 60)
+
+    def test_silent_window_gets_no_headline(self):
+        self.assertIsNone(
+            muse_worker.derive_on_screen_text(self._clip(), [], {}))
+
+    def test_headline_capped_at_60_chars(self):
+        long_text = "On-screen text: " + "W" * 80
+        settings = {"campaign_requirements": long_text, "notes": ""}
+        headline = muse_worker.derive_on_screen_text(self._clip(), self._segs(), settings)
+        self.assertIsNotNone(headline)
+        self.assertLessEqual(len(headline), 60)
+
+    def test_write_headline_ass(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "headline.ass"
+            self.assertTrue(
+                muse_worker.write_headline_ass("WIN THE PS5 TODAY", 30.0, path, 1080, 1920))
+            text = path.read_text()
+            self.assertIn("Style: Headline,", text)
+            self.assertIn("WIN THE PS5 TODAY", text)
+            self.assertIn("0:00:00.00,0:00:04.00,Headline,", text)
+            # Top-centre (alignment 8), near the top — clear of the
+            # split divider captions at y=864.
+            self.assertIn(",8,40,40,120,1", text)
+
+
+class CaptionStyleTests(unittest.TestCase):
+    def test_new_styles_in_dict(self):
+        self.assertIn("kinetic", muse_worker.CAPTION_STYLES)
+        self.assertIn("glow_pop", muse_worker.CAPTION_STYLES)
+        self.assertEqual(len(muse_worker.CAPTION_STYLES), 15)
+
+    def test_write_clip_ass_kinetic(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "kinetic.ass"
+            segments = [_segment(10.0, 20.0, "we climb to the highest point")]
+            self.assertTrue(muse_worker.write_clip_ass(
+                segments, 10.0, 40.0, "kinetic", path, 864, 1080, 1920, "split"))
+            text = path.read_text()
+            self.assertIn("Style: Kinetic,", text)
+            self.assertIn("\\move(", text)
+
+    def test_write_clip_ass_glow_pop(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "glow.ass"
+            segments = [_segment(10.0, 20.0, "we climb to the highest point")]
+            self.assertTrue(muse_worker.write_clip_ass(
+                segments, 10.0, 40.0, "glow_pop", path, 864, 1080, 1920, "split"))
+            text = path.read_text()
+            self.assertIn("Style: GlowPop,", text)
+            self.assertIn("\\fscx0\\fscy0", text)
+
+
 if __name__ == "__main__":
     unittest.main()

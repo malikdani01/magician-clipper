@@ -12,7 +12,7 @@ class UserSetting extends Model
     public const PROCESSING_MODES = ['eco', 'balanced', 'fast'];
     public const ASPECT_RATIOS = ['9:16', '16:9', '1:1', '4:5'];
     public const QUALITIES = ['draft', 'standard', 'high'];
-    public const CAPTION_STYLES = ['punchy', 'word_pop', 'title_card', 'clean_subs', 'classic', 'karaoke', 'bounce', 'typewriter', 'sweep', 'neon', 'slam', 'outline', 'gradient'];
+    public const CAPTION_STYLES = ['punchy', 'word_pop', 'title_card', 'clean_subs', 'classic', 'karaoke', 'bounce', 'typewriter', 'sweep', 'neon', 'slam', 'outline', 'gradient', 'kinetic', 'glow_pop'];
 
     public const DEFAULTS = [
         'default_processing_mode' => 'balanced',

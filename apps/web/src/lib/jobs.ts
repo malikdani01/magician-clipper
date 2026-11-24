@@ -38,6 +38,20 @@ export const LAYOUT_LABELS: Record<ClipLayout, string> = {
   streamer_full: 'Streamer full frame',
 }
 
+/** How clips are picked from the source (per job). */
+export type SelectionMode = 'interesting_only' | 'fill_any'
+
+export const SELECTION_MODE_LABELS: Record<SelectionMode, string> = {
+  interesting_only: 'Interesting only',
+  fill_any: 'Any parts — fill to count',
+}
+
+export const SELECTION_MODE_DESCRIPTIONS: Record<SelectionMode, string> = {
+  interesting_only: 'Only the best parts — fewer clips if fewer good parts exist.',
+  fill_any:
+    'Always the full count — fills with any part of the video when good parts run out.',
+}
+
 export interface JobSettings {
   platform: 'tiktok' | 'instagram'
   aspect_ratio: '9:16' | '16:9' | '1:1' | '4:5'
@@ -50,6 +64,8 @@ export interface JobSettings {
   captions_language: 'english' | 'roman_urdu' | 'hindi' | 'auto'
   /** Burn-in caption style; absent on jobs created before styles existed. */
   caption_style?: string
+  /** Clip selection mode; absent on jobs created before the mode existed. */
+  selection_mode?: string
   on_screen_text: boolean
   job_type: 'myself' | 'campaign'
   campaign_requirements: string | null
@@ -124,6 +140,8 @@ export interface CreateJobInput {
   captionsLanguage: 'english' | 'roman_urdu' | 'hindi' | 'auto'
   /** Burn-in caption style id (see lib/captionStyles); defaults to 'punchy'. */
   captionStyle: string
+  /** Clip selection mode (see SELECTION_MODE_LABELS); defaults to 'interesting_only'. */
+  selectionMode?: SelectionMode
   onScreenText: boolean
   jobType: 'myself' | 'campaign'
   campaignRequirements?: string
@@ -211,6 +229,7 @@ export async function createJob(input: CreateJobInput): Promise<JobResult> {
       form.append('captions_enabled', String(input.captionsEnabled))
       form.append('captions_language', input.captionsLanguage)
       form.append('caption_style', input.captionStyle)
+      form.append('selection_mode', input.selectionMode ?? 'interesting_only')
       form.append('on_screen_text', String(input.onScreenText))
       form.append('job_type', input.jobType)
       if (input.jobType === 'campaign' && input.campaignRequirements) {
@@ -244,6 +263,7 @@ export async function createJob(input: CreateJobInput): Promise<JobResult> {
           captions_enabled: input.captionsEnabled,
           captions_language: input.captionsLanguage,
           caption_style: input.captionStyle,
+          selection_mode: input.selectionMode ?? 'interesting_only',
           on_screen_text: input.onScreenText,
           job_type: input.jobType,
           campaign_requirements:
