@@ -7,7 +7,7 @@ import { ClipPlayerModal } from '../components/ClipPlayerModal'
 import { ClipThumbnail } from '../components/ClipThumbnail'
 import { ScoreBreakdown } from '../components/ScoreBreakdown'
 import { useProjects, getProjectFile, getProjectVideoUrl } from '../state/projects'
-import { downloadClip, downloadClipsZip, listJobs, type Job, type JobClip } from '../lib/jobs'
+import { downloadClip, downloadClipAudio, downloadClipsZip, listJobs, type Job, type JobClip } from '../lib/jobs'
 import { formatBytes } from '../lib/format'
 import { formatDuration } from '../lib/format'
 
@@ -41,6 +41,8 @@ export function LibraryPage() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [downloadingId, setDownloadingId] = useState<number | null>(null)
   const [downloadError, setDownloadError] = useState<string | null>(null)
+  const [audioDownloadingId, setAudioDownloadingId] = useState<number | null>(null)
+  const [audioError, setAudioError] = useState<string | null>(null)
   const [previewingClip, setPreviewingClip] = useState<JobClip | null>(null)
   // Library upgrade: sort, Ready-only filter, multi-select + ZIP.
   const [sort, setSort] = useState<ClipSort>('newest')
@@ -120,6 +122,14 @@ export function LibraryPage() {
     const result = await downloadClip(clip)
     setDownloadingId(null)
     if (!result.ok) setDownloadError(result.error)
+  }
+
+  async function doDownloadAudio(clip: JobClip) {
+    setAudioDownloadingId(clip.id)
+    setAudioError(null)
+    const result = await downloadClipAudio(clip)
+    setAudioDownloadingId(null)
+    if (!result.ok) setAudioError(result.error)
   }
 
   function toggleSelect(clipId: number) {
@@ -294,6 +304,12 @@ export function LibraryPage() {
         </p>
       ) : null}
 
+      {audioError ? (
+        <p role="alert" className="mb-4 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          Audio download failed: {audioError}
+        </p>
+      ) : null}
+
       {showOriginals && originals.length > 0 && (
         <>
           {tab === 'all' ? (
@@ -446,6 +462,17 @@ export function LibraryPage() {
                       <Download className="h-4 w-4" />
                       {downloadingId === clip.id ? 'Downloading…' : 'Download'}
                     </button>
+                    {clip.status === 'ready' ? (
+                      <button
+                        type="button"
+                        onClick={() => void doDownloadAudio(clip)}
+                        disabled={audioDownloadingId === clip.id}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-ink-border px-3 py-2 text-sm font-semibold text-white hover:bg-ink-panel2 disabled:cursor-wait disabled:opacity-60"
+                      >
+                        <Music className="h-4 w-4" />
+                        {audioDownloadingId === clip.id ? 'Downloading…' : 'Audio'}
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       onClick={() => setPreviewingClip(clip)}

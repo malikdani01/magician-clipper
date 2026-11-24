@@ -92,7 +92,7 @@ class NotificationTest extends TestCase
         $this->assertSame($job['id'], $notification->job_id);
         $this->assertSame('job_ready', $notification->type);
         $this->assertSame("Job #{$job['id']} is ready", $notification->title);
-        $this->assertSame('1 clips are ready to preview and download.', $notification->body);
+        $this->assertSame('1 clip is ready to preview and download.', $notification->body);
         $this->assertSame("/jobs/{$job['id']}", $notification->link);
         $this->assertNull($notification->read_at);
 

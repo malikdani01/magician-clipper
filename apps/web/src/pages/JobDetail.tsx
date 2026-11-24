@@ -7,6 +7,7 @@ import {
   Download,
   Film,
   Loader2,
+  Music,
   Play,
   RotateCcw,
   X,
@@ -23,6 +24,7 @@ import { VIRAL_TONE_CLASS, viralScore } from '../lib/viralScore'
 import {
   cancelJob,
   downloadClip,
+  downloadClipAudio,
   getClipRerenders,
   getJob,
   requestClipRerender,
@@ -220,6 +222,8 @@ export function JobDetailPage() {
   const [acting, setActing] = useState<'cancel' | 'retry' | null>(null)
   const [downloadingId, setDownloadingId] = useState<number | null>(null)
   const [downloadError, setDownloadError] = useState<string | null>(null)
+  const [audioDownloadingId, setAudioDownloadingId] = useState<number | null>(null)
+  const [audioError, setAudioError] = useState<string | null>(null)
   const [previewingClip, setPreviewingClip] = useState<JobClip | null>(null)
   const requestRef = useRef(0)
 
@@ -302,6 +306,14 @@ export function JobDetailPage() {
     const result = await downloadClip(clip)
     setDownloadingId(null)
     if (!result.ok) setDownloadError(result.error)
+  }
+
+  const doDownloadAudio = async (clip: JobClip) => {
+    setAudioDownloadingId(clip.id)
+    setAudioError(null)
+    const result = await downloadClipAudio(clip)
+    setAudioDownloadingId(null)
+    if (!result.ok) setAudioError(result.error)
   }
 
   // While the stored session is still being verified, show a loading
@@ -396,6 +408,15 @@ export function JobDetailPage() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-3">
                 <JobStatusPill status={job.status} />
+                {job.intro_applied || job.outro_applied ? (
+                  <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300">
+                    {job.intro_applied && job.outro_applied
+                      ? 'Intro + outro applied'
+                      : job.intro_applied
+                        ? 'Intro applied'
+                        : 'Outro applied'}
+                  </span>
+                ) : null}
                 {isActive ? (
                   <span className="flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
                     <Loader2 className="h-4 w-4 animate-spin text-brand-light" />
@@ -639,6 +660,21 @@ export function JobDetailPage() {
                       )}
                       {downloadingId === clip.id ? 'Downloading…' : 'Download'}
                     </button>
+                    {clip.status === 'ready' ? (
+                      <button
+                        type="button"
+                        onClick={() => void doDownloadAudio(clip)}
+                        disabled={audioDownloadingId === clip.id}
+                        className="flex shrink-0 items-center gap-2 rounded-xl border border-ink-border px-4 py-2.5 text-sm font-semibold text-white hover:bg-ink-panel2 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {audioDownloadingId === clip.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Music className="h-4 w-4" />
+                        )}
+                        {audioDownloadingId === clip.id ? 'Downloading…' : 'Audio'}
+                      </button>
+                    ) : null}
                   </li>
                     )
                   })}
@@ -647,6 +683,11 @@ export function JobDetailPage() {
             {downloadError ? (
               <p role="alert" className="mt-4 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
                 Download failed: {downloadError}
+              </p>
+            ) : null}
+            {audioError ? (
+              <p role="alert" className="mt-4 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+                Audio download failed: {audioError}
               </p>
             ) : null}
             {previewingClip ? (

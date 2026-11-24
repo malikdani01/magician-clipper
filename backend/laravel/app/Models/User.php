@@ -79,4 +79,9 @@ class User extends Authenticatable
     {
         return $this->hasMany(JobPreset::class);
     }
+
+    public function brandAssets()
+    {
+        return $this->hasMany(BrandAsset::class);
+    }
 }

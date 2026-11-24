@@ -12,6 +12,7 @@ Covers the Stronger Clipper round (2026-11-23):
     fails the whole job; the job ends Ready with a note).
 """
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -292,14 +293,21 @@ class FakeApi:
         self.job = job
         self.statuses = []
         self.uploads = []
+        # Brand-asset fixtures: download URL -> local file to copy.
+        self.brand_files = {}
 
     def get_job(self, job_id):
         return dict(self.job)
 
     def set_status(self, job_id, status, error_reason=None, stage=None,
-                   progress=None, note=None):
-        self.statuses.append({"status": status, "note": note, "stage": stage})
+                   progress=None, note=None, **kwargs):
+        self.statuses.append({"status": status, "note": note, "stage": stage,
+                              **kwargs})
         return {"id": job_id, "status": status}
+
+    def download_brand_asset(self, url, dest):
+        Path(dest).write_bytes(Path(self.brand_files[url]).read_bytes())
+        return dest
 
     def upload_clip(self, job_id, clip_path, fields, thumbnail=None):
         self.uploads.append(fields)
@@ -793,6 +801,339 @@ class ExactDurationTests(unittest.TestCase):
                 {"settings": _settings(duration_seconds=20)},
                 {"has_audio": True})
         self.assertAlmostEqual(info["duration"], 20.6)
+
+
+class BrandAssetsTests(unittest.TestCase):
+    """Intro/outro brand assets (2026-11-25): jobs whose owner set an
+    intro/outro get [intro?] + clip + [outro?] via the concat filter,
+    normalised to the rendered clip's canvas and 48kHz stereo audio.
+    A bad asset, a failed concat, or no assets at all never fails the
+    job — the plain clip is used and the segment is marked not applied."""
+
+    def _make_segment(self, path, duration, size, color, audio_freq=None):
+        """A short real MP4 via lavfi: colour bars + optional sine audio."""
+        cmd = [muse_worker.FFMPEG, "-y", "-v", "error",
+               "-f", "lavfi",
+               "-i", f"color=c={color}:s={size}:d={duration}:r=30"]
+        if audio_freq:
+            cmd += ["-f", "lavfi",
+                    "-i", f"sine=frequency={audio_freq}:duration={duration}"]
+            cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                    "-shortest"]
+        else:
+            cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                    "-pix_fmt", "yuv420p"]
+        cmd += [str(path)]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(Path(path).exists())
+        self.assertGreater(Path(path).stat().st_size, 0)
+
+    def _fixtures(self, tmp):
+        """clip 2s 360x640 + audio, intro 1s 640x360 + audio (different
+        aspect — exercises scale+pad), outro 1.5s 360x640 video-only."""
+        clip = tmp / "clip.mp4"
+        intro = tmp / "intro.mp4"
+        outro = tmp / "outro.mp4"
+        self._make_segment(clip, 2.0, "360x640", "red", audio_freq=440)
+        self._make_segment(intro, 1.0, "640x360", "blue", audio_freq=880)
+        self._make_segment(outro, 1.5, "360x640", "green")
+        return clip, intro, outro
+
+    def test_intro_clip_outro_concat(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            clip, intro, outro = self._fixtures(tmp)
+            out, intro_ok, outro_ok = muse_worker.apply_brand_assets(
+                clip, intro, outro, tmp / "branded.mp4")
+            self.assertTrue(intro_ok)
+            self.assertTrue(outro_ok)
+            self.assertNotEqual(out, clip)
+            info = muse_worker.probe_summary(out)
+            self.assertEqual((info["width"], info["height"]), (360, 640))
+            self.assertTrue(info["has_audio"])
+            self.assertAlmostEqual(info["duration"], 4.5, delta=0.5)
+
+    def _center_rgb(self, image_path):
+        """Average RGB of an image file, via ffmpeg — pure stdlib, so
+        the test runs under any interpreter (no PIL). The fixtures are
+        solid-colour frames, so the average is the frame's colour."""
+        proc = subprocess.run(
+            [muse_worker.FFMPEG, "-v", "error", "-i", str(image_path),
+             "-vf", "scale=1:1", "-f", "rawvideo",
+             "-pix_fmt", "rgb24", "-"],
+            capture_output=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(proc.stdout), 3)
+        return tuple(proc.stdout)
+
+    def test_thumbnail_skips_past_intro(self):
+        # A branded clip's thumbnail must show the clip, not the intro
+        # card: the frame is taken at intro duration + 1.0s, and at
+        # 1.0s it would still be the intro.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            clip = tmp / "clip.mp4"
+            intro = tmp / "intro.mp4"
+            self._make_segment(clip, 5.0, "360x640", "green", audio_freq=440)
+            self._make_segment(intro, 2.0, "360x640", "red", audio_freq=880)
+            out, intro_ok, _outro_ok = muse_worker.apply_brand_assets(
+                clip, intro, None, tmp / "branded.mp4")
+            self.assertTrue(intro_ok)
+            intro_dur = muse_worker._probe_video_info(intro)["duration"]
+            self.assertAlmostEqual(intro_dur, 2.0, delta=0.2)
+            thumb_intro = muse_worker.extract_thumbnail(
+                out, tmp / "thumb_intro.jpg", at_seconds=1.0)
+            self.assertIsNotNone(thumb_intro)
+            r, g, _b = self._center_rgb(thumb_intro)
+            self.assertGreater(r, g)  # still the red intro card
+            thumb_clip = muse_worker.extract_thumbnail(
+                out, tmp / "thumb_clip.jpg", at_seconds=intro_dur + 1.0)
+            self.assertIsNotNone(thumb_clip)
+            r, g, _b = self._center_rgb(thumb_clip)
+            self.assertGreater(g, r)  # the green clip itself
+
+    def test_intro_only_and_outro_only(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            clip, intro, outro = self._fixtures(tmp)
+            out, intro_ok, outro_ok = muse_worker.apply_brand_assets(
+                clip, intro, None, tmp / "branded_i.mp4")
+            self.assertEqual((intro_ok, outro_ok), (True, False))
+            self.assertAlmostEqual(
+                muse_worker.probe_summary(out)["duration"], 3.0, delta=0.5)
+            out, intro_ok, outro_ok = muse_worker.apply_brand_assets(
+                clip, None, outro, tmp / "branded_o.mp4")
+            self.assertEqual((intro_ok, outro_ok), (False, True))
+            self.assertAlmostEqual(
+                muse_worker.probe_summary(out)["duration"], 3.5, delta=0.5)
+
+    def test_video_only_intro_still_concats(self):
+        # The outro fixture has no audio stream: the concat must
+        # synthesise a silent track for it, not fail.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            clip, _intro, outro = self._fixtures(tmp)
+            out, intro_ok, outro_ok = muse_worker.apply_brand_assets(
+                clip, None, outro, tmp / "branded.mp4")
+            self.assertTrue(outro_ok)
+            info = muse_worker.probe_summary(out)
+            self.assertTrue(info["has_audio"])
+            self.assertAlmostEqual(info["duration"], 3.5, delta=0.5)
+
+    def test_corrupt_asset_is_skipped_gracefully(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            clip, intro, outro = self._fixtures(tmp)
+            corrupt = tmp / "corrupt.mp4"
+            corrupt.write_bytes(b"")
+            # Zero-byte intro: skipped, outro still applied.
+            out, intro_ok, outro_ok = muse_worker.apply_brand_assets(
+                clip, corrupt, outro, tmp / "branded.mp4")
+            self.assertEqual((intro_ok, outro_ok), (False, True))
+            self.assertAlmostEqual(
+                muse_worker.probe_summary(out)["duration"], 3.5, delta=0.5)
+            # Both assets corrupt/missing: the original clip is returned
+            # untouched — no ffmpeg pass, no new file.
+            out, intro_ok, outro_ok = muse_worker.apply_brand_assets(
+                clip, corrupt, tmp / "missing.mp4", tmp / "branded2.mp4")
+            self.assertEqual(out, clip)
+            self.assertEqual((intro_ok, outro_ok), (False, False))
+            self.assertFalse((tmp / "branded2.mp4").exists())
+
+    def test_no_assets_returns_original_untouched(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            clip, _intro, _outro = self._fixtures(tmp)
+            out, intro_ok, outro_ok = muse_worker.apply_brand_assets(clip)
+            self.assertEqual(out, clip)
+            self.assertEqual((intro_ok, outro_ok), (False, False))
+            self.assertFalse((tmp / "clip_branded.mp4").exists())
+
+    def test_download_brand_asset_streams_with_api_key_auth(self):
+        captured = {}
+
+        class FakeResp:
+            status_code = 200
+            text = ""
+
+            def __init__(self, data):
+                self._data = data
+
+            def iter_content(self, chunk_size=1 << 20):
+                yield self._data
+
+        class FakeRequests:
+            def request(self, method, url, headers=None, **kwargs):
+                captured["method"] = method
+                captured["url"] = url
+                captured["headers"] = headers
+                captured["stream"] = kwargs.get("stream")
+                return FakeResp(b"fake-brand-mp4-bytes")
+
+        api = muse_worker.JobApi("test-key")
+        api._requests = FakeRequests()
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "brand_intro.mp4"
+            api.download_brand_asset(
+                "https://example.invalid/api/v1/brand-assets/1/download", dest)
+            self.assertEqual(dest.read_bytes(), b"fake-brand-mp4-bytes")
+        self.assertEqual(captured["method"], "GET")
+        self.assertEqual(
+            captured["url"],
+            "https://example.invalid/api/v1/brand-assets/1/download")
+        self.assertEqual(captured["headers"]["X-Muse-Api-Key"], "test-key")
+        self.assertTrue(captured["stream"])
+        # A relative URL is resolved against the backend base.
+        api.download_brand_asset("/api/v1/brand-assets/2/download",
+                                 Path(d) / "brand2.mp4")
+        self.assertEqual(
+            captured["url"], "http://127.0.0.1:8000/api/v1/brand-assets/2/download")
+
+    def test_download_brand_assets_skips_unplayable_and_missing(self):
+        class StubApi:
+            def __init__(self, files):
+                self.files = files  # url -> bytes to write
+
+            def download_brand_asset(self, url, dest):
+                Path(dest).write_bytes(self.files[url])
+                return dest
+
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            _clip, intro, _outro = self._fixtures(tmp)
+            good_bytes = intro.read_bytes()
+            api = StubApi({
+                "https://x/intro": good_bytes,
+                "https://x/outro": b"not a video at all",
+            })
+            assets = muse_worker.download_brand_assets(api, {
+                "intro": {"id": 1, "download_url": "https://x/intro"},
+                "outro": {"id": 2, "download_url": "https://x/outro"},
+            }, tmp)
+            self.assertEqual(set(assets), {"intro"})
+            self.assertTrue(assets["intro"].exists())
+            # The unplayable outro file is removed, not left behind.
+            self.assertFalse((tmp / "brand_outro_2.mp4").exists())
+            # Missing key / empty / non-dict: no assets, no crash.
+            self.assertEqual(muse_worker.download_brand_assets(api, None, tmp), {})
+            self.assertEqual(muse_worker.download_brand_assets(api, {}, tmp), {})
+            self.assertEqual(
+                muse_worker.download_brand_assets(api, "nonsense", tmp), {})
+
+    def test_download_brand_assets_download_failure_is_not_fatal(self):
+        class FailingApi:
+            def download_brand_asset(self, url, dest):
+                raise RuntimeError("HTTP 404: gone")
+
+        with tempfile.TemporaryDirectory() as d:
+            assets = muse_worker.download_brand_assets(FailingApi(), {
+                "intro": {"id": 1, "download_url": "https://x/intro"},
+            }, Path(d))
+            self.assertEqual(assets, {})
+
+    def test_set_status_sends_brand_flags_only_when_given(self):
+        captured = {}
+
+        class FakeResp:
+            status_code = 200
+            text = "{}"
+
+            def json(self):
+                return {}
+
+        class FakeRequests:
+            def request(self, method, url, headers=None, **kwargs):
+                captured["payload"] = kwargs.get("json")
+                return FakeResp()
+
+        api = muse_worker.JobApi("test-key")
+        api._requests = FakeRequests()
+        api.set_status(1, "Ready", stage="ready", progress=100)
+        self.assertNotIn("intro_applied", captured["payload"])
+        self.assertNotIn("outro_applied", captured["payload"])
+        api.set_status(1, "Ready", stage="ready", progress=100,
+                       intro_applied=True, outro_applied=False)
+        self.assertEqual(captured["payload"]["intro_applied"], True)
+        self.assertEqual(captured["payload"]["outro_applied"], False)
+
+    def _run_process_job(self, job, api, fixture_clip):
+        """process_job with every heavy step stubbed except branding:
+        the fake render copies a real 2s clip so the concat really runs."""
+        segments = [_segment(10.0, 30.0, "One good story here now.")]
+        energy = [0.05] * 200
+        real_probe = muse_worker.probe_summary
+
+        def fake_probe(path):
+            # The fake source gets stubbed info; every real file (the
+            # rendered clip, brand assets, branded output) is probed
+            # for real so the concat genuinely runs and is validated.
+            if str(path) == "/tmp/fake-source.mp4":
+                return {"duration": 200.0, "width": 576, "height": 1280,
+                        "video_codec": "h264", "fps": 30.0,
+                        "has_audio": True}
+            return real_probe(path)
+
+        def fake_extract_audio(source, wav_path):
+            Path(wav_path).write_bytes(b"\x00" * (44 + 200 * 32000))
+
+        def fake_render_clip(source, clip, settings, segs, out_path,
+                             source_info, job_dir):
+            Path(out_path).write_bytes(fixture_clip.read_bytes())
+
+        with mock.patch.object(muse_worker, "acquire_source",
+                               return_value=(Path("/tmp/fake-source.mp4"), "stubbed")), \
+            mock.patch.object(muse_worker, "probe_summary",
+                              side_effect=fake_probe), \
+            mock.patch.object(muse_worker, "extract_audio",
+                              side_effect=fake_extract_audio), \
+            mock.patch.object(muse_worker, "transcribe", return_value=segments), \
+            mock.patch.object(muse_worker, "wav_rms_profile", return_value=energy), \
+            mock.patch.object(muse_worker, "face_profile", return_value=[]), \
+            mock.patch.object(muse_worker, "render_clip", side_effect=fake_render_clip), \
+            mock.patch.object(muse_worker, "validate_clip",
+                              return_value={"duration": 20.0, "width": 1080,
+                                            "height": 1920, "size_bytes": 1234}), \
+            mock.patch.object(muse_worker, "extract_thumbnail", return_value=None):
+            muse_worker.process_job(api, job)
+
+    def test_process_job_reports_brand_flags_on_ready(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            clip, intro, outro = self._fixtures(tmp)
+            job = {"id": 98, "state": "queued", "stale": False,
+                   "settings": _settings(clip_count=1, duration_seconds=20),
+                   "brand_assets": {
+                       "intro": {"id": 1, "download_url": "https://x/intro"},
+                       "outro": {"id": 2, "download_url": "https://x/outro"},
+                   }}
+            api = FakeApi(job)
+            api.brand_files = {"https://x/intro": intro,
+                               "https://x/outro": outro}
+            self._run_process_job(job, api, clip)
+            self.assertEqual(len(api.uploads), 1)
+            # The uploaded clip is the branded one (2 + 1 + 1.5s).
+            self.assertAlmostEqual(
+                api.uploads[0]["duration_seconds"], 4.5, delta=0.5)
+            ready = [s for s in api.statuses if s["status"] == "Ready"]
+            self.assertEqual(len(ready), 1)
+            self.assertEqual(ready[0]["intro_applied"], True)
+            self.assertEqual(ready[0]["outro_applied"], True)
+
+    def test_process_job_without_brand_assets_sends_no_flags(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            clip, _intro, _outro = self._fixtures(tmp)
+            job = {"id": 98, "state": "queued", "stale": False,
+                   "settings": _settings(clip_count=1, duration_seconds=20)}
+            api = FakeApi(job)
+            self._run_process_job(job, api, clip)
+            self.assertEqual(len(api.uploads), 1)
+            ready = [s for s in api.statuses if s["status"] == "Ready"]
+            self.assertEqual(len(ready), 1)
+            self.assertNotIn("intro_applied", ready[0])
+            self.assertNotIn("outro_applied", ready[0])
 
 
 if __name__ == "__main__":

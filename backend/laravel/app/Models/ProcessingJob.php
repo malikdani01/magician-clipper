@@ -127,6 +127,8 @@ class ProcessingJob extends Model
         'error_code',
         'error_message',
         'note',
+        'intro_applied',
+        'outro_applied',
         'engine_job_id',
         'settings',
         'source_type',
@@ -141,6 +143,8 @@ class ProcessingJob extends Model
         return [
             'progress' => 'integer',
             'settings' => 'array',
+            'intro_applied' => 'boolean',
+            'outro_applied' => 'boolean',
             'started_at' => 'datetime',
             'finished_at' => 'datetime',
         ];
@@ -269,6 +273,8 @@ class ProcessingJob extends Model
             'error_code' => $this->error_code,
             'error_message' => $this->error_message,
             'note' => $this->note,
+            'intro_applied' => (bool) $this->intro_applied,
+            'outro_applied' => (bool) $this->outro_applied,
             'started_at' => $this->started_at,
             'finished_at' => $this->finished_at,
             'created_at' => $this->created_at,

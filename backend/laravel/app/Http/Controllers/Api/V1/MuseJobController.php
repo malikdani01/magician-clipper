@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
+use App\Models\BrandAsset;
 use App\Models\Clip;
 use App\Models\ClipRerender;
 use App\Models\Notification;
@@ -153,9 +154,57 @@ class MuseJobController extends Controller
             ])->all(),
             'error_code' => $job->error_code,
             'error_message' => $job->error_message,
+            // Whether the worker stitched the brand-kit intro/outro
+            // onto this job's clips (reported by the worker, read back
+            // here so it can confirm what was stored).
+            'intro_applied' => (bool) $job->intro_applied,
+            'outro_applied' => (bool) $job->outro_applied,
+            // Brand-kit intro/outro for this job's owner, so the worker
+            // can stitch them onto the rendered clips. Either side is
+            // null when the user has not uploaded that asset; the
+            // download URLs are served by the muse-guarded endpoint
+            // below (the worker already holds the Muse API key).
+            'brand_assets' => $this->brandAssetsForWorker($job),
             'created_at' => $job->created_at,
             'updated_at' => $job->updated_at,
         ];
+    }
+
+    /** Brand-kit assets for the worker: intro/outro with download URLs. */
+    private function brandAssetsForWorker(ProcessingJob $job): array
+    {
+        $assets = $job->user?->brandAssets()->get()->keyBy('kind') ?? collect();
+        $entry = fn (?BrandAsset $asset) => $asset === null ? null : [
+            'id' => $asset->id,
+            'download_url' => url("/api/v1/muse/brand-assets/{$asset->id}/download"),
+            'duration_seconds' => $asset->duration_seconds,
+        ];
+
+        return [
+            'intro' => $entry($assets->get(BrandAsset::KIND_INTRO)),
+            'outro' => $entry($assets->get(BrandAsset::KIND_OUTRO)),
+        ];
+    }
+
+    /**
+     * GET /api/v1/muse/brand-assets/{asset}/download
+     * Streams a brand asset to the worker (muse-guarded, like the job
+     * source endpoint). A missing file is a 404, never a fabricated
+     * download.
+     */
+    public function downloadBrandAsset(BrandAsset $asset)
+    {
+        if ($asset->path === null
+            || ! Storage::disk('local')->exists($asset->path)) {
+            return response()->json([
+                'error' => 'not_found',
+                'message' => 'This brand asset has no file to download.',
+            ], 404);
+        }
+
+        return Storage::disk('local')->download(
+            $asset->path, basename($asset->path)
+        );
     }
 
     /**
@@ -239,6 +288,13 @@ class MuseJobController extends Controller
             'engine_versions' => ['sometimes', 'nullable', 'array'],
             'engine_versions.ffmpeg' => ['sometimes', 'nullable', 'string', 'max:255'],
             'engine_versions.ffprobe' => ['sometimes', 'nullable', 'string', 'max:255'],
+            // Whether the worker stitched the user's brand-kit intro /
+            // outro onto this job's clips. Reported with the final
+            // Ready report (but accepted on any status report) and
+            // stored whenever present; the frontend renders a badge
+            // from the flags.
+            'intro_applied' => ['sometimes', 'boolean'],
+            'outro_applied' => ['sometimes', 'boolean'],
         ]);
 
         $public = strtolower($validated['status']);
@@ -246,9 +302,21 @@ class MuseJobController extends Controller
         $progress = $validated['progress'] ?? null;
 
         // A note rides along with any status report and is stored on the
-        // job itself, so it survives the state transition below.
+        // job itself, so it survives the state transition below. The
+        // intro/outro-applied flags ride along the same way and are
+        // stored whenever present, on any status report.
+        $needsSave = false;
         if (array_key_exists('note', $validated)) {
             $job->note = $validated['note'];
+            $needsSave = true;
+        }
+        foreach (['intro_applied', 'outro_applied'] as $flag) {
+            if (array_key_exists($flag, $validated)) {
+                $job->{$flag} = (bool) $validated[$flag];
+                $needsSave = true;
+            }
+        }
+        if ($needsSave) {
             $job->save();
         }
 
@@ -320,6 +388,7 @@ class MuseJobController extends Controller
         // transition twice. This runs only on a real transition — the
         // same-status early return above never reaches here.
         if ($public === 'ready') {
+            $clipCount = $job->clips()->count();
             Notification::firstOrCreate(
                 [
                     'user_id' => $job->user_id,
@@ -328,7 +397,9 @@ class MuseJobController extends Controller
                 ],
                 [
                     'title' => "Job #{$job->id} is ready",
-                    'body' => $job->clips()->count().' clips are ready to preview and download.',
+                    'body' => $clipCount === 1
+                        ? '1 clip is ready to preview and download.'
+                        : "{$clipCount} clips are ready to preview and download.",
                     'link' => "/jobs/{$job->id}",
                 ]
             );

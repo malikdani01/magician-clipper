@@ -30,6 +30,7 @@ import {
   type SelectionMode,
 } from '../lib/jobs'
 import { translateLegacyCaptionPreset } from '../lib/captionStyles'
+import { listPresets, type JobPreset } from '../lib/presets'
 import {
   defaultClipSpec,
   setProjectFile,
@@ -83,6 +84,34 @@ const CAPTION_STYLES = [
  * it most resembles — the job API rejects unknown style ids, so the
  * preset must never be sent as-is.
  */
+
+/**
+ * Real caption style id → the wizard's legacy preset id. The wizard's
+ * caption-style select holds LEGACY ids (bold-pop, highlight, …) while
+ * presets store REAL style ids (punchy, word_pop, …) — translateLegacy-
+ * CaptionPreset passes real ids through unchanged, so it cannot bridge
+ * the two. Styles with no legacy equivalent (typewriter, sweep,
+ * outline, gradient, kinetic, glow_pop) have no wizard option: loading
+ * a preset with one of those keeps the wizard's current preset.
+ */
+const REAL_STYLE_TO_LEGACY_PRESET: Record<string, string> = {
+  punchy: 'bold-pop',
+  word_pop: 'highlight',
+  bounce: 'bounce',
+  karaoke: 'karaoke',
+  neon: 'neon-glow',
+  slam: 'word-slam',
+  clean_subs: 'modern',
+  classic: 'podcast',
+  title_card: 'cinematic',
+}
+
+/** Preset quality → wizard processing mode. */
+const QUALITY_TO_PROCESSING_MODE: Record<string, ClipSpec['processingMode']> = {
+  draft: 'eco',
+  standard: 'balanced',
+  high: 'fast',
+}
 
 /** Processing mode → job quality (the worker renders at 'standard' unless told otherwise). */
 const PROCESSING_MODE_TO_QUALITY: Record<string, 'draft' | 'standard' | 'high'> = {
@@ -267,6 +296,23 @@ export function ClipperPage() {
   const [captionPreset, setCaptionPreset] = useState<string>('bold-pop')
   const [keywordsAvoid, setKeywordsAvoid] = useState('')
 
+  // Job presets (GET /api/v1/presets) — load a saved settings snapshot
+  // into the Step 2 form. Presets hold settings only; the source is
+  // always the file picked on Step 1.
+  const [presets, setPresets] = useState<JobPreset[]>([])
+  const [selectedPresetId, setSelectedPresetId] = useState('')
+  const [presetMessage, setPresetMessage] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    listPresets().then((rows) => {
+      if (!cancelled) setPresets(rows)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const inputRef = useRef<HTMLInputElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   // Stale-response guards: a probe/audio call that finishes after a newer
@@ -294,6 +340,72 @@ export function ClipperPage() {
     if (projectId) {
       updateProject(projectId, { spec: next })
     }
+  }
+
+  /**
+   * Load a saved job preset into the Step 2 form. Every field is
+   * validated against what this wizard accepts first — a value outside
+   * the wizard's range (e.g. clip count above 20, duration outside
+   * 5–300s) is skipped, not forced in. The caption style maps through
+   * the legacy-preset table above; a real style with no wizard option
+   * keeps the wizard's current preset and says so. Preset fields with
+   * no wizard equivalent (layout is derived at submit, job type is
+   * always "for myself" here, captions language is always Auto) are
+   * not applied.
+   */
+  const handleLoadPreset = (id: number) => {
+    const preset = presets.find((p) => p.id === id)
+    if (!preset) return
+    const s = preset.settings
+    const skipped: string[] = []
+    const patch: Partial<ClipSpec> = {}
+    if (s.platform === 'tiktok' || s.platform === 'instagram') {
+      patch.platform = s.platform
+    }
+    if (s.aspect_ratio === '9:16' || s.aspect_ratio === '16:9' || s.aspect_ratio === '1:1' || s.aspect_ratio === '4:5') {
+      patch.aspect = s.aspect_ratio
+    }
+    if (typeof s.clip_count === 'number' && s.clip_count >= 1 && s.clip_count <= 20) {
+      patch.clipCount = Math.round(s.clip_count)
+      setClipCountText(String(Math.round(s.clip_count)))
+      setClipCountError(null)
+    } else if (typeof s.clip_count === 'number') {
+      skipped.push(`clip count (${s.clip_count} is outside this wizard's 1–20)`)
+    }
+    if (s.duration_mode === 'exact' || s.duration_mode === 'minimum' || s.duration_mode === 'maximum') {
+      patch.durationMode = s.duration_mode
+      if (typeof s.duration_seconds === 'number' && s.duration_seconds >= 5 && s.duration_seconds <= 300) {
+        patch.durationSeconds = Math.round(s.duration_seconds)
+        setDurationText(String(Math.round(s.duration_seconds)))
+        setDurationError(null)
+      } else if (typeof s.duration_seconds === 'number') {
+        skipped.push(`clip duration (${s.duration_seconds}s is outside this wizard's 5–300s)`)
+      }
+    }
+    if (typeof s.captions_enabled === 'boolean') patch.captions = s.captions_enabled
+    if (s.selection_mode === 'interesting_only' || s.selection_mode === 'fill_any') {
+      patch.selectionMode = s.selection_mode
+    }
+    if (typeof s.on_screen_text === 'boolean') patch.onScreenText = s.on_screen_text
+    if (CONTENT_TYPES.some((c) => c.id === s.content_type)) {
+      patch.contentType = s.content_type as ClipSpec['contentType']
+    }
+    const processingMode = QUALITY_TO_PROCESSING_MODE[s.quality]
+    if (processingMode) patch.processingMode = processingMode
+    updateSpec(patch)
+    const legacyPresetId =
+      typeof s.caption_style === 'string' ? REAL_STYLE_TO_LEGACY_PRESET[s.caption_style] : undefined
+    if (legacyPresetId) {
+      setCaptionPreset(legacyPresetId)
+    } else if (typeof s.caption_style === 'string') {
+      skipped.push(
+        `caption style (“${s.caption_style}” has no option in this wizard — kept the current preset)`,
+      )
+    }
+    setPresetMessage(
+      `Preset “${preset.name}” loaded.` +
+        (skipped.length > 0 ? ` Not applied: ${skipped.join('; ')}.` : ''),
+    )
   }
 
   /**
@@ -1126,6 +1238,43 @@ export function ClipperPage() {
               {file ? `Video: ${file.name} · ${formatBytes(file.size)}` : 'Set the style for this job.'}
               {project ? ` · Project: ${project.title}` : ''}
             </p>
+
+            {/* Load preset — same pattern as the New Job page's presets
+                card, compact. Loads the preset's settings into this
+                form; the video stays the one picked on Step 1. */}
+            <div className="mt-5 rounded-xl border border-ink-border bg-ink-panel2 p-4">
+              <label className="block">
+                <span className="text-sm font-medium text-white">Load preset</span>
+                <select
+                  value={selectedPresetId}
+                  onChange={(e) => {
+                    setSelectedPresetId(e.target.value)
+                    const id = Number(e.target.value)
+                    if (id > 0) handleLoadPreset(id)
+                  }}
+                  aria-label="Load a saved job preset into the style form"
+                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none"
+                >
+                  <option value="">Choose a preset…</option>
+                  {presets.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {presetMessage ? (
+                <p role="status" className="mt-2 text-xs text-[var(--color-text-muted)]">
+                  {presetMessage}
+                </p>
+              ) : (
+                <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                  {presets.length === 0
+                    ? 'No presets saved yet — save one from the New Job page.'
+                    : 'Loads a saved preset’s settings into this form.'}
+                </p>
+              )}
+            </div>
 
             <div className="mt-6 grid grid-cols-1 gap-6 md:grid-cols-2">
               <fieldset>

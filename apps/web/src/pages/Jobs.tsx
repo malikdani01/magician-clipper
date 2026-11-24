@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Briefcase, CheckCircle2, Clock, ListVideo, Loader2, XCircle } from 'lucide-react'
+import { Briefcase, CheckCircle2, Clock, ListVideo, Loader2, Search, XCircle } from 'lucide-react'
 import { EmptyState } from '../components/EmptyState'
 import { JobStatusPill, jobSummary } from '../components/JobStatusPill'
 import { PageHeader } from '../components/PageHeader'
@@ -8,6 +8,7 @@ import { StatCard } from '../components/StatCard'
 import { formatDuration } from '../lib/format'
 import { listJobs, type Job, type JobStatus } from '../lib/jobs'
 import { useAuth } from '../state/auth'
+import { useProjects } from '../state/projects'
 
 type StatusFilter = JobStatus | 'all'
 
@@ -52,6 +53,32 @@ export function JobsPage() {
   const [loadingMore, setLoadingMore] = useState(false)
   const [loadError, setLoadError] = useState(false)
   const [counts, setCounts] = useState<Record<JobStatus, number> | null>(null)
+  const [query, setQuery] = useState('')
+  const { projects } = useProjects()
+
+  // Project title per Laravel project id — for searching jobs by their
+  // project's title (same pattern as the Library page).
+  const projectTitleById = useMemo(() => {
+    const map = new Map<number, string>()
+    for (const p of projects) {
+      if (p.laravelId !== null) map.set(p.laravelId, p.title)
+    }
+    return map
+  }, [projects])
+
+  // Client-side search over the LOADED jobs only (job id substring or
+  // project title). It does not reach the server — jobs on later pages
+  // are not searched until they are loaded.
+  const filteredJobs = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (q === '') return jobs
+    return jobs.filter(
+      (job) =>
+        String(job.id).includes(q) ||
+        (projectTitleById.get(job.project_id) ?? '').toLowerCase().includes(q),
+    )
+  }, [jobs, query, projectTitleById])
+  const searching = query.trim() !== ''
 
   const load = useCallback(async (status: StatusFilter, pageToLoad: number, append: boolean) => {
     if (append) setLoadingMore(true)
@@ -162,6 +189,26 @@ export function JobsPage() {
             />
           </div>
 
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--color-text-muted)]" />
+              <input
+                type="search"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search by job # or project title…"
+                aria-label="Search jobs by job number or project title"
+                className="w-72 rounded-xl border border-ink-border bg-ink-panel py-2.5 pl-10 pr-4 text-sm text-white placeholder:text-[var(--color-text-muted)] focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand"
+              />
+            </div>
+            {searching ? (
+              <p className="text-xs text-[var(--color-text-muted)]">
+                Showing {filteredJobs.length} of {jobs.length} loaded job
+                {jobs.length === 1 ? '' : 's'} — search covers loaded jobs only.
+              </p>
+            ) : null}
+          </div>
+
           <div className="mb-4 flex flex-wrap gap-2" role="group" aria-label="Filter jobs by status">
             {FILTERS.map((f) => (
               <button
@@ -199,28 +246,36 @@ export function JobsPage() {
                 Retry
               </button>
             </div>
-          ) : jobs.length === 0 ? (
+          ) : filteredJobs.length === 0 ? (
             <EmptyState
-              title="No jobs yet"
+              title={
+                searching
+                  ? `No loaded jobs match “${query.trim()}”`
+                  : 'No jobs yet'
+              }
               description={
-                filter === 'all'
-                  ? 'You have not created any clipping jobs yet. Upload a video or paste a link to make your first clips.'
-                  : `No ${filter} jobs. Try a different filter, or create a new job.`
+                searching
+                  ? 'Search covers the jobs loaded on this page only — try a different job number or project title, or load more jobs.'
+                  : filter === 'all'
+                    ? 'You have not created any clipping jobs yet. Upload a video or paste a link to make your first clips.'
+                    : `No ${filter} jobs. Try a different filter, or create a new job.`
               }
               icon={<ListVideo className="h-7 w-7" />}
               action={
-                <Link
-                  to="/jobs/new"
-                  className="rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white"
-                >
-                  Create your first job
-                </Link>
+                searching ? undefined : (
+                  <Link
+                    to="/jobs/new"
+                    className="rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white"
+                  >
+                    Create your first job
+                  </Link>
+                )
               }
             />
           ) : (
             <>
               <ul className="space-y-3">
-                {jobs.map((job) => (
+                {filteredJobs.map((job) => (
                   <li key={job.id}>
                     <Link
                       to={`/jobs/${job.id}`}

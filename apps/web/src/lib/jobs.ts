@@ -110,6 +110,9 @@ export interface Job {
   progress: number | null
   /** Worker note: why fewer clips came back, or why some failed. */
   note: string | null
+  /** True when the worker added the brand intro / outro to this job's clips. Absent on jobs rendered before the flags existed. */
+  intro_applied?: boolean
+  outro_applied?: boolean
   settings: JobSettings | null
   source_type: 'upload' | 'link'
   source_url: string | null
@@ -622,6 +625,62 @@ export async function downloadClip(clip: JobClip): Promise<{ ok: true } | { ok: 
   a.remove()
   setTimeout(() => URL.revokeObjectURL(url), 60_000)
   return { ok: true }
+}
+
+/**
+ * Download one clip's audio track as .m4a (GET /api/v1/clips/{id}/audio).
+ * Same blob-download pattern as downloadClip: the bearer token is sent,
+ * the backend's exact error is surfaced (404 when the clip file is gone
+ * or the clip has no audio track). Only call for ready clips — a clip
+ * with no file has no audio to export.
+ */
+export async function downloadClipAudio(
+  clip: JobClip,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!getToken()) {
+    return { ok: false, error: 'Sign in to download clip audio.' }
+  }
+  const { signal, cancel } = timeoutSignal(120000)
+  try {
+    const res = await fetch(`${API_URL}/clips/${clip.id}/audio`, {
+      headers: authHeaders(),
+      signal,
+    })
+    if (!res.ok) {
+      let detail = `Audio download failed (HTTP ${res.status})`
+      try {
+        const body: unknown = await res.json()
+        detail = serverMessage(body, detail)
+      } catch {
+        // Non-JSON error body — keep the HTTP status message.
+      }
+      return { ok: false, error: detail }
+    }
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const safeTitle = (clip.title || `clip-${clip.id}`)
+      .replace(/[^a-zA-Z0-9._-]+/g, '_')
+      .slice(0, 100)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${safeTitle}.m4a`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 60_000)
+    return { ok: true }
+  } catch (err) {
+    return {
+      ok: false,
+      error: isUnreachable(err)
+        ? 'Backend is not reachable — the audio could not be downloaded.'
+        : err instanceof Error
+          ? err.message
+          : 'Audio download failed.',
+    }
+  } finally {
+    cancel()
+  }
 }
 
 /**

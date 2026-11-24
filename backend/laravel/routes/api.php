@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\V1\AdminController;
 use App\Http\Controllers\Api\V1\AuthController;
+use App\Http\Controllers\Api\V1\BrandAssetController;
 use App\Http\Controllers\Api\V1\ClipController;
 use App\Http\Controllers\Api\V1\ExportController;
 use App\Http\Controllers\Api\V1\JobController;
@@ -85,6 +86,7 @@ Route::prefix('v1')->group(function () {
         Route::get('/projects/{project}/clips', [ClipController::class, 'index']);
         Route::get('/clips/{clip}', [ClipController::class, 'show']);
         Route::get('/clips/{clip}/download', [ClipController::class, 'download']);
+        Route::get('/clips/{clip}/audio', [ClipController::class, 'audio']);
         Route::get('/clips/{clip}/thumbnail', [ClipController::class, 'thumbnail']);
         Route::patch('/clips/{clip}', [ClipController::class, 'update']);
         Route::post('/clips/{clip}/render', [ClipController::class, 'render'])
@@ -97,6 +99,12 @@ Route::prefix('v1')->group(function () {
         Route::get('/exports', [ExportController::class, 'index']);
         Route::get('/exports/{export}', [ExportController::class, 'show']);
         Route::get('/exports/{export}/download', [ExportController::class, 'download']);
+
+        // --- Brand kit (intro/outro assets) ---
+        Route::get('/brand-kit/assets', [BrandAssetController::class, 'index']);
+        Route::post('/brand-kit/assets', [BrandAssetController::class, 'store'])
+            ->middleware('throttle:6,1');
+        Route::delete('/brand-kit/assets/{asset}', [BrandAssetController::class, 'destroy']);
 
         // --- Settings ---
         Route::get('/settings', [SettingsController::class, 'show']);
@@ -125,6 +133,7 @@ Route::prefix('v1')->group(function () {
         Route::get('/jobs', [MuseJobController::class, 'index']);
         Route::get('/jobs/{job}', [MuseJobController::class, 'show']);
         Route::get('/jobs/{job}/source', [MuseJobController::class, 'source']);
+        Route::get('/brand-assets/{asset}/download', [MuseJobController::class, 'downloadBrandAsset']);
         Route::patch('/jobs/{job}/status', [MuseJobController::class, 'updateStatus']);
         Route::post('/jobs/{job}/clips', [MuseJobController::class, 'storeClip'])
             ->middleware('throttle:30,1');

@@ -1,11 +1,18 @@
-import { useRef, useState } from 'react'
-import { Check, Clapperboard, ImagePlus, Palette, RotateCcw, Save } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Check, Clapperboard, ImagePlus, Loader2, Palette, RotateCcw, Save, Trash2, Upload } from 'lucide-react'
 import {
   CAPTION_STYLES,
   getCaptionStyle,
   translateLegacyCaptionPreset,
 } from '../lib/captionStyles'
-import { NotImplemented } from '../components/NotImplemented'
+import {
+  deleteBrandAsset,
+  listBrandAssets,
+  uploadBrandAsset,
+  type BrandAsset,
+  type BrandAssetKind,
+} from '../lib/brandAssets'
+import { formatBytes, formatDuration } from '../lib/format'
 import { PageHeader } from '../components/PageHeader'
 
 const STORAGE_KEY = 'magician-clipper.brand-kit.v1'
@@ -50,11 +57,174 @@ function loadSaved(): BrandKitSaved {
 }
 
 /**
- * Brand Kit — Phase 2.
- * Saving is real in this browser: Save writes the kit to localStorage.
- * There is no backend sync yet (Laravel), and the logo file itself is
- * never saved — only its in-browser preview is shown.
+ * Intro & outro assets — real uploads to the backend (POST
+ * /api/v1/brand-kit/assets, mp4/mov/webm ≤50 MB, ≤15 s). One asset per
+ * kind; uploading a kind that already has one replaces it. The worker
+ * adds the assets to clips of NEW jobs only — existing clips are
+ * unchanged.
  */
+function IntroOutroAssets() {
+  const [assets, setAssets] = useState<BrandAsset[]>([])
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [uploadingKind, setUploadingKind] = useState<BrandAssetKind | null>(null)
+  const [uploadError, setUploadError] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<number | null>(null)
+  const introInputRef = useRef<HTMLInputElement>(null)
+  const outroInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    listBrandAssets()
+      .then((rows) => {
+        if (!cancelled) setAssets(rows)
+      })
+      .catch(() => {
+        if (!cancelled) setLoadError('Could not load your intro/outro assets.')
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const assetFor = (kind: BrandAssetKind) => assets.find((a) => a.kind === kind)
+
+  const handleUpload = async (kind: BrandAssetKind, file: File | undefined) => {
+    if (!file) return
+    setUploadingKind(kind)
+    setUploadError(null)
+    const result = await uploadBrandAsset(kind, file)
+    setUploadingKind(null)
+    if (!result.ok) {
+      setUploadError(result.error)
+      return
+    }
+    setAssets((current) => [
+      ...current.filter((a) => a.kind !== kind),
+      result.asset,
+    ])
+  }
+
+  const handleRemove = async (asset: BrandAsset) => {
+    if (!window.confirm(`Remove the ${asset.kind} clip “${asset.original_name}”? New jobs will no longer include it.`)) return
+    setDeletingId(asset.id)
+    setUploadError(null)
+    const result = await deleteBrandAsset(asset.id)
+    setDeletingId(null)
+    if (!result.ok) {
+      setUploadError(result.error)
+      return
+    }
+    setAssets((current) => current.filter((a) => a.id !== asset.id))
+  }
+
+  const uploadRow = (kind: BrandAssetKind, label: string) => {
+    const asset = assetFor(kind)
+    const inputRef = kind === 'intro' ? introInputRef : outroInputRef
+    return (
+      <div className="rounded-xl border border-ink-border bg-ink-panel2 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-white">{label}</p>
+            <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">
+              MP4, MOV or WebM · max 50 MB · max 15 seconds
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            disabled={uploadingKind !== null}
+            className="flex items-center gap-2 rounded-xl border border-dashed border-ink-border bg-ink-panel px-4 py-2.5 text-sm font-medium text-white hover:border-brand/60 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {uploadingKind === kind ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Upload className="h-4 w-4 text-brand-light" />
+            )}
+            {uploadingKind === kind
+              ? 'Uploading…'
+              : asset
+                ? `Replace ${kind} clip`
+                : `Upload ${kind} clip`}
+          </button>
+          <input
+            ref={inputRef}
+            type="file"
+            accept="video/mp4,video/quicktime,video/webm"
+            className="hidden"
+            onChange={(e) => {
+              void handleUpload(kind, e.target.files?.[0])
+              e.target.value = ''
+            }}
+          />
+        </div>
+        {asset ? (
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg bg-ink-panel px-3 py-2.5">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium text-white">{asset.original_name}</p>
+              <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">
+                {asset.duration_seconds != null
+                  ? `${formatDuration(asset.duration_seconds)} · `
+                  : ''}
+                {formatBytes(asset.file_size_bytes)}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleRemove(asset)}
+              disabled={deletingId === asset.id}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-300 hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {deletingId === asset.id ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Trash2 className="h-3.5 w-3.5" />
+              )}
+              Remove
+            </button>
+          </div>
+        ) : (
+          <p className="mt-3 text-xs text-[var(--color-text-muted)]">
+            No {kind} clip set.
+          </p>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      {loading ? (
+        <p className="mt-4 flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
+          <Loader2 className="h-4 w-4 animate-spin text-brand-light" />
+          Loading intro/outro assets…
+        </p>
+      ) : (
+        <div className="mt-4 space-y-3">
+          {uploadRow('intro', 'Intro clip')}
+          {uploadRow('outro', 'Outro clip')}
+        </div>
+      )}
+      {loadError ? (
+        <p role="alert" className="mt-3 text-sm text-red-300">
+          {loadError}
+        </p>
+      ) : null}
+      {uploadError ? (
+        <p role="alert" className="mt-3 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          {uploadError}
+        </p>
+      ) : null}
+      <p className="mt-3 text-xs text-[var(--color-text-muted)]">
+        Applies to new jobs created after this is set — existing clips are
+        unchanged.
+      </p>
+    </div>
+  )
+}
 export function BrandKitPage() {
   const [initial] = useState(loadSaved)
   const [brandName, setBrandName] = useState(initial.brandName)
@@ -296,29 +466,7 @@ export function BrandKitPage() {
           Optional brand intro/outro clips you own, added to the start and end of
           every export. Only use clips you have the rights to.
         </p>
-        <div className="mt-4">
-          <NotImplemented phase="Phase 3" detail="intro/outro upload needs backend media storage" />
-        </div>
-        <div className="mt-4 flex flex-wrap gap-3 opacity-60">
-          <button
-            type="button"
-            disabled
-            className="cursor-not-allowed rounded-xl border border-dashed border-ink-border bg-ink-panel2 px-4 py-3 text-sm font-medium text-white"
-          >
-            Upload intro clip
-          </button>
-          <button
-            type="button"
-            disabled
-            className="cursor-not-allowed rounded-xl border border-dashed border-ink-border bg-ink-panel2 px-4 py-3 text-sm font-medium text-white"
-          >
-            Upload outro clip
-          </button>
-        </div>
-        <p className="mt-3 text-xs text-[var(--color-text-muted)]">
-          No intro or outro is set. Applying intro/outro to a clip needs the
-          Phase 3 render pipeline.
-        </p>
+        <IntroOutroAssets />
       </div>
     </div>
   )

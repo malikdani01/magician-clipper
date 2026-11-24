@@ -1,9 +1,12 @@
 # Magician Clipper — Laravel API image for Render (Free plan).
 #
 # PHP 8.3 + Apache. This service ONLY serves the Laravel API: no Node,
-# no FFmpeg, no Python, no video engine. Heavy video processing runs on
-# the separate Muse worker (dev VM), not on this instance — see
-# docs/deployment-render-free.md.
+# no Python, no video engine. Heavy video processing runs on the
+# separate Muse worker (dev VM), not on this instance — see
+# docs/deployment-render-free.md. ffmpeg IS installed here, though:
+# the API host itself needs ffprobe/ffmpeg for brand-asset duration
+# validation and on-demand per-clip audio extraction (both are light
+# probe/extract calls, not rendering).
 #
 # Build context is backend/laravel (see render.yaml: dockerContext).
 # Render injects $PORT at runtime; Apache is rebound to it in CMD.
@@ -21,6 +24,7 @@ FROM php:8.3-apache
 # the local-dev default and the phpunit driver, neither of which
 # runs inside this image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg \
         libpq-dev \
         libcurl4-openssl-dev \
         libzip-dev \

@@ -354,9 +354,41 @@ class JobApi:
                     fh.write(chunk)
         return dest
 
+    def download_brand_asset(self, download_url: str, dest: Path) -> Path:
+        """Download one brand asset (intro/outro) over the Job API.
+
+        `download_url` is the absolute URL from the job's `brand_assets`
+        payload; it is fetched with the same X-Muse-Api-Key auth as every
+        other JobApi call (the _request helper cannot be used here
+        because it prefixes API_BASE, and this URL is already absolute).
+        Streams to disk like download_source. Raises on a non-200
+        response; the caller treats any failure as 'asset absent',
+        never as a job failure.
+        """
+        url = download_url
+        if not url.startswith(("http://", "https://")):
+            url = LARAVEL_BASE + (url if url.startswith("/") else "/" + url)
+        resp = self._requests.request(
+            "GET", url, headers=api_headers(self.key),
+            stream=True, timeout=300,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Download brand asset failed: HTTP {resp.status_code}: "
+                f"{resp.text[:300]}"
+            )
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest, "wb") as fh:
+            for chunk in resp.iter_content(chunk_size=1 << 20):
+                if chunk:
+                    fh.write(chunk)
+        return dest
+
     def set_status(self, job_id, status: str, error_reason: str | None = None,
                    stage: str | None = None, progress: int | None = None,
-                   note: str | None = None) -> dict:
+                   note: str | None = None,
+                   intro_applied: bool | None = None,
+                   outro_applied: bool | None = None) -> dict:
         payload: dict = {"status": status}
         # The worker's own ffmpeg/ffprobe versions ride along with
         # every status update — the hosted site has no engine URL to
@@ -370,6 +402,13 @@ class JobApi:
             payload["progress"] = progress
         if note is not None:
             payload["note"] = note[:1000]
+        # Brand flags ride only when the caller passes them (a job that
+        # used brand assets): every other status update is byte-identical
+        # to before, so old backends see no change at all.
+        if intro_applied is not None:
+            payload["intro_applied"] = intro_applied
+        if outro_applied is not None:
+            payload["outro_applied"] = outro_applied
         resp = self._request("PATCH", f"/muse/jobs/{job_id}/status", json=payload)
         if resp.status_code not in (200, 202):
             raise RuntimeError(
@@ -2592,6 +2631,179 @@ def extract_thumbnail(clip_path: Path, thumb_path: Path, at_seconds: float = 1.0
 
 
 # ---------------------------------------------------------------------------
+# Brand assets (intro / outro)
+# ---------------------------------------------------------------------------
+
+def _probe_video_info(path: Path) -> dict | None:
+    """ffprobe summary for one segment, or None when the file is not a
+    playable video (corrupt, zero-byte, wrong format). Never raises —
+    a bad brand asset is skipped, never fatal."""
+    try:
+        return probe_summary(path)
+    except Exception:
+        return None
+
+
+def download_brand_assets(api: "JobApi", brand_assets: dict | None,
+                          job_dir: Path) -> dict[str, Path]:
+    """Download the job's intro/outro brand assets into the job workdir.
+
+    `brand_assets` is the job payload's `brand_assets` key (absent on an
+    old backend — treated as 'no brand assets', never a crash). Each
+    present asset is downloaded over the Job API and verified with
+    ffprobe; anything that fails to download or is not a playable video
+    is logged and skipped. Returns {"intro": Path, "outro": Path} for
+    the assets that survived. Download failures NEVER fail the job.
+    """
+    assets: dict[str, Path] = {}
+    if not isinstance(brand_assets, dict):
+        return assets
+    for kind in ("intro", "outro"):
+        asset = brand_assets.get(kind)
+        if not isinstance(asset, dict):
+            continue
+        url = asset.get("download_url")
+        if not url:
+            continue
+        asset_id = asset.get("id")
+        suffix = f"_{asset_id}" if asset_id is not None else ""
+        dest = job_dir / f"brand_{kind}{suffix}.mp4"
+        try:
+            api.download_brand_asset(url, dest)
+        except Exception as exc:  # noqa: BLE001 - a bad asset must not fail the job
+            log.warning("Brand %s asset download failed; continuing "
+                        "without it: %s", kind, exc)
+            continue
+        if _probe_video_info(dest) is None:
+            log.warning("Brand %s asset is not a playable video; "
+                        "ignoring it: %s", kind, dest.name)
+            dest.unlink(missing_ok=True)
+            continue
+        assets[kind] = dest
+        log.info("Brand %s asset downloaded: %s", kind, dest.name)
+    return assets
+
+
+def apply_brand_assets(clip_path: Path, intro_path: Path | None = None,
+                       outro_path: Path | None = None,
+                       out_path: Path | None = None) -> tuple[Path, bool, bool]:
+    """Concatenate [intro?] + clip + [outro?] into one branded clip.
+
+    Every segment is normalised to the rendered clip's canvas (probe the
+    clip for width/height/fps; scale + pad to match, fps filter,
+    format=yuv420p) and its audio to 48kHz stereo; a segment without an
+    audio stream gets a silent anullsrc track of its own duration, so a
+    missing audio stream can never fail the concat. The segments are
+    joined with the concat filter (n=2 or 3) and re-encoded libx264 +
+    aac with the same preset/crf render_clip uses (veryfast / 20).
+
+    Returns (final_path, intro_applied, outro_applied). With no usable
+    brand segment the original clip_path is returned untouched — no
+    ffmpeg pass at all. On ANY concat/validation failure the plain
+    rendered clip is returned instead: the job never fails over
+    branding, and that segment is marked not applied.
+    """
+    clip_path = Path(clip_path)
+    clip_info = _probe_video_info(clip_path)
+    if clip_info is None:
+        log.warning("Cannot probe rendered clip %s; skipping brand assets.",
+                    clip_path.name)
+        return clip_path, False, False
+    width, height = clip_info["width"], clip_info["height"]
+    fps = clip_info["fps"] or 30.0
+    if fps <= 0:
+        fps = 30.0
+
+    ordered: list[tuple[str, Path, dict]] = []
+    has_intro = has_outro = False
+    for kind, path in (("intro", intro_path), ("outro", outro_path)):
+        if path is None:
+            continue
+        info = _probe_video_info(Path(path))
+        if info is None:
+            log.warning("Brand %s asset %s is not a playable video; "
+                        "skipping it.", kind, Path(path).name)
+            continue
+        if kind == "intro":
+            has_intro = True
+        else:
+            has_outro = True
+        ordered.append((kind, Path(path), info))
+    if not ordered:
+        return clip_path, False, False
+    # The clip sits between intro and outro in playback order
+    # (ordered already holds intro first, outro second).
+    ordered.insert(1 if has_intro else 0, ("clip", clip_path, clip_info))
+
+    chains: list[str] = []
+    concat_inputs: list[str] = []
+    for i, (_kind, _path, info) in enumerate(ordered):
+        chains.append(
+            f"[{i}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,"
+            f"fps={fps:.2f},format=yuv420p,setpts=PTS-STARTPTS[v{i}]"
+        )
+        if info["has_audio"]:
+            chains.append(
+                f"[{i}:a]aresample=48000,aformat=channel_layouts=stereo[a{i}]"
+            )
+        else:
+            chains.append(
+                f"anullsrc=channel_layout=stereo:sample_rate=48000,"
+                f"atrim=0:{info['duration']:.3f},asetpts=PTS-STARTPTS[a{i}]"
+            )
+        # The concat filter takes each segment's video THEN audio, in
+        # segment order ([v0][a0][v1][a1]...) — all videos first would
+        # feed a video pad into an audio input and fail to link.
+        concat_inputs.append(f"[v{i}][a{i}]")
+    chains.append(
+        "".join(concat_inputs) +
+        f"concat=n={len(ordered)}:v=1:a=1[vout][aout]"
+    )
+
+    if out_path is None:
+        out_path = clip_path.with_name(clip_path.stem + "_branded.mp4")
+    else:
+        out_path = Path(out_path)
+    cmd = [FFMPEG, "-y", "-v", "error"]
+    for _kind, path, _info in ordered:
+        cmd += ["-i", str(path)]
+    cmd += ["-filter_complex", ";".join(chains),
+            "-map", "[vout]", "-map", "[aout]",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart", str(out_path)]
+    try:
+        proc = run(cmd, timeout=1800)
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or "").strip()[:300])
+        out_info = _probe_video_info(out_path)
+        if out_info is None:
+            raise RuntimeError("concatenated clip failed ffprobe validation")
+        if not out_info["has_audio"]:
+            raise RuntimeError("concatenated clip has no audio stream")
+        if (out_info["width"], out_info["height"]) != (width, height):
+            raise RuntimeError(
+                f"concatenated resolution {out_info['width']}x{out_info['height']} "
+                f"!= clip canvas {width}x{height}")
+        expected = sum(info["duration"] for _k, _p, info in ordered)
+        if abs(out_info["duration"] - expected) > 0.5:
+            raise RuntimeError(
+                f"concatenated duration {out_info['duration']:.2f}s != "
+                f"expected {expected:.2f}s")
+    except Exception as exc:  # noqa: BLE001 - branding must never fail the job
+        log.warning("Brand concat failed for %s (%s); using the plain clip.",
+                    clip_path.name, exc)
+        out_path.unlink(missing_ok=True)
+        return clip_path, False, False
+    log.info("Brand concat: %s + %s -> %s (%.2fs).",
+             "intro" if has_intro else "-",
+             "outro" if has_outro else "-",
+             out_path.name, out_info["duration"])
+    return out_path, has_intro, has_outro
+
+
+# ---------------------------------------------------------------------------
 # Per-job processing
 # ---------------------------------------------------------------------------
 
@@ -2675,6 +2887,9 @@ def process_rerender(api: JobApi, rerender: dict) -> None:
         source, source_note = acquire_source(api, job, job_dir)
         log.info("Source acquired for re-render %s: %s", rerender_id, source_note)
         source_info = probe_summary(source)
+        # The parent job's brand assets ride along on a re-render too:
+        # a re-rendered clip keeps the job's intro/outro.
+        brand = download_brand_assets(api, job.get("brand_assets"), job_dir)
         clip = {
             "start": float(rerender["start_seconds"]),
             "end": float(rerender["end_seconds"]),
@@ -2692,7 +2907,25 @@ def process_rerender(api: JobApi, rerender: dict) -> None:
         render_clip(source, clip, settings, segments, out_path,
                     source_info, job_dir)
         info = validate_clip(out_path, {"settings": settings}, source_info)
-        thumb = extract_thumbnail(out_path, job_dir / "thumb.jpg")
+        rerender_intro_ok = False
+        if brand:
+            # Same concat as a fresh render; on any failure the plain
+            # re-rendered clip is uploaded instead — never a failure.
+            final_path, _intro_ok, _outro_ok = apply_brand_assets(
+                out_path, brand.get("intro"), brand.get("outro"),
+                job_dir / "clip_branded.mp4")
+            if final_path != out_path:
+                info = probe_summary(final_path)
+                out_path = final_path
+                rerender_intro_ok = _intro_ok
+        # Thumbnail: see process_job — skip past a stitched-on intro.
+        thumb_at = 1.0
+        if rerender_intro_ok and "intro" in brand:
+            intro_info = _probe_video_info(brand["intro"])
+            if intro_info is not None:
+                thumb_at = intro_info["duration"] + 1.0
+        thumb = extract_thumbnail(out_path, job_dir / "thumb.jpg",
+                                  at_seconds=thumb_at)
         api.upload_replacement_clip(clip_id, out_path, rerender_id,
                                     thumbnail=thumb,
                                     duration_seconds=info["duration"])
@@ -2747,6 +2980,14 @@ def process_job(api: JobApi, job: dict) -> None:
                  source_info["duration"], source_info["width"],
                  source_info["height"], source_info["video_codec"],
                  source_info["has_audio"])
+        # Brand assets (intro/outro) come with the job payload; absent
+        # on an old backend. A failed download never fails the job —
+        # download_brand_assets logs and skips.
+        brand = download_brand_assets(api, job.get("brand_assets"), job_dir)
+        used_brand_assets = bool(brand)
+        intro_applied = outro_applied = False
+        if used_brand_assets:
+            log.info("Job %s brand assets: %s", job_id, sorted(brand))
 
         api.set_status(job_id, "Processing", stage="transcribing", progress=20)
         wav_path = job_dir / "audio_16k.wav"
@@ -2799,7 +3040,37 @@ def process_job(api: JobApi, job: dict) -> None:
                 render_clip(source, clip, settings, segments, out_path,
                             source_info, job_dir)
                 info = validate_clip(out_path, {"settings": settings}, source_info)
-                thumb = extract_thumbnail(out_path, job_dir / f"thumb_{i:02d}.jpg")
+                clip_intro_ok = False
+                if brand:
+                    # Brand the clip: [intro?] + clip + [outro?]. Any
+                    # concat failure falls back to the plain clip
+                    # (apply_brand_assets never raises); the uploaded
+                    # duration then comes from the branded file.
+                    try:
+                        branded_path = job_dir / f"clip_{i:02d}_branded.mp4"
+                        final_path, intro_ok, outro_ok = apply_brand_assets(
+                            out_path, brand.get("intro"), brand.get("outro"),
+                            branded_path)
+                        if final_path != out_path:
+                            info = probe_summary(final_path)
+                            intro_applied = intro_applied or intro_ok
+                            outro_applied = outro_applied or outro_ok
+                            out_path = final_path
+                            clip_intro_ok = intro_ok
+                    except Exception as brand_exc:  # noqa: BLE001 - branding never fails the clip
+                        log.warning("Job %s: clip %d branding failed (%s); "
+                                    "uploading the plain clip.",
+                                    job_id, i, brand_exc)
+                # Thumbnail: a branded clip opens with its intro, so a
+                # frame at 1.0s would show the intro card, not the clip.
+                # Take the frame just after the intro instead.
+                thumb_at = 1.0
+                if clip_intro_ok and "intro" in brand:
+                    intro_info = _probe_video_info(brand["intro"])
+                    if intro_info is not None:
+                        thumb_at = intro_info["duration"] + 1.0
+                thumb = extract_thumbnail(out_path, job_dir / f"thumb_{i:02d}.jpg",
+                                          at_seconds=thumb_at)
             except Exception as clip_exc:  # noqa: BLE001 - one bad clip must not kill the job
                 # Per-clip failure isolation: log the failure, drop the
                 # partial file, and keep rendering the rest. Only when
@@ -2841,8 +3112,15 @@ def process_job(api: JobApi, job: dict) -> None:
             api.upload_clip(job_id, out_path, clip_fields, thumbnail=thumb)
             log.info("Uploaded clip %d/%d for job %s.", i, len(rendered), job_id)
 
+        # Brand flags ride only when the job actually used brand assets,
+        # so a job without intro/outro is byte-identical to before.
+        ready_kwargs: dict = {}
+        if used_brand_assets:
+            ready_kwargs["intro_applied"] = intro_applied
+            ready_kwargs["outro_applied"] = outro_applied
         api.set_status(job_id, "Ready", stage="ready", progress=100,
-                       note=_ready_note(clips, requested, failed))
+                       note=_ready_note(clips, requested, failed),
+                       **ready_kwargs)
         log.info("Job %s is Ready (%d clip(s)).", job_id, len(rendered))
     except JobCancelled:
         log.info("Job %s cancelled by the user; stopping without rendering further clips.", job_id)

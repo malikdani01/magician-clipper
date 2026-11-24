@@ -7,6 +7,7 @@ use App\Models\Clip;
 use App\Models\ClipRerender;
 use App\Models\Project;
 use App\Models\UserSetting;
+use App\Support\VideoProbe;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -205,6 +206,89 @@ class ClipController extends Controller
         }
 
         return Storage::disk('local')->response($clip->thumbnail_path);
+    }
+
+    /**
+     * GET /api/v1/clips/{clip}/audio — stream the clip's audio as a
+     * .m4a download (AAC 128k, extracted on demand with ffmpeg).
+     * Ownership is enforced (ClipPolicy::view), like download. The
+     * extracted file is cached under audio/{clip_id}.m4a and reused
+     * while it is at least as new as the clip file — a re-rendered
+     * clip (newer output file) re-extracts. A clip with no audio
+     * stream is a 404 saying so plainly, never a silent empty file;
+     * a missing ffmpeg binary is a 500 saying so.
+     */
+    public function audio(Request $request, Clip $clip)
+    {
+        $this->authorize('view', $clip);
+
+        if ($clip->output_path === null) {
+            return response()->json([
+                'error' => 'not_found',
+                'message' => 'This clip has no rendered file to extract audio from yet.',
+            ], 404);
+        }
+
+        if (! Storage::disk('local')->exists($clip->output_path)) {
+            return response()->json([
+                'error' => 'file_removed',
+                'message' => 'This clip was rendered, but its file was removed when the server restarted. Create the job again from the same video to get fresh downloadable clips.',
+            ], 404);
+        }
+
+        $ffmpeg = VideoProbe::ffmpegPath();
+        if ($ffmpeg === null) {
+            return response()->json([
+                'error' => 'server_error',
+                'message' => 'Audio extraction is unavailable on this server (ffmpeg is not installed).',
+            ], 500);
+        }
+
+        $filename = ($clip->title ?? 'clip').'.m4a';
+        $relativePath = 'audio/'.$clip->id.'.m4a';
+
+        // Reuse the cached extraction while it is at least as new as
+        // the clip file it came from.
+        if (Storage::disk('local')->exists($relativePath)
+            && Storage::disk('local')->lastModified($relativePath)
+                >= Storage::disk('local')->lastModified($clip->output_path)) {
+            return Storage::disk('local')->download($relativePath, $filename);
+        }
+
+        // A clip with no audio stream has nothing to extract — say so
+        // instead of producing an empty file. (When ffprobe itself is
+        // missing the check is skipped and ffmpeg's own failure below
+        // reports the problem.)
+        $probe = VideoProbe::probe(Storage::disk('local')->path($clip->output_path));
+        if ($probe !== null && ! $probe['has_audio']) {
+            return response()->json([
+                'error' => 'not_found',
+                'message' => 'This clip has no audio track.',
+            ], 404);
+        }
+
+        Storage::disk('local')->makeDirectory('audio');
+        $command = escapeshellcmd($ffmpeg)
+            .' -y -v error -i '
+            .escapeshellarg(Storage::disk('local')->path($clip->output_path))
+            .' -vn -c:a aac -b:a 128k '
+            .escapeshellarg(Storage::disk('local')->path($relativePath));
+        $output = [];
+        $exitCode = 0;
+        exec($command, $output, $exitCode);
+
+        if ($exitCode !== 0
+            || ! Storage::disk('local')->exists($relativePath)
+            || Storage::disk('local')->size($relativePath) === 0) {
+            Storage::disk('local')->delete($relativePath);
+
+            return response()->json([
+                'error' => 'server_error',
+                'message' => 'Could not extract audio from this clip.',
+            ], 500);
+        }
+
+        return Storage::disk('local')->download($relativePath, $filename);
     }
 
     /**
