@@ -45,13 +45,17 @@ export function StatCard({ label, value, sublabel, icon, accent, gradient, growt
 
   return (
     <div
-      className="rounded-2xl border border-ink-border bg-ink-panel p-5 shadow-card"
+      className="aurora-card rounded-2xl border border-ink-border bg-ink-panel p-5 shadow-card backdrop-blur-xl"
       style={gradient ? { background: gradient } : undefined}
     >
       <div className="flex items-start gap-4">
         <div
-          className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl text-white"
-          style={{ backgroundColor: accent ?? 'var(--color-primary)' }}
+          className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl text-white shadow-aurora"
+          style={
+            accent
+              ? { backgroundColor: accent }
+              : { backgroundImage: 'var(--aurora-gradient)' }
+          }
         >
           {icon}
         </div>

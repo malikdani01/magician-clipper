@@ -174,7 +174,7 @@ export function ExportsPage() {
                   type="button"
                   onClick={() => void handleDownload(row)}
                   disabled={busy}
-                  className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-light disabled:cursor-wait disabled:opacity-60"
+                  className="inline-flex shrink-0 items-center gap-2 rounded-xl btn-aurora px-4 py-2.5 text-sm font-semibold text-white disabled:cursor-wait disabled:opacity-60"
                 >
                   <Download className="h-4 w-4" />
                   {busy ? 'Preparing…' : 'Download ZIP'}

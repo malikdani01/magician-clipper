@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Models\Clip;
 use App\Models\ClipRerender;
+use App\Models\Notification;
 use App\Models\ProcessingJob;
 use App\Models\Project;
 use App\Models\UserSetting;
@@ -313,6 +314,39 @@ class MuseJobController extends Controller
             ], 422);
         }
 
+        // Terminal transitions notify the job owner exactly once per
+        // (job, type). firstOrCreate + the unique (job_id, type) index
+        // make a duplicate impossible even if the worker reports the
+        // transition twice. This runs only on a real transition — the
+        // same-status early return above never reaches here.
+        if ($public === 'ready') {
+            Notification::firstOrCreate(
+                [
+                    'user_id' => $job->user_id,
+                    'job_id' => $job->id,
+                    'type' => Notification::TYPE_JOB_READY,
+                ],
+                [
+                    'title' => "Job #{$job->id} is ready",
+                    'body' => $job->clips()->count().' clips are ready to preview and download.',
+                    'link' => "/jobs/{$job->id}",
+                ]
+            );
+        } elseif ($public === 'failed') {
+            Notification::firstOrCreate(
+                [
+                    'user_id' => $job->user_id,
+                    'job_id' => $job->id,
+                    'type' => Notification::TYPE_JOB_FAILED,
+                ],
+                [
+                    'title' => "Job #{$job->id} failed",
+                    'body' => $validated['error_reason'] ?? 'Worker reported failure without a reason.',
+                    'link' => "/jobs/{$job->id}",
+                ]
+            );
+        }
+
         // Keep the project in step with its job: the dashboard's Recent
         // projects list reads project.status, and it used to stay
         // "processing" forever — a finished job still showed as
@@ -360,7 +394,33 @@ class MuseJobController extends Controller
             'reason' => ['sometimes', 'nullable', 'string', 'max:2000'],
             'transcript_excerpt' => ['sometimes', 'nullable', 'string', 'max:5000'],
             'caption_style' => ['sometimes', 'nullable', 'string', Rule::in(UserSetting::CAPTION_STYLES)],
+            // Optional per-signal score breakdown, sent by the worker as
+            // a JSON-encoded string (multipart has no nested objects):
+            // {"hook": 92, "retention": 78}. Decoded + shape-checked
+            // below; malformed input is a 422, never a stored guess.
+            'score_breakdown' => ['sometimes', 'nullable', 'string'],
         ]);
+
+        $scoreBreakdown = null;
+        if ($request->filled('score_breakdown')) {
+            $decoded = json_decode($request->input('score_breakdown'), true);
+            $valid = is_array($decoded) && json_last_error() === JSON_ERROR_NONE;
+            if ($valid) {
+                foreach ($decoded as $key => $value) {
+                    if (! is_string($key) || ! is_int($value) || $value < 0 || $value > 100) {
+                        $valid = false;
+                        break;
+                    }
+                }
+            }
+            if (! $valid) {
+                return response()->json([
+                    'error' => 'validation_error',
+                    'message' => 'score_breakdown must be a JSON object mapping signal names to integer scores from 0 to 100.',
+                ], 422);
+            }
+            $scoreBreakdown = $decoded;
+        }
 
         $file = $request->file('file');
         $filename = Str::uuid()->toString().'.mp4';
@@ -414,6 +474,7 @@ class MuseJobController extends Controller
             'thumbnail_path' => $thumbnailPath,
             'file_size_bytes' => Storage::disk('local')->size($relativePath),
             'score' => $validated['score'] ?? null,
+            'score_breakdown' => $scoreBreakdown,
             'reason' => $validated['reason'] ?? null,
             'transcript_excerpt' => $validated['transcript_excerpt'] ?? null,
             'caption_style' => $validated['caption_style']

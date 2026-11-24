@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import {
   AlertTriangle,
   ArrowLeft,
+  Copy,
   Download,
   Film,
   Loader2,
@@ -15,6 +16,7 @@ import { ClipPlayerModal } from '../components/ClipPlayerModal'
 import { ClipThumbnail } from '../components/ClipThumbnail'
 import { JobStatusPill, jobSummary } from '../components/JobStatusPill'
 import { PageHeader } from '../components/PageHeader'
+import { ScoreBreakdown } from '../components/ScoreBreakdown'
 import { CAPTION_STYLES, getCaptionStyle } from '../lib/captionStyles'
 import { formatBytes, formatDuration } from '../lib/format'
 import { VIRAL_TONE_CLASS, viralScore } from '../lib/viralScore'
@@ -179,7 +181,7 @@ function ClipRerenderControl({
           type="button"
           onClick={() => void submit()}
           disabled={submitting || inFlight}
-          className="flex items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-light disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex items-center gap-1.5 rounded-lg btn-aurora px-3 py-1.5 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
         >
           {submitting ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -326,7 +328,7 @@ export function JobDetailPage() {
           action={
             <Link
               to="/login"
-              className="rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
+              className="rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white"
             >
               Sign in
             </Link>
@@ -358,7 +360,7 @@ export function JobDetailPage() {
           action={
             <Link
               to="/jobs"
-              className="rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
+              className="rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white"
             >
               Back to My Jobs
             </Link>
@@ -422,7 +424,7 @@ export function JobDetailPage() {
                     type="button"
                     onClick={() => void doRetry()}
                     disabled={acting !== null}
-                    className="flex items-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-light disabled:cursor-not-allowed disabled:opacity-50"
+                    className="flex items-center gap-2 rounded-xl btn-aurora px-4 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {acting === 'retry' ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
@@ -432,6 +434,14 @@ export function JobDetailPage() {
                     Retry job
                   </button>
                 ) : null}
+                <Link
+                  to={`/jobs/new?clone=${job.id}`}
+                  title="Copy this job's settings into a new job. You will pick the video again — the old source is not reused."
+                  className="flex items-center gap-2 rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white hover:bg-ink-border"
+                >
+                  <Copy className="h-4 w-4" />
+                  Clone job
+                </Link>
               </div>
             </div>
 
@@ -450,7 +460,7 @@ export function JobDetailPage() {
                   aria-valuemax={100}
                 >
                   <div
-                    className="h-full rounded-full bg-brand transition-all"
+                    className="progress-shimmer h-full rounded-full bg-gradient-to-r from-[#7c3aed] via-[#d946ef] to-[#22d3ee] transition-all"
                     style={{ width: `${Math.max(0, Math.min(100, job.progress ?? 0))}%` }}
                   />
                 </div>
@@ -559,7 +569,7 @@ export function JobDetailPage() {
                     return (
                   <li
                     key={clip.id}
-                    className="flex flex-wrap items-center gap-4 rounded-xl bg-ink-panel2 p-4"
+                    className="aurora-card flex flex-wrap items-center gap-4 rounded-xl border border-ink-border bg-ink-panel2 p-4"
                   >
                     <ClipThumbnail
                       clipId={clip.id}
@@ -602,6 +612,7 @@ export function JobDetailPage() {
                           “{clip.transcript_excerpt}”
                         </p>
                       ) : null}
+                      <ScoreBreakdown breakdown={clip.score_breakdown} />
                     </div>
                     <ClipRerenderControl
                       clip={clip}
@@ -619,7 +630,7 @@ export function JobDetailPage() {
                       type="button"
                       onClick={() => void doDownload(clip)}
                       disabled={downloadingId === clip.id}
-                      className="flex shrink-0 items-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-light disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex shrink-0 items-center gap-2 rounded-xl btn-aurora px-4 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {downloadingId === clip.id ? (
                         <Loader2 className="h-4 w-4 animate-spin" />

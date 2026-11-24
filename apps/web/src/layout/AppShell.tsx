@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
 import {
-  Bell,
   Captions,
   CreditCard,
   Folder,
@@ -20,6 +19,7 @@ import {
   Wand2,
   WandSparkles,
 } from 'lucide-react'
+import { NotificationsBell } from '../components/NotificationsBell'
 import { useAuth } from '../state/auth'
 import { useProjectSearch } from '../state/search'
 
@@ -58,12 +58,12 @@ function Sidebar({ mobileOpen, onClose }: { mobileOpen: boolean; onClose: () => 
         />
       ) : null}
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-64 shrink-0 flex-col border-r border-ink-border bg-ink-panel transition-transform duration-200 ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-64 shrink-0 flex-col border-r border-ink-border bg-ink-panel backdrop-blur-xl transition-transform duration-200 ${
           mobileOpen ? 'translate-x-0' : '-translate-x-full'
         } md:static md:translate-x-0`}
       >
       <Link to="/" onClick={onClose} className="flex items-center gap-3 px-5 pb-2 pt-5">
-        <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-brand to-brand-dark text-white shadow-glow">
+        <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-[#7c3aed] via-[#d946ef] to-[#22d3ee] text-white shadow-aurora">
           <WandSparkles className="h-5 w-5" />
         </span>
         <span className="leading-tight">
@@ -80,10 +80,10 @@ function Sidebar({ mobileOpen, onClose }: { mobileOpen: boolean; onClose: () => 
             end={'end' in item && item.end}
             onClick={onClose}
             className={({ isActive }) =>
-              `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors ${
+              `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200 ${
                 isActive
-                  ? 'bg-brand text-white shadow-glow'
-                  : 'text-[var(--color-text-muted)] hover:bg-ink-panel2 hover:text-white'
+                  ? 'bg-gradient-to-r from-[#7c3aed] via-[#c026d3] to-[#0891b2] text-white shadow-aurora'
+                  : 'text-[var(--color-text-muted)] hover:bg-white/5 hover:text-white'
               }`
             }
           >
@@ -122,7 +122,7 @@ function Sidebar({ mobileOpen, onClose }: { mobileOpen: boolean; onClose: () => 
               <div className="mt-3 flex gap-2">
                 <Link
                   to="/login"
-                  className="flex-1 rounded-xl bg-brand px-3 py-2 text-center text-xs font-semibold text-white hover:bg-brand-light"
+                  className="flex-1 rounded-xl btn-aurora px-3 py-2 text-center text-xs font-semibold text-white"
                 >
                   Sign in
                 </Link>
@@ -146,12 +146,11 @@ function TopBar({ onMenuClick }: { onMenuClick: () => void }) {
   const { query, setQuery } = useProjectSearch()
   const { user, loading } = useAuth()
   const location = useLocation()
-  const [showNotifications, setShowNotifications] = useState(false)
   const searchVisible = location.pathname === '/projects'
   const initial = loading ? '…' : (user?.name ?? 'G').trim().charAt(0).toUpperCase() || 'G'
 
   return (
-    <header className="relative flex h-16 shrink-0 items-center gap-4 border-b border-ink-border bg-ink-panel px-6">
+    <header className="relative z-30 flex h-16 shrink-0 items-center gap-4 border-b border-ink-border bg-ink-panel px-6 backdrop-blur-xl">
       <button
         type="button"
         onClick={onMenuClick}
@@ -178,20 +177,12 @@ function TopBar({ onMenuClick }: { onMenuClick: () => void }) {
         <Link
           to="/usage"
           title="Upgrades are not enabled — billing does not exist yet"
-          className="hidden items-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-brand-light sm:flex"
+          className="btn-aurora hidden items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold text-white transition-colors sm:flex"
         >
           <Wand2 className="h-4 w-4" />
           Upgrade Plan
         </Link>
-        <button
-          type="button"
-          onClick={() => setShowNotifications((v) => !v)}
-          aria-label="Notifications"
-          aria-expanded={showNotifications}
-          className="relative flex h-10 w-10 items-center justify-center rounded-xl border border-ink-border bg-ink-panel2 text-[var(--color-text-muted)] hover:text-white"
-        >
-          <Bell className="h-5 w-5" />
-        </button>
+        <NotificationsBell />
         <Link
           to="/settings"
           aria-label="Account settings"
@@ -201,35 +192,20 @@ function TopBar({ onMenuClick }: { onMenuClick: () => void }) {
           {initial}
         </Link>
       </div>
-
-      {showNotifications ? (
-        <div className="absolute right-6 top-[4.25rem] z-20 w-80 rounded-2xl border border-ink-border bg-ink-panel2 p-5 shadow-card">
-          <h3 className="text-sm font-semibold text-white">Notifications</h3>
-          <p className="mt-2 text-sm text-[var(--color-text-muted)]">
-            No notifications yet. Notifications are delivered by the backend
-            once notification support is implemented.
-          </p>
-          <button
-            type="button"
-            onClick={() => setShowNotifications(false)}
-            className="mt-4 rounded-lg bg-ink-panel px-3 py-2 text-xs font-medium text-white hover:bg-ink-border"
-          >
-            Close
-          </button>
-        </div>
-      ) : null}
     </header>
   )
 }
 
 export function AppShell() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const location = useLocation()
   return (
-    <div className="flex h-full">
+    <div className="relative flex h-full">
+      <div className="aurora-mesh" aria-hidden="true" />
       <Sidebar mobileOpen={mobileNavOpen} onClose={() => setMobileNavOpen(false)} />
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="relative z-10 flex min-w-0 flex-1 flex-col">
         <TopBar onMenuClick={() => setMobileNavOpen(true)} />
-        <main className="flex-1 overflow-y-auto p-6">
+        <main key={location.pathname} className="animate-page-in flex-1 overflow-y-auto p-6">
           <Outlet />
         </main>
       </div>

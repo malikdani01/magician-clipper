@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import {
   Activity,
   BarChart3,
@@ -28,6 +28,7 @@ import {
   Wrench,
 } from 'lucide-react'
 import { AdminRoute } from '../components/AdminRoute'
+import { NotificationsBell } from '../components/NotificationsBell'
 import { API_URL, engineHealth, getToken, type EngineHealth } from '../lib/api'
 import { useAuth } from '../state/auth'
 
@@ -61,7 +62,6 @@ export function AdminLayout() {
   const isAdmin = user?.role === 'admin'
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
-  const [showNotifications, setShowNotifications] = useState(false)
   const [engine, setEngine] = useState<EngineHealth | null>(null)
   // Real sidebar badge counts (in-flight jobs, failed jobs) from the
   // admin dashboard endpoint. No badge renders when the count is 0 —
@@ -103,12 +103,14 @@ export function AdminLayout() {
   // While the stored session is still being verified, never show
   // "Sign-in required" for a signed-in admin — show a loading state.
   const initial = loading ? '…' : (user?.name ?? 'A').trim().charAt(0).toUpperCase() || 'A'
+  const location = useLocation()
 
   return (
-    <div className="flex h-full">
-      <aside className="flex w-64 shrink-0 flex-col border-r border-ink-border bg-ink-panel">
+    <div className="relative flex h-full">
+      <div className="aurora-mesh" aria-hidden="true" />
+      <aside className="flex w-64 shrink-0 flex-col border-r border-ink-border bg-ink-panel backdrop-blur-xl">
         <Link to="/admin" className="flex items-center gap-3 px-5 pb-2 pt-5">
-          <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-brand to-brand-dark text-white shadow-glow">
+          <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-[#7c3aed] via-[#d946ef] to-[#22d3ee] text-white shadow-aurora">
             <WandSparkles className="h-5 w-5" />
           </span>
           <span className="leading-tight">
@@ -124,10 +126,10 @@ export function AdminLayout() {
               to={item.to}
               end={'end' in item && item.end}
               className={({ isActive }) =>
-                `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors ${
+                `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200 ${
                   isActive
-                    ? 'bg-brand text-white shadow-glow'
-                    : 'text-[var(--color-text-muted)] hover:bg-ink-panel2 hover:text-white'
+                    ? 'bg-gradient-to-r from-[#7c3aed] via-[#c026d3] to-[#0891b2] text-white shadow-aurora'
+                    : 'text-[var(--color-text-muted)] hover:bg-white/5 hover:text-white'
                 }`
               }
             >
@@ -198,8 +200,8 @@ export function AdminLayout() {
         </div>
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="relative flex h-16 shrink-0 items-center gap-3 border-b border-ink-border bg-ink-panel px-6">
+      <div className="relative z-10 flex min-w-0 flex-1 flex-col">
+        <header className="relative z-30 flex h-16 shrink-0 items-center gap-3 border-b border-ink-border bg-ink-panel px-6 backdrop-blur-xl">
           <Menu className="h-5 w-5 shrink-0 text-[var(--color-text-muted)]" aria-hidden="true" />
           <form
             className="relative w-full max-w-md"
@@ -243,15 +245,7 @@ export function AdminLayout() {
               />
               {engine?.ok ? 'Live' : 'Engine down'}
             </span>
-            <button
-              type="button"
-              onClick={() => setShowNotifications((v) => !v)}
-              aria-label="Notifications"
-              aria-expanded={showNotifications}
-              className="relative flex h-10 w-10 items-center justify-center rounded-xl border border-ink-border bg-ink-panel2 text-[var(--color-text-muted)] hover:text-white"
-            >
-              <Bell className="h-5 w-5" />
-            </button>
+            <NotificationsBell />
             <span className="flex items-center gap-2">
               <span className="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-brand-light to-brand-dark text-sm font-bold text-white">
                 {initial}
@@ -264,25 +258,8 @@ export function AdminLayout() {
               </span>
             </span>
           </div>
-
-          {showNotifications ? (
-            <div className="absolute right-6 top-[4.25rem] z-20 w-80 rounded-2xl border border-ink-border bg-ink-panel2 p-5 shadow-card">
-              <h3 className="text-sm font-semibold text-white">Notifications</h3>
-              <p className="mt-2 text-sm text-[var(--color-text-muted)]">
-                No notifications yet. Admin notifications are delivered by the
-                backend once notification support is implemented.
-              </p>
-              <button
-                type="button"
-                onClick={() => setShowNotifications(false)}
-                className="mt-4 rounded-lg bg-ink-panel px-3 py-2 text-xs font-medium text-white hover:bg-ink-border"
-              >
-                Close
-              </button>
-            </div>
-          ) : null}
         </header>
-        <main className="flex-1 overflow-y-auto p-6">
+        <main key={location.pathname} className="animate-page-in flex-1 overflow-y-auto p-6">
           <AdminRoute>
             <Outlet />
           </AdminRoute>

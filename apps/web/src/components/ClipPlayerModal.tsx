@@ -130,7 +130,7 @@ export function ClipPlayerModal({
             type="button"
             onClick={() => void doDownload()}
             disabled={downloading || videoUrl === null}
-            className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-light disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex flex-1 items-center justify-center gap-2 rounded-xl btn-aurora px-4 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
           >
             {downloading ? (
               <Loader2 className="h-4 w-4 animate-spin" />

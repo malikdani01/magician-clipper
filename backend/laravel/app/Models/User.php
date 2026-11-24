@@ -74,4 +74,9 @@ class User extends Authenticatable
     {
         return $this->hasMany(Export::class);
     }
+
+    public function jobPresets()
+    {
+        return $this->hasMany(JobPreset::class);
+    }
 }

@@ -821,7 +821,7 @@ export function ClipperPage() {
                   <button
                     type="button"
                     onClick={() => startProbe(file, projectId)}
-                    className="mt-4 flex items-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
+                    className="mt-4 flex items-center gap-2 rounded-xl btn-aurora px-4 py-2.5 text-sm font-semibold text-white"
                   >
                     <RotateCcw className="h-4 w-4" /> Retry probe
                   </button>
@@ -870,7 +870,7 @@ export function ClipperPage() {
                       type="button"
                       onClick={startExtractAudio}
                       disabled={audioStatus === 'extracting'}
-                      className="mt-3 flex items-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-light disabled:cursor-not-allowed disabled:opacity-40"
+                      className="mt-3 flex items-center gap-2 rounded-xl btn-aurora px-4 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       {audioStatus === 'extracting' ? (
                         <Loader2 className="h-4 w-4 animate-spin" />
@@ -955,7 +955,7 @@ export function ClipperPage() {
               <button
                 type="button"
                 onClick={submitLink}
-                className="rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
+                className="rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white"
               >
                 Import link
               </button>
@@ -972,7 +972,7 @@ export function ClipperPage() {
               type="button"
               disabled={projectId === null}
               onClick={() => goTo(2)}
-              className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-light disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex items-center gap-2 rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               Continue to Style <ArrowRight className="h-4 w-4" />
             </button>
@@ -1082,7 +1082,7 @@ export function ClipperPage() {
                   type="button"
                   disabled={projectId === null}
                   onClick={() => goTo(2)}
-                  className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-light disabled:cursor-not-allowed disabled:opacity-40"
+                  className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   Continue to Style <ArrowRight className="h-4 w-4" />
                 </button>
@@ -1410,7 +1410,7 @@ export function ClipperPage() {
                 type="button"
                 disabled={projectId === null || !specValid}
                 onClick={() => goTo(3)}
-                className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-light disabled:cursor-not-allowed disabled:opacity-40"
+                className="flex items-center gap-2 rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
               >
                 Continue to Process <ArrowRight className="h-4 w-4" />
               </button>
@@ -1488,7 +1488,7 @@ export function ClipperPage() {
                 type="button"
                 onClick={() => void startRealProcessing()}
                 disabled={processing || !specValid}
-                className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-light disabled:cursor-not-allowed disabled:opacity-40"
+                className="flex items-center gap-2 rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {processing ? (
                   <>
@@ -1528,7 +1528,7 @@ export function ClipperPage() {
               <button
                 type="button"
                 onClick={() => navigate('/jobs')}
-                className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
+                className="flex items-center gap-2 rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white"
               >
                 Open my jobs <ArrowRight className="h-4 w-4" />
               </button>
@@ -1558,7 +1558,7 @@ export function ClipperPage() {
               <button
                 type="button"
                 onClick={() => navigate('/jobs')}
-                className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
+                className="flex items-center gap-2 rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white"
               >
                 Open my jobs <ArrowRight className="h-4 w-4" />
               </button>

@@ -258,6 +258,7 @@ export function EditorPage() {
       file_size_bytes: clip.file_size_bytes,
       score: clip.score,
       reason: null,
+      score_breakdown: null,
       transcript_excerpt: clip.transcript_excerpt,
       download_url: `${API_URL}/clips/${clip.id}/download`,
       thumbnail_path: clip.thumbnail_path,
@@ -344,7 +345,7 @@ export function EditorPage() {
                     ? 'No generated clips to export yet — create a job first'
                     : 'Build a ZIP of this project’s generated clips and download it'
               }
-              className="rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-light disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded-xl btn-aurora px-4 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               {exporting ? 'Preparing…' : 'Export'}
             </button>
@@ -870,7 +871,7 @@ export function EditorPage() {
                               type="button"
                               onClick={() => void downloadProjectClip(clip)}
                               disabled={downloadingClipId === clip.id}
-                              className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-brand px-3 py-2 text-sm font-semibold text-white hover:bg-brand-light disabled:cursor-wait disabled:opacity-60"
+                              className="inline-flex shrink-0 items-center gap-1.5 rounded-xl btn-aurora px-3 py-2 text-sm font-semibold text-white disabled:cursor-wait disabled:opacity-60"
                             >
                               <Download className="h-4 w-4" />
                               {downloadingClipId === clip.id ? 'Downloading…' : 'Download'}
@@ -977,7 +978,7 @@ export function EditorPage() {
               </p>
               <Link
                 to={`/captions?project=${project.id}`}
-                className="mt-3 block rounded-xl bg-brand px-4 py-2.5 text-center text-sm font-semibold text-white hover:bg-brand-light"
+                className="mt-3 block rounded-xl btn-aurora px-4 py-2.5 text-center text-sm font-semibold text-white"
               >
                 Open Captions Studio
               </Link>

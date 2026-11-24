@@ -9,7 +9,9 @@ use App\Models\Project;
 use App\Models\UserSetting;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
+use ZipArchive;
 
 class ClipController extends Controller
 {
@@ -61,6 +63,94 @@ class ClipController extends Controller
         $clip->update($validated);
 
         return response()->json(['clip' => $clip->fresh()]);
+    }
+
+    /**
+     * POST /api/v1/clips/zip — stream a ZIP of the requested clips.
+     * Every clip must exist and belong to the requesting user (admins
+     * may take any); an unknown id or someone else's clip is a 404,
+     * never a leak. Clips whose files are gone from disk (the hosted
+     * site's ephemeral disk is wiped on restart) are skipped and
+     * counted in X-Clips-Skipped; when NO clip file exists at all the
+     * response is a 404 JSON saying so honestly, never an empty ZIP.
+     */
+    public function zip(Request $request)
+    {
+        $validated = $request->validate([
+            'clip_ids' => ['required', 'array', 'min:1', 'max:50'],
+            'clip_ids.*' => ['integer'],
+        ]);
+
+        $ids = array_values(array_unique($validated['clip_ids']));
+        $clips = Clip::with('project')->whereIn('id', $ids)->get();
+
+        // Unknown id, or a clip owned by someone else: 404.
+        if ($clips->count() !== count($ids)) {
+            return response()->json([
+                'error' => 'not_found',
+                'message' => 'One or more of the requested clips could not be found.',
+            ], 404);
+        }
+        foreach ($clips as $clip) {
+            if (! $request->user()->isAdmin() && $clip->project->user_id !== $request->user()->id) {
+                return response()->json([
+                    'error' => 'not_found',
+                    'message' => 'One or more of the requested clips could not be found.',
+                ], 404);
+            }
+        }
+
+        $included = [];
+        $skipped = 0;
+        foreach ($clips as $clip) {
+            if ($clip->output_path === null
+                || ! Storage::disk('local')->exists($clip->output_path)) {
+                $skipped++;
+                continue;
+            }
+            $included[] = $clip;
+        }
+
+        if ($included === []) {
+            return response()->json([
+                'error' => 'not_found',
+                'message' => 'None of the selected clips still have files on the server — they were removed on a server restart.',
+            ], 404);
+        }
+
+        $relativePath = 'tmp/clips-'.Str::uuid()->toString().'.zip';
+        $absolutePath = Storage::disk('local')->path($relativePath);
+        Storage::disk('local')->makeDirectory('tmp');
+
+        $zip = new ZipArchive();
+        if ($zip->open($absolutePath, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+            return response()->json([
+                'error' => 'export_failed',
+                'message' => 'Could not create the clips ZIP file.',
+            ], 500);
+        }
+
+        $usedNames = [];
+        foreach ($included as $clip) {
+            $base = preg_replace('/[^A-Za-z0-9._-]+/', '_', (string) ($clip->title ?? 'clip'));
+            $base = trim($base, '._') ?: 'clip';
+            $name = "{$base}.mp4";
+            $suffix = 2;
+            while (isset($usedNames[$name])) {
+                $name = "{$base}-{$suffix}.mp4";
+                $suffix++;
+            }
+            $usedNames[$name] = true;
+            $zip->addFile(Storage::disk('local')->path($clip->output_path), $name);
+        }
+        $zip->close();
+
+        return response()
+            ->download($absolutePath, 'clips-'.time().'.zip', [
+                'X-Clips-Included' => count($included),
+                'X-Clips-Skipped' => $skipped,
+            ])
+            ->deleteFileAfterSend(true);
     }
 
     /**

@@ -390,9 +390,22 @@ class JobApi:
                 th = open(thumbnail, "rb")
                 handles.append(th)
                 files["thumbnail"] = (thumbnail.name, th, "image/jpeg")
+            # Multipart form fields are strings. The wire contract for
+            # `score_breakdown` is a JSON-encoded object (string keys,
+            # integer values 0-100) — str() on a dict would send a
+            # Python repr, which the backend cannot parse. A window
+            # with no breakdown at all sends no field (never "{}").
+            data: dict = {}
+            for k, v in fields.items():
+                if k == "score_breakdown":
+                    if not v:
+                        continue
+                    data[k] = v if isinstance(v, str) else json.dumps(v)
+                else:
+                    data[k] = str(v)
             resp = self._request(
                 "POST", f"/muse/jobs/{job_id}/clips",
-                files=files, data={k: str(v) for k, v in fields.items()},
+                files=files, data=data,
                 timeout=300,
             )
         finally:
@@ -821,6 +834,42 @@ def _select_usable_windows(candidates: list[dict], count: int) -> list[dict]:
     return flagged
 
 
+# Display labels for the per-signal values in a window's score_breakdown
+# (wire format: multipart `score_breakdown` field, JSON-encoded object,
+# string keys, integer values 0-100 — the backend renders these verbatim).
+_SCORE_BREAKDOWN_LABELS = {
+    "density": "Speech",
+    "coverage": "Coverage",
+    "completeness": "Completeness",
+    "silence": "Silence",
+    "energy": "Energy",
+    "gameplay": "Gameplay",
+    "stability": "Stability",
+}
+
+
+def _score_breakdown(values: dict[str, float]) -> dict[str, int]:
+    """Map a window's computed signals to its display breakdown.
+
+    ``values`` maps the internal signal name to its NORMALISED 0-1
+    value, exactly as the selector computed it (density normalised
+    against the densest candidate, completeness 1.0/0.4, silence
+    clamped to 1.0, energy clamped to 1.0, gameplay/stability already
+    0-1). Only signals actually computed for the window are passed in:
+    a speech window passes all seven, a visual-moment / any-part
+    window passes only energy/gameplay/stability, and the uniform
+    no-speech fallback passes only energy — a signal never computed is
+    never invented. Values are rounded to integers 0-100.
+    """
+    breakdown: dict[str, int] = {}
+    for key, value in values.items():
+        label = _SCORE_BREAKDOWN_LABELS.get(key)
+        if label is None:
+            continue
+        breakdown[label] = max(0, min(100, int(round(value * 100))))
+    return breakdown
+
+
 def _visual_moment_windows(energy_profile: list[float], source_duration: float,
                            span: float, mode: str,
                            min_s: float | None, max_s: float | None,
@@ -902,6 +951,13 @@ def _visual_moment_windows(energy_profile: list[float], source_duration: float,
             "silence": 0.0, "energy": energy,
             "gameplay": gameplay, "stability": stability,
             "score": score, "signals": signals, "text": "",
+            # Only the signals this window actually computed: no speech
+            # terms exist for a wordless window, so none are invented.
+            "score_breakdown": _score_breakdown({
+                "energy": min(1.0, energy),
+                "gameplay": gameplay,
+                "stability": stability,
+            }),
             "reason": (
                 f"Visual moment (viral {round(score * 100)}/100): speech "
                 f"was scarce in this source, so this window was picked "
@@ -1001,6 +1057,13 @@ def _any_part_windows(source_duration: float,
             "silence": 0.0, "energy": energy,
             "gameplay": gameplay, "stability": stability,
             "score": score, "signals": ["any_part"], "text": "",
+            # Same as a visual moment: only energy/gameplay/stability
+            # were computed for this window.
+            "score_breakdown": _score_breakdown({
+                "energy": min(1.0, energy),
+                "gameplay": gameplay,
+                "stability": stability,
+            }),
             "reason": (
                 f"Any part of the video (viral {round(score * 100)}/100): "
                 f"the job asked for the full clip count, so this window "
@@ -1228,6 +1291,18 @@ def select_highlights(segments: list[dict], source_duration: float,
                 + W_ENERGY * min(1.0, c["energy"])
                 + W_GAMEPLAY * c["gameplay"]
                 + W_STABILITY * c["stability"], 4)
+            # The breakdown is the same normalised per-signal values
+            # the score above was just built from — nothing invented,
+            # nothing re-derived.
+            c["score_breakdown"] = _score_breakdown({
+                "density": density_n,
+                "coverage": c["coverage"],
+                "completeness": completeness,
+                "silence": silence_n,
+                "energy": min(1.0, c["energy"]),
+                "gameplay": c["gameplay"],
+                "stability": c["stability"],
+            })
             c["signals"] = ["speech_density", "sentence_complete" if c["complete"] else "trimmed_to_duration",
                             "silence_boundary", "audio_coverage"]
             if c["energy"] > 0:
@@ -1329,13 +1404,16 @@ def select_highlights(segments: list[dict], source_duration: float,
         end = min(source_duration, start + span)
         if end - start < 1.0:
             break
+        energy = energy_in(start, end)
         windows.append({
             "start": round(start, 3), "end": round(end, 3),
             "duration": round(end - start, 3), "words": 0,
             "density": 0.0, "complete": False, "coverage": 0.0,
             "silence": 0.0,
-            "energy": energy_in(start, end), "score": 0.0,
+            "energy": energy, "score": 0.0,
             "signals": ["no_speech_fallback"],
+            # Only energy was computed for a uniform fallback window.
+            "score_breakdown": _score_breakdown({"energy": min(1.0, energy)}),
             "text": "",
             "reason": ("No transcribed speech found in the source; uniform "
                        "window used as a documented fallback (real footage, "
@@ -2745,7 +2823,7 @@ def process_job(api: JobApi, job: dict) -> None:
 
         api.set_status(job_id, "Processing", stage="uploading_clips", progress=90)
         for i, (out_path, clip, info, thumb) in enumerate(rendered, 1):
-            api.upload_clip(job_id, out_path, {
+            clip_fields = {
                 "title": f"Clip {i}",
                 "start_seconds": clip["start"],
                 "end_seconds": clip["end"],
@@ -2754,7 +2832,13 @@ def process_job(api: JobApi, job: dict) -> None:
                 "reason": clip.get("reason", ""),
                 "transcript_excerpt": clip.get("text", ""),
                 "caption_style": (settings.get("caption_style") or "punchy"),
-            }, thumbnail=thumb)
+            }
+            # The selector attaches a score_breakdown to every window;
+            # a window with none (defensive — none exists today) sends
+            # no field rather than an empty object.
+            if clip.get("score_breakdown"):
+                clip_fields["score_breakdown"] = clip["score_breakdown"]
+            api.upload_clip(job_id, out_path, clip_fields, thumbnail=thumb)
             log.info("Uploaded clip %d/%d for job %s.", i, len(rendered), job_id)
 
         api.set_status(job_id, "Ready", stage="ready", progress=100,

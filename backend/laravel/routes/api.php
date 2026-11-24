@@ -5,8 +5,10 @@ use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\ClipController;
 use App\Http\Controllers\Api\V1\ExportController;
 use App\Http\Controllers\Api\V1\JobController;
+use App\Http\Controllers\Api\V1\JobPresetController;
 use App\Http\Controllers\Api\V1\MediaController;
 use App\Http\Controllers\Api\V1\MuseJobController;
+use App\Http\Controllers\Api\V1\NotificationController;
 use App\Http\Controllers\Api\V1\ProjectController;
 use App\Http\Controllers\Api\V1\SettingsController;
 use Illuminate\Support\Facades\Route;
@@ -66,7 +68,20 @@ Route::prefix('v1')->group(function () {
         Route::post('/jobs/{job}/cancel', [JobController::class, 'cancel']);
         Route::post('/jobs/{job}/retry', [JobController::class, 'retry']);
 
+        // --- Job presets (saved job settings) ---
+        Route::get('/presets', [JobPresetController::class, 'index']);
+        Route::post('/presets', [JobPresetController::class, 'store']);
+        Route::delete('/presets/{preset}', [JobPresetController::class, 'destroy']);
+
+        // --- Notifications ---
+        Route::get('/notifications', [NotificationController::class, 'index']);
+        Route::patch('/notifications/{notification}/read', [NotificationController::class, 'markRead']);
+        Route::post('/notifications/read-all', [NotificationController::class, 'markAllRead']);
+
         // --- Clips ---
+        // POST /clips/zip is registered before /clips/{clip} so the
+        // literal 'zip' can never be captured as a clip id.
+        Route::post('/clips/zip', [ClipController::class, 'zip']);
         Route::get('/projects/{project}/clips', [ClipController::class, 'index']);
         Route::get('/clips/{clip}', [ClipController::class, 'show']);
         Route::get('/clips/{clip}/download', [ClipController::class, 'download']);

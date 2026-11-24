@@ -5,10 +5,13 @@ import { EmptyState } from '../components/EmptyState'
 import { PageHeader } from '../components/PageHeader'
 import { ClipPlayerModal } from '../components/ClipPlayerModal'
 import { ClipThumbnail } from '../components/ClipThumbnail'
+import { ScoreBreakdown } from '../components/ScoreBreakdown'
 import { useProjects, getProjectFile, getProjectVideoUrl } from '../state/projects'
-import { downloadClip, listJobs, type Job, type JobClip } from '../lib/jobs'
+import { downloadClip, downloadClipsZip, listJobs, type Job, type JobClip } from '../lib/jobs'
 import { formatBytes } from '../lib/format'
 import { formatDuration } from '../lib/format'
+
+type ClipSort = 'newest' | 'viral' | 'longest'
 
 type LibraryTab = 'all' | 'originals' | 'clips' | 'thumbnails' | 'audio'
 
@@ -35,40 +38,81 @@ export function LibraryPage() {
   const [tab, setTab] = useState<LibraryTab>('all')
   const [query, setQuery] = useState('')
   const { projects } = useProjects()
-  const [readyJobs, setReadyJobs] = useState<Job[]>([])
+  const [jobs, setJobs] = useState<Job[]>([])
   const [downloadingId, setDownloadingId] = useState<number | null>(null)
   const [downloadError, setDownloadError] = useState<string | null>(null)
   const [previewingClip, setPreviewingClip] = useState<JobClip | null>(null)
+  // Library upgrade: sort, Ready-only filter, multi-select + ZIP.
+  const [sort, setSort] = useState<ClipSort>('newest')
+  const [readyOnly, setReadyOnly] = useState(true)
+  const [selected, setSelected] = useState<ReadonlySet<number>>(new Set())
+  const [zipBusy, setZipBusy] = useState(false)
+  const [zipMessage, setZipMessage] = useState<string | null>(null)
 
-  // Ready jobs (with their clips) for the Clips / Thumbnails tabs.
+  // All jobs (with their clips) for the Clips / Thumbnails tabs. The
+  // Ready-only toggle filters them client-side; without it, clips
+  // from still-running or failed jobs show too.
   useEffect(() => {
     let cancelled = false
     void (async () => {
-      const { jobs } = await listJobs({ status: 'ready', perPage: 50 })
-      if (!cancelled) setReadyJobs(jobs)
+      const { jobs } = await listJobs({ status: 'all', perPage: 50 })
+      if (!cancelled) setJobs(jobs)
     })()
     return () => {
       cancelled = true
     }
   }, [])
 
+  // Project title per Laravel project id — for searching clips by
+  // their job's project title.
+  const projectTitleById = useMemo(() => {
+    const map = new Map<number, string>()
+    for (const p of projects) {
+      if (p.laravelId !== null) map.set(p.laravelId, p.title)
+    }
+    return map
+  }, [projects])
+
   const clips = useMemo(
     () =>
-      readyJobs.flatMap((j) =>
-        j.clips.map((c) => ({ ...c, jobId: j.id }) as JobClip & { jobId: number }),
+      jobs.flatMap((j) =>
+        j.clips.map(
+          (c) =>
+            ({
+              ...c,
+              jobId: j.id,
+              jobStatus: j.status,
+              projectTitle: projectTitleById.get(j.project_id) ?? '',
+            }) as JobClip & { jobId: number; jobStatus: string; projectTitle: string },
+        ),
       ),
-    [readyJobs],
+    [jobs, projectTitleById],
   )
 
   const filteredClips = useMemo(() => {
     const q = query.trim().toLowerCase()
-    if (q === '') return clips
-    return clips.filter(
-      (c) =>
-        c.title.toLowerCase().includes(q) ||
-        String(c.jobId).includes(q),
-    )
-  }, [clips, query])
+    let rows = clips
+    if (readyOnly) rows = rows.filter((c) => c.jobStatus === 'ready')
+    if (q !== '') {
+      rows = rows.filter(
+        (c) =>
+          c.title.toLowerCase().includes(q) ||
+          String(c.jobId).includes(q) ||
+          c.projectTitle.toLowerCase().includes(q),
+      )
+    }
+    const sorted = [...rows]
+    if (sort === 'viral') {
+      sorted.sort((a, b) => (b.score ?? -1) - (a.score ?? -1))
+    } else if (sort === 'longest') {
+      sorted.sort((a, b) => (b.duration_seconds ?? -1) - (a.duration_seconds ?? -1))
+    } else {
+      sorted.sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+      )
+    }
+    return sorted
+  }, [clips, query, readyOnly, sort])
 
   async function doDownload(clip: JobClip) {
     setDownloadingId(clip.id)
@@ -76,6 +120,34 @@ export function LibraryPage() {
     const result = await downloadClip(clip)
     setDownloadingId(null)
     if (!result.ok) setDownloadError(result.error)
+  }
+
+  function toggleSelect(clipId: number) {
+    setSelected((current) => {
+      const next = new Set(current)
+      if (next.has(clipId)) next.delete(clipId)
+      else next.add(clipId)
+      return next
+    })
+  }
+
+  async function doDownloadSelectedZip() {
+    const ids = [...selected]
+    if (ids.length === 0) return
+    setZipBusy(true)
+    setZipMessage(null)
+    const result = await downloadClipsZip(ids)
+    setZipBusy(false)
+    if (!result.ok) {
+      setZipMessage(result.error)
+      return
+    }
+    setZipMessage(
+      result.skipped > 0
+        ? `ZIP downloaded with ${result.included} clip${result.included === 1 ? '' : 's'} — ${result.skipped} skipped (file${result.skipped === 1 ? '' : 's'} removed on a server restart).`
+        : `ZIP downloaded with ${result.included} clip${result.included === 1 ? '' : 's'}.`,
+    )
+    setSelected(new Set())
   }
 
   const searching = query.trim() !== ''
@@ -150,6 +222,72 @@ export function LibraryPage() {
         </div>
       </div>
 
+      {showClips ? (
+        <div className="mb-5 flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
+            Sort
+            <select
+              value={sort}
+              onChange={(e) => setSort(e.target.value as ClipSort)}
+              aria-label="Sort clips"
+              className="rounded-xl border border-ink-border bg-ink-panel px-3 py-2 text-sm text-white focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand"
+            >
+              <option value="newest">Newest</option>
+              <option value="viral">Highest viral</option>
+              <option value="longest">Longest</option>
+            </select>
+          </label>
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-white">
+            <input
+              type="checkbox"
+              checked={readyOnly}
+              onChange={(e) => setReadyOnly(e.target.checked)}
+              className="h-4 w-4 accent-[#7c3aed]"
+            />
+            Ready clips only
+          </label>
+          <span className="text-xs text-[var(--color-text-muted)]">
+            {filteredClips.length} clip{filteredClips.length === 1 ? '' : 's'}
+            {searching || !readyOnly || sort !== 'newest'
+              ? ' (filtered)'
+              : ''}
+          </span>
+        </div>
+      ) : null}
+
+      {selected.size > 0 ? (
+        <div
+          role="status"
+          className="mb-4 flex flex-wrap items-center gap-3 rounded-2xl border border-ink-border bg-ink-panel px-4 py-3"
+        >
+          <span className="text-sm font-semibold text-white">
+            {selected.size} clip{selected.size === 1 ? '' : 's'} selected
+          </span>
+          <button
+            type="button"
+            onClick={() => void doDownloadSelectedZip()}
+            disabled={zipBusy}
+            className="inline-flex items-center gap-1.5 rounded-xl btn-aurora px-3 py-2 text-sm font-semibold text-white disabled:cursor-wait disabled:opacity-60"
+          >
+            <Download className="h-4 w-4" />
+            {zipBusy ? 'Building ZIP…' : 'Download selected as ZIP'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelected(new Set())}
+            className="rounded-xl border border-ink-border px-3 py-2 text-sm font-medium text-white hover:bg-ink-panel2"
+          >
+            Clear selection
+          </button>
+        </div>
+      ) : null}
+
+      {zipMessage ? (
+        <p role="status" className="mb-4 rounded-xl border border-ink-border bg-ink-panel px-4 py-3 text-sm text-white">
+          {zipMessage}
+        </p>
+      ) : null}
+
       {downloadError ? (
         <p role="alert" className="mb-4 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
           Download failed: {downloadError}
@@ -168,7 +306,7 @@ export function LibraryPage() {
             return (
               <article
                 key={p.id}
-                className="overflow-hidden rounded-2xl border border-ink-border bg-ink-panel shadow-card transition-colors hover:border-brand/50"
+                className="aurora-card overflow-hidden rounded-2xl border border-ink-border bg-ink-panel shadow-card"
               >
                 <Link
                   to={`/editor?project=${encodeURIComponent(p.id)}`}
@@ -211,7 +349,7 @@ export function LibraryPage() {
                       <a
                         href={videoUrl}
                         download={p.fileName}
-                        className="inline-flex items-center gap-1.5 rounded-xl bg-brand px-3 py-2 text-sm font-semibold text-white hover:bg-brand-light"
+                        className="inline-flex items-center gap-1.5 rounded-xl btn-aurora px-3 py-2 text-sm font-semibold text-white"
                       >
                         <Download className="h-4 w-4" />
                         Download
@@ -251,7 +389,7 @@ export function LibraryPage() {
             {filteredClips.map((clip) => (
               <article
                 key={clip.id}
-                className="overflow-hidden rounded-2xl border border-ink-border bg-ink-panel shadow-card transition-colors hover:border-brand/50"
+                className="aurora-card overflow-hidden rounded-2xl border border-ink-border bg-ink-panel shadow-card"
               >
                 <Link
                   to={`/jobs/${clip.jobId}`}
@@ -276,7 +414,17 @@ export function LibraryPage() {
                   ) : null}
                 </Link>
                 <div className="p-4">
-                  <p className="truncate text-sm font-semibold text-white">{clip.title}</p>
+                  <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-[var(--color-text-muted)]">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(clip.id)}
+                      onChange={() => toggleSelect(clip.id)}
+                      aria-label={`Select ${clip.title}`}
+                      className="h-4 w-4 accent-[#7c3aed]"
+                    />
+                    Select for ZIP
+                  </label>
+                  <p className="mt-2 truncate text-sm font-semibold text-white">{clip.title}</p>
                   <p className="mt-1 text-xs text-[var(--color-text-muted)]">
                     {clip.duration_seconds !== null
                       ? formatDuration(clip.duration_seconds)
@@ -284,13 +432,16 @@ export function LibraryPage() {
                     {clip.file_size_bytes ? ` · ${formatBytes(clip.file_size_bytes)}` : ''}
                     {clip.score !== null ? ` · viral ${Math.round(clip.score * 100)}` : ''}
                     {` · job #${clip.jobId}`}
+                    {clip.projectTitle ? ` · ${clip.projectTitle}` : ''}
+                    {clip.jobStatus !== 'ready' ? ` · ${clip.jobStatus}` : ''}
                   </p>
+                  <ScoreBreakdown breakdown={clip.score_breakdown} />
                   <div className="mt-3 flex items-center gap-2">
                     <button
                       type="button"
                       onClick={() => void doDownload(clip)}
                       disabled={downloadingId === clip.id}
-                      className="inline-flex items-center gap-1.5 rounded-xl bg-brand px-3 py-2 text-sm font-semibold text-white hover:bg-brand-light disabled:cursor-wait disabled:opacity-60"
+                      className="inline-flex items-center gap-1.5 rounded-xl btn-aurora px-3 py-2 text-sm font-semibold text-white disabled:cursor-wait disabled:opacity-60"
                     >
                       <Download className="h-4 w-4" />
                       {downloadingId === clip.id ? 'Downloading…' : 'Download'}

@@ -37,6 +37,7 @@ class Clip extends Model
         'caption_style',
         'file_size_bytes',
         'score',
+        'score_breakdown',
         'reason',
         'transcript_excerpt',
     ];
@@ -49,6 +50,7 @@ class Clip extends Model
             'duration_seconds' => 'float',
             'file_size_bytes' => 'integer',
             'score' => 'float',
+            'score_breakdown' => 'array',
         ];
     }
 

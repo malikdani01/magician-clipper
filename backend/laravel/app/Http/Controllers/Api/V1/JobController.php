@@ -6,10 +6,10 @@ use App\Http\Controllers\Controller;
 use App\Models\MediaAsset;
 use App\Models\ProcessingJob;
 use App\Models\Project;
+use App\Support\JobSettingsRules;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
-use Illuminate\Validation\Rule;
 use InvalidArgumentException;
 
 class JobController extends Controller
@@ -84,30 +84,14 @@ class JobController extends Controller
             }
         }
 
-        $validated = $request->validate([
+        // Settings rules live in JobSettingsRules so presets validate
+        // against the exact same rules as job creation (no drift).
+        $validated = $request->validate(array_merge([
             'title' => ['sometimes', 'nullable', 'string', 'max:255'],
             'project_id' => ['sometimes', 'nullable', 'integer', 'exists:projects,id'],
             'file' => ['sometimes', 'file', 'mimes:mp4,mov,mkv,webm', 'max:2097152'],
             'source_url' => ['sometimes', 'nullable', 'url', 'max:2048'],
-            'platform' => ['required', 'string', Rule::in(['tiktok', 'instagram'])],
-            'aspect_ratio' => ['required', 'string', Rule::in(['9:16', '16:9', '1:1', '4:5'])],
-            'clip_count' => ['required', 'integer', 'min:1', 'max:50'],
-            'duration_mode' => ['required', 'string', Rule::in(['exact', 'minimum', 'maximum'])],
-            'duration_seconds' => ['required', 'integer', 'min:5', 'max:180'],
-            'duration_min_seconds' => ['sometimes', 'nullable', 'integer', 'min:5', 'max:180'],
-            'duration_max_seconds' => ['sometimes', 'nullable', 'integer', 'min:5', 'max:180'],
-            'captions_enabled' => ['sometimes', 'boolean'],
-            'captions_language' => ['sometimes', 'string', Rule::in(['english', 'roman_urdu', 'hindi', 'auto'])],
-            'caption_style' => ['sometimes', 'nullable', 'string', Rule::in(['punchy', 'word_pop', 'title_card', 'clean_subs', 'classic', 'karaoke', 'bounce', 'typewriter', 'sweep', 'neon', 'slam', 'outline', 'gradient', 'kinetic', 'glow_pop'])],
-            'selection_mode' => ['sometimes', 'string', Rule::in(['interesting_only', 'fill_any'])],
-            'on_screen_text' => ['sometimes', 'boolean'],
-            'job_type' => ['sometimes', 'string', Rule::in(['myself', 'campaign'])],
-            'campaign_requirements' => ['sometimes', 'nullable', 'string', 'max:5000'],
-            'notes' => ['sometimes', 'nullable', 'string', 'max:5000'],
-            'layout' => ['sometimes', 'string', Rule::in(['center_crop', 'split', 'pip_facecam', 'blur_fill', 'streamer_full'])],
-            'content_type' => ['sometimes', 'string', Rule::in(Project::CONTENT_TYPES)],
-            'quality' => ['sometimes', 'string', Rule::in(['draft', 'standard', 'high'])],
-        ]);
+        ], JobSettingsRules::rules()));
 
         $hasFile = $request->hasFile('file');
         $hasUrl = ! empty($validated['source_url']);

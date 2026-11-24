@@ -105,7 +105,7 @@ export function JobsPage() {
         actions={
           <Link
             to="/jobs/new"
-            className="rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
+            className="rounded-xl btn-aurora px-4 py-2.5 text-sm font-semibold text-white"
           >
             + New Job
           </Link>
@@ -125,7 +125,7 @@ export function JobsPage() {
             <div className="flex gap-2">
               <Link
                 to="/login"
-                className="rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
+                className="rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white"
               >
                 Sign in
               </Link>
@@ -194,7 +194,7 @@ export function JobsPage() {
               <button
                 type="button"
                 onClick={() => void load(filter, 1, false)}
-                className="mt-4 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
+                className="mt-4 rounded-xl btn-aurora px-4 py-2.5 text-sm font-semibold text-white"
               >
                 Retry
               </button>
@@ -211,7 +211,7 @@ export function JobsPage() {
               action={
                 <Link
                   to="/jobs/new"
-                  className="rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
+                  className="rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white"
                 >
                   Create your first job
                 </Link>
@@ -224,7 +224,7 @@ export function JobsPage() {
                   <li key={job.id}>
                     <Link
                       to={`/jobs/${job.id}`}
-                      className="flex flex-wrap items-center gap-4 rounded-2xl border border-ink-border bg-ink-panel p-5 transition-colors hover:border-brand/60"
+                      className="aurora-card flex flex-wrap items-center gap-4 rounded-2xl border border-ink-border bg-ink-panel p-5"
                     >
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-3">

@@ -19,8 +19,11 @@ const PILL_LABELS: Record<JobStatus, string> = {
 export function JobStatusPill({ status }: { status: JobStatus }) {
   return (
     <span
-      className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold ${PILL_STYLES[status]}`}
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-semibold ${PILL_STYLES[status]}`}
     >
+      {status === 'processing' || status === 'queued' ? (
+        <span className="live-dot" aria-hidden="true" />
+      ) : null}
       {PILL_LABELS[status]}
     </span>
   )

@@ -11,6 +11,7 @@ Covers the Stronger Clipper round (2026-11-23):
   * per-clip failure isolation in process_job (one bad clip no longer
     fails the whole job; the job ends Ready with a note).
 """
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -125,6 +126,165 @@ class VisualMomentTests(unittest.TestCase):
         self.assertIn("Clip 2", note)
 
 
+class ScoreBreakdownTests(unittest.TestCase):
+    """Every selected window carries a score_breakdown of the signals
+    the selector actually computed for it (viral score feature 3):
+    speech windows get all seven, visual-moment / any-part windows
+    only energy/gameplay/stability, the uniform fallback only energy —
+    never a padded or invented signal. upload_clip sends the breakdown
+    as a JSON-encoded multipart field."""
+
+    def test_speech_window_carries_full_breakdown(self):
+        # Single 30s speech stretch, flat energy, no face profile: the
+        # selector's own normalised values are fully determined.
+        segments = [_segment(10.0, 40.0, "This is the one good story here.")]
+        clips = muse_worker.select_highlights(
+            segments, 200.0, _settings(clip_count=1), [0.05] * 200, [])
+        self.assertEqual(len(clips), 1)
+        breakdown = clips[0].get("score_breakdown")
+        self.assertIsNotNone(breakdown)
+        self.assertEqual(
+            set(breakdown),
+            {"Speech", "Coverage", "Completeness", "Silence",
+             "Energy", "Gameplay", "Stability"})
+        for value in breakdown.values():
+            self.assertIsInstance(value, int)
+            self.assertGreaterEqual(value, 0)
+            self.assertLessEqual(value, 100)
+        # Exact values, straight from the selector: the lone candidate
+        # is the densest (Speech 100); the window is trimmed to the
+        # exact 30s target mid-thought (Completeness 40); speech
+        # covers 29.5 of the 30s (Coverage 98); both silence gaps are
+        # long (Silence 100); flat energy is the max (Energy 100);
+        # no face profile means neutral gameplay/stability (50 each).
+        self.assertEqual(breakdown, {
+            "Speech": 100, "Coverage": 98, "Completeness": 40,
+            "Silence": 100, "Energy": 100, "Gameplay": 50, "Stability": 50,
+        })
+
+    def test_visual_moment_window_carries_only_visual_signals(self):
+        segments = [_segment(10.0, 40.0, "This is the one good story here.")]
+        energy = [0.05] * 200
+        for i in range(100, 111):
+            energy[i] = 0.9
+        for i in range(170, 181):
+            energy[i] = 0.8
+        clips = muse_worker.select_highlights(
+            segments, 200.0, _settings(), energy, [])
+        self.assertEqual(len(clips), 3)
+        speech = [c for c in clips if "visual_moment" not in c["signals"]]
+        visual = [c for c in clips if "visual_moment" in c["signals"]]
+        self.assertEqual(len(speech), 1)
+        self.assertEqual(len(visual), 2)
+        # The speech window still carries all seven signals.
+        self.assertEqual(
+            set(speech[0]["score_breakdown"]),
+            {"Speech", "Coverage", "Completeness", "Silence",
+             "Energy", "Gameplay", "Stability"})
+        # Visual moments carry ONLY what was computed for them — no
+        # speech signals, never padded with fabricated values.
+        for c in visual:
+            breakdown = c.get("score_breakdown")
+            self.assertIsNotNone(breakdown)
+            self.assertEqual(set(breakdown), {"Energy", "Gameplay", "Stability"})
+            for key in ("Speech", "Coverage", "Completeness", "Silence"):
+                self.assertNotIn(key, breakdown)
+            for value in breakdown.values():
+                self.assertIsInstance(value, int)
+                self.assertGreaterEqual(value, 0)
+                self.assertLessEqual(value, 100)
+
+    def test_any_part_and_uniform_windows_carry_only_computed_signals(self):
+        # fill_any on a silent source: any-part windows score on
+        # energy/gameplay/stability only.
+        clips = muse_worker.select_highlights(
+            [], 200.0,
+            _settings(clip_count=2, selection_mode="fill_any"),
+            [0.0] * 200, [])
+        self.assertEqual(len(clips), 2)
+        for c in clips:
+            self.assertEqual(c["signals"], ["any_part"])
+            self.assertEqual(
+                set(c["score_breakdown"]), {"Energy", "Gameplay", "Stability"})
+        # Silent source, interesting_only: the uniform fallback
+        # computed energy only, so its breakdown is Energy alone.
+        clips = muse_worker.select_highlights(
+            [], 200.0, _settings(clip_count=2), [0.0] * 200, [])
+        self.assertEqual(len(clips), 2)
+        for c in clips:
+            self.assertEqual(c["signals"], ["no_speech_fallback"])
+            self.assertEqual(set(c["score_breakdown"]), {"Energy"})
+            self.assertEqual(c["score_breakdown"]["Energy"], 0)
+
+    def test_upload_clip_sends_json_encoded_score_breakdown(self):
+        captured = {}
+
+        class FakeResp:
+            status_code = 201
+            text = "{}"
+
+            def json(self):
+                return {"clip": {"id": 7}}
+
+        class FakeRequests:
+            def request(self, method, url, headers=None, **kwargs):
+                captured["method"] = method
+                captured["url"] = url
+                captured["data"] = kwargs.get("data")
+                captured["files"] = kwargs.get("files")
+                return FakeResp()
+
+        api = muse_worker.JobApi("test-key")
+        api._requests = FakeRequests()
+        breakdown = {"Speech": 100, "Coverage": 98, "Energy": 50}
+        with tempfile.TemporaryDirectory() as tmp:
+            clip_path = Path(tmp) / "clip_01.mp4"
+            clip_path.write_bytes(b"fake mp4")
+            api.upload_clip(1, clip_path, {
+                "title": "Clip 1",
+                "score": 0.75,
+                "score_breakdown": breakdown,
+            })
+        self.assertEqual(captured["method"], "POST")
+        self.assertTrue(captured["url"].endswith("/muse/jobs/1/clips"))
+        data = captured["data"]
+        # The field is a JSON-encoded object, not a Python repr.
+        self.assertIsInstance(data["score_breakdown"], str)
+        self.assertEqual(data["score_breakdown"], json.dumps(breakdown))
+        self.assertEqual(json.loads(data["score_breakdown"]), breakdown)
+        # Other fields still travel as plain strings.
+        self.assertEqual(data["title"], "Clip 1")
+        self.assertEqual(data["score"], "0.75")
+
+    def test_upload_clip_omits_score_breakdown_when_absent(self):
+        captured = {}
+
+        class FakeResp:
+            status_code = 201
+            text = "{}"
+
+            def json(self):
+                return {"clip": {"id": 7}}
+
+        class FakeRequests:
+            def request(self, method, url, headers=None, **kwargs):
+                captured["data"] = kwargs.get("data")
+                return FakeResp()
+
+        api = muse_worker.JobApi("test-key")
+        api._requests = FakeRequests()
+        with tempfile.TemporaryDirectory() as tmp:
+            clip_path = Path(tmp) / "clip_01.mp4"
+            clip_path.write_bytes(b"fake mp4")
+            # No breakdown key at all: no field is sent.
+            api.upload_clip(1, clip_path, {"title": "Clip 1"})
+            self.assertNotIn("score_breakdown", captured["data"])
+            # An empty breakdown is likewise skipped, never "{}".
+            api.upload_clip(1, clip_path, {"title": "Clip 1",
+                                            "score_breakdown": {}})
+            self.assertNotIn("score_breakdown", captured["data"])
+
+
 class FakeApi:
     """Minimal stand-in for JobApi: records status changes + uploads."""
 
@@ -200,6 +360,16 @@ class ProcessJobIsolationTests(unittest.TestCase):
         # 3 windows selected (2 speech + 1 visual), 1 failed to render.
         self.assertEqual(calls["rendered"], 3)
         self.assertEqual(len(api.uploads), 2)
+        # Both uploaded clips carry their window's breakdown as a dict:
+        # the speech window has all seven signals, the visual moment
+        # only the three visual ones — the call site passes it through.
+        self.assertEqual(
+            set(api.uploads[0]["score_breakdown"]),
+            {"Speech", "Coverage", "Completeness", "Silence",
+             "Energy", "Gameplay", "Stability"})
+        self.assertEqual(
+            set(api.uploads[1]["score_breakdown"]),
+            {"Energy", "Gameplay", "Stability"})
         # The job still ends Ready — with the failure in its note.
         ready = [s for s in api.statuses if s["status"] == "Ready"]
         self.assertEqual(len(ready), 1)

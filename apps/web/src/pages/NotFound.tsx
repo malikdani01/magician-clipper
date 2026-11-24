@@ -11,7 +11,7 @@ export function NotFoundPage() {
       action={
         <Link
           to="/"
-          className="inline-flex rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
+          className="inline-flex rounded-xl btn-aurora px-4 py-2.5 text-sm font-semibold text-white"
         >
           Back to Dashboard
         </Link>

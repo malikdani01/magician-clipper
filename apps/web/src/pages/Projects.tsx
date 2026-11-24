@@ -129,7 +129,7 @@ export function ProjectsPage() {
         actions={
           <Link
             to="/clipper"
-            className="rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
+            className="rounded-xl btn-aurora px-4 py-2.5 text-sm font-semibold text-white"
           >
             New Project
           </Link>
@@ -205,7 +205,7 @@ export function ProjectsPage() {
             ) : (
               <Link
                 to="/clipper"
-                className="inline-flex rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
+                className="inline-flex rounded-xl btn-aurora px-4 py-2.5 text-sm font-semibold text-white"
               >
                 Create your first project
               </Link>
@@ -227,7 +227,7 @@ export function ProjectsPage() {
             return (
             <article
               key={p.id}
-              className="overflow-hidden rounded-2xl border border-ink-border bg-ink-panel shadow-card transition-colors hover:border-brand/50"
+              className="aurora-card overflow-hidden rounded-2xl border border-ink-border bg-ink-panel shadow-card"
             >
               <Link
                 to={`/editor?project=${encodeURIComponent(p.id)}`}
@@ -284,7 +284,7 @@ export function ProjectsPage() {
                     <button
                       type="button"
                       onClick={() => saveRename(p)}
-                      className="rounded-lg bg-brand px-3 py-2 text-sm font-semibold text-white hover:bg-brand-light"
+                      className="rounded-lg btn-aurora px-3 py-2 text-sm font-semibold text-white"
                     >
                       Save
                     </button>

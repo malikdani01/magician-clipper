@@ -21,12 +21,21 @@ import {
 } from '../lib/captionStyles'
 import {
   createJob,
+  getJob,
   LAYOUT_LABELS,
   SELECTION_MODE_DESCRIPTIONS,
   SELECTION_MODE_LABELS,
   type ClipLayout,
+  type JobSettings,
   type SelectionMode,
 } from '../lib/jobs'
+import {
+  createPreset,
+  deletePreset,
+  listPresets,
+  type JobPreset,
+  type PresetSettings,
+} from '../lib/presets'
 import { formatBytes } from '../lib/format'
 import { useAuth } from '../state/auth'
 
@@ -162,6 +171,52 @@ export function NewJobPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Load the user's saved job presets for the "Load preset" dropdown.
+  useEffect(() => {
+    if (!token) return
+    let cancelled = false
+    listPresets().then((rows) => {
+      if (!cancelled) setPresets(rows)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [token])
+
+  // Clone (?clone=<jobId>): copy an earlier job's settings into this
+  // form. The source is never copied — the user picks the video/link
+  // again below (the banner says so).
+  useEffect(() => {
+    const cloneId = searchParams.get('clone')
+    if (!cloneId) return
+    const id = Number(cloneId)
+    if (!Number.isFinite(id) || id <= 0) {
+      setCloneError(`Could not clone job "${cloneId}" — that is not a valid job id.`)
+      return
+    }
+    let cancelled = false
+    getJob(id)
+      .then((result) => {
+        if (cancelled) return
+        if (!result.ok) {
+          setCloneError(`Could not clone job #${id} — ${result.error}`)
+          return
+        }
+        applyJobSettings(result.job.settings)
+        settingsAppliedRef.current = true
+        setClonedFrom(id)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCloneError(`Could not clone job #${id} — the job could not be loaded.`)
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Settings — dropdowns/toggles only
   const [platform, setPlatform] = useState<'tiktok' | 'instagram'>('tiktok')
   const [aspectRatio, setAspectRatio] = useState<'9:16' | '16:9' | '1:1' | '4:5'>('9:16')
@@ -191,10 +246,27 @@ export function NewJobPage() {
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
+  // Job presets (GET/POST/DELETE /api/v1/presets): named snapshots of
+  // the settings below — no source, the video/link is always chosen
+  // fresh when a preset is loaded.
+  const [presets, setPresets] = useState<JobPreset[]>([])
+  const [selectedPresetId, setSelectedPresetId] = useState('')
+  const [presetName, setPresetName] = useState('')
+  const [presetMessage, setPresetMessage] = useState<string | null>(null)
+  const [presetSaving, setPresetSaving] = useState(false)
+  // Clone (?clone=<jobId>): settings copied from an earlier job. The
+  // source is NEVER reused — the user picks the video/link again.
+  const [clonedFrom, setClonedFrom] = useState<number | null>(null)
+  const [cloneError, setCloneError] = useState<string | null>(null)
+  // Set once a preset/clone has applied settings, so the saved-default
+  // caption style effect below does not clobber them afterwards.
+  const settingsAppliedRef = useRef(false)
+
   // Default caption style from the user's saved settings (Captions Studio
   // saves it via PATCH /api/v1/settings). 'punchy' when nothing is saved.
+  // Skipped once a preset/clone has applied settings — theirs wins.
   useEffect(() => {
-    if (!token) return
+    if (!token || settingsAppliedRef.current) return
     let cancelled = false
     void (async () => {
       try {
@@ -204,7 +276,7 @@ export function NewJobPage() {
         if (!res.ok) return
         const body = (await res.json()) as { settings?: { caption_style?: unknown } }
         const saved = body.settings?.caption_style
-        if (!cancelled && isCaptionStyleId(saved)) setCaptionStyle(saved)
+        if (!cancelled && !settingsAppliedRef.current && isCaptionStyleId(saved)) setCaptionStyle(saved)
       } catch {
         // Backend unreachable — keep the 'punchy' default.
       }
@@ -228,6 +300,139 @@ export function NewJobPage() {
   const clearFile = () => {
     setFile(null)
     if (inputRef.current) inputRef.current.value = ''
+  }
+
+  /**
+   * Copy a settings object (preset or cloned job) into this form.
+   * Every field is validated against the known option lists first —
+   * a stale/unknown value is ignored instead of breaking the form.
+   * The source is never part of settings, so it is never copied.
+   */
+  const applyJobSettings = (s: PresetSettings | JobSettings | null | undefined) => {
+    if (!s) return
+    if (s.platform === 'tiktok' || s.platform === 'instagram') setPlatform(s.platform)
+    if (
+      s.aspect_ratio === '9:16' ||
+      s.aspect_ratio === '16:9' ||
+      s.aspect_ratio === '1:1' ||
+      s.aspect_ratio === '4:5'
+    ) {
+      setAspectRatio(s.aspect_ratio)
+    }
+    if (typeof s.clip_count === 'number' && s.clip_count >= 1 && s.clip_count <= 50) {
+      setClipCount(Math.round(s.clip_count))
+    }
+    if (
+      s.duration_mode === 'exact' ||
+      s.duration_mode === 'minimum' ||
+      s.duration_mode === 'maximum'
+    ) {
+      setDurationMode(s.duration_mode)
+      if (typeof s.duration_seconds === 'number' && s.duration_seconds > 0) {
+        setExactSeconds(Math.round(s.duration_seconds))
+      }
+      if (typeof s.duration_min_seconds === 'number' && s.duration_min_seconds > 0) {
+        setMinSeconds(Math.round(s.duration_min_seconds))
+      }
+      if (typeof s.duration_max_seconds === 'number' && s.duration_max_seconds > 0) {
+        setMaxSeconds(Math.round(s.duration_max_seconds))
+      }
+    }
+    if (typeof s.captions_enabled === 'boolean') setCaptionsEnabled(s.captions_enabled)
+    if (
+      s.captions_language === 'english' ||
+      s.captions_language === 'roman_urdu' ||
+      s.captions_language === 'hindi' ||
+      s.captions_language === 'auto'
+    ) {
+      setCaptionsLanguage(s.captions_language)
+    }
+    if (typeof s.caption_style === 'string' && isCaptionStyleId(s.caption_style)) {
+      setCaptionStyle(s.caption_style)
+    }
+    if (s.selection_mode === 'interesting_only' || s.selection_mode === 'fill_any') {
+      setSelectionMode(s.selection_mode)
+    }
+    if (typeof s.on_screen_text === 'boolean') setOnScreenText(s.on_screen_text)
+    if (s.job_type === 'myself' || s.job_type === 'campaign') setJobType(s.job_type)
+    if (typeof s.campaign_requirements === 'string') setCampaignRequirements(s.campaign_requirements)
+    if (typeof s.notes === 'string') setNotes(s.notes)
+    if (
+      s.layout === 'center_crop' ||
+      s.layout === 'split' ||
+      s.layout === 'pip_facecam' ||
+      s.layout === 'blur_fill' ||
+      s.layout === 'streamer_full'
+    ) {
+      setLayout(s.layout)
+    }
+    if (typeof s.content_type === 'string' && s.content_type) setContentType(s.content_type)
+    if (s.quality === 'draft' || s.quality === 'standard' || s.quality === 'high') {
+      setQuality(s.quality)
+    }
+  }
+
+  /** Snapshot the current form settings for saving as a preset. */
+  const snapshotSettings = (): PresetSettings => ({
+    platform,
+    aspect_ratio: aspectRatio,
+    clip_count: clipCount,
+    duration_mode: durationMode,
+    duration_seconds:
+      durationMode === 'exact' ? exactSeconds : durationMode === 'minimum' ? minSeconds : maxSeconds,
+    duration_min_seconds: minSeconds,
+    duration_max_seconds: maxSeconds,
+    captions_enabled: captionsEnabled,
+    captions_language: captionsLanguage,
+    caption_style: captionStyle,
+    selection_mode: selectionMode,
+    on_screen_text: onScreenText,
+    job_type: jobType,
+    campaign_requirements: campaignRequirements.trim() ? campaignRequirements : null,
+    notes: notes.trim() ? notes : null,
+    layout,
+    content_type: contentType,
+    quality,
+  })
+
+  const handleSavePreset = async () => {
+    const name = presetName.trim()
+    if (!name) {
+      setPresetMessage('Type a name for the preset first.')
+      return
+    }
+    setPresetSaving(true)
+    setPresetMessage(null)
+    const result = await createPreset(name, snapshotSettings())
+    setPresetSaving(false)
+    if (!result.ok) {
+      setPresetMessage(result.error)
+      return
+    }
+    setPresets((current) => [result.preset, ...current])
+    setPresetName('')
+    setPresetMessage(`Preset "${result.preset.name}" saved.`)
+  }
+
+  const handleLoadPreset = (id: number) => {
+    const preset = presets.find((p) => p.id === id)
+    if (!preset) return
+    applyJobSettings(preset.settings)
+    settingsAppliedRef.current = true
+    setPresetMessage(`Loaded preset "${preset.name}". Pick the video or link, then submit.`)
+  }
+
+  const handleDeletePreset = async (id: number) => {
+    const preset = presets.find((p) => p.id === id)
+    if (!preset) return
+    if (!window.confirm(`Delete preset "${preset.name}"?`)) return
+    const result = await deletePreset(id)
+    if (!result.ok) {
+      setPresetMessage(result.error)
+      return
+    }
+    setPresets((current) => current.filter((p) => p.id !== id))
+    setPresetMessage(`Preset "${preset.name}" deleted.`)
   }
 
   /** Client-side validation; the backend re-validates everything. */
@@ -342,7 +547,7 @@ export function NewJobPage() {
             <div className="flex gap-2">
               <Link
                 to="/login"
-                className="rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
+                className="rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white"
               >
                 Sign in
               </Link>
@@ -404,6 +609,103 @@ export function NewJobPage() {
           </li>
         ))}
       </ol>
+
+      {/* Clone banner — the source is never reused, so the user picks
+          the video/link again below. */}
+      {clonedFrom !== null ? (
+        <div
+          role="status"
+          className="mb-4 rounded-2xl border border-amber-400/40 bg-amber-400/10 p-4 text-sm text-amber-200"
+        >
+          <p className="font-semibold">Cloned from Job #{clonedFrom} — settings copied.</p>
+          <p className="mt-1">
+            Source needed again — pick the video or link below. The old
+            video is not reused.
+          </p>
+        </div>
+      ) : null}
+      {cloneError ? (
+        <div
+          role="alert"
+          className="mb-4 rounded-2xl border border-red-400/40 bg-red-400/10 p-4 text-sm text-red-200"
+        >
+          {cloneError}
+        </div>
+      ) : null}
+
+      {/* Job presets — load a saved settings snapshot, or save the
+          current settings under a name. Presets hold settings only;
+          the source is always chosen fresh. */}
+      <section
+        aria-label="Job presets"
+        className="mb-4 rounded-2xl border border-ink-border bg-ink-panel p-6"
+      >
+        <h2 className="text-lg font-semibold text-white">Job presets</h2>
+        <p className="mt-1 text-sm text-[var(--color-text-muted)]">
+          Save this page's settings under a name, or load a saved preset
+          into the form. Presets never include the video — you always pick
+          the source fresh.
+        </p>
+        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end">
+          <label className="flex-1">
+            <span className="text-xs font-medium text-[var(--color-text-muted)]">
+              Load preset
+            </span>
+            <select
+              value={selectedPresetId}
+              onChange={(e) => {
+                const id = Number(e.target.value)
+                setSelectedPresetId(e.target.value)
+                if (id > 0) handleLoadPreset(id)
+              }}
+              className="mt-1 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand"
+            >
+              <option value="">Choose a preset…</option>
+              {presets.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            disabled={!selectedPresetId}
+            onClick={() => void handleDeletePreset(Number(selectedPresetId))}
+            className="rounded-xl border border-red-400/40 bg-red-400/10 px-4 py-2.5 text-sm font-semibold text-red-200 transition-colors hover:bg-red-400/20 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Delete preset
+          </button>
+        </div>
+        <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-end">
+          <label className="flex-1">
+            <span className="text-xs font-medium text-[var(--color-text-muted)]">
+              Save current settings as preset
+            </span>
+            <input
+              type="text"
+              value={presetName}
+              onChange={(e) => setPresetName(e.target.value)}
+              placeholder="Preset name, e.g. TikTok 30s punchy"
+              maxLength={100}
+              className="mt-1 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)] focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand"
+            />
+          </label>
+          <button
+            type="button"
+            disabled={presetSaving}
+            onClick={() => void handleSavePreset()}
+            className="btn-aurora rounded-xl px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60"
+          >
+            {presetSaving ? 'Saving…' : 'Save preset'}
+          </button>
+        </div>
+        {presetMessage ? (
+          <p role="status" className="mt-3 text-sm text-[var(--color-text-muted)]">
+            {presetMessage}
+          </p>
+        ) : null}
+      </section>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
         <div className="space-y-4 xl:col-span-2">
@@ -821,7 +1123,7 @@ export function NewJobPage() {
                 type="button"
                 onClick={() => void submit()}
                 disabled={submitting}
-                className="flex items-center gap-2 rounded-xl bg-brand px-6 py-3 text-sm font-semibold text-white hover:bg-brand-light disabled:cursor-not-allowed disabled:opacity-50"
+                className="flex items-center gap-2 rounded-xl btn-aurora px-6 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {submitting ? (
                   <Loader2 className="h-4 w-4 animate-spin" />

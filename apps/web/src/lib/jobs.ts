@@ -90,6 +90,8 @@ export interface JobClip {
   file_size_bytes: number | null
   score: number | null
   reason: string | null
+  /** Per-signal viral-score breakdown (label -> 0-100), when the worker sent one. Null for older clips. */
+  score_breakdown: Record<string, number> | null
   transcript_excerpt: string | null
   download_url: string
   /** First-frame JPEG path (null for clips rendered before thumbnails). */
@@ -620,4 +622,64 @@ export async function downloadClip(clip: JobClip): Promise<{ ok: true } | { ok: 
   a.remove()
   setTimeout(() => URL.revokeObjectURL(url), 60_000)
   return { ok: true }
+}
+
+/**
+ * POST /api/v1/clips/zip — download several clips as one ZIP. The
+ * server builds the ZIP from the clip files still on disk and skips
+ * files wiped by a server restart; the skipped count comes back in the
+ * X-Clips-Skipped header (0 when everything was there). When none of
+ * the selected clips still have files, the server answers 404 with an
+ * honest message instead of an empty ZIP.
+ */
+export async function downloadClipsZip(
+  clipIds: number[],
+): Promise<
+  | { ok: true; included: number; skipped: number }
+  | { ok: false; error: string }
+> {
+  if (!getToken()) return { ok: false, error: 'Sign in to download clips.' }
+  if (clipIds.length === 0) return { ok: false, error: 'Select at least one clip first.' }
+  const { signal, cancel } = timeoutSignal(120000)
+  try {
+    const res = await fetch(`${API_URL}/clips/zip`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clip_ids: clipIds }),
+      signal,
+    })
+    if (!res.ok) {
+      let detail = `Could not build the ZIP (HTTP ${res.status})`
+      try {
+        const body: unknown = await res.json()
+        detail = serverMessage(body, detail)
+      } catch {
+        // Non-JSON error body — keep the HTTP status message.
+      }
+      return { ok: false, error: detail }
+    }
+    const blob = await res.blob()
+    const included = Number(res.headers.get('X-Clips-Included') ?? clipIds.length)
+    const skipped = Number(res.headers.get('X-Clips-Skipped') ?? 0)
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `clips-${new Date().toISOString().slice(0, 10)}.zip`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 60_000)
+    return { ok: true, included, skipped }
+  } catch (err) {
+    return {
+      ok: false,
+      error: isUnreachable(err)
+        ? 'Backend is not reachable — the ZIP could not be built.'
+        : err instanceof Error
+          ? err.message
+          : 'Could not build the ZIP.',
+    }
+  } finally {
+    cancel()
+  }
 }

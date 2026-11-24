@@ -559,7 +559,7 @@ export function CaptionsPage() {
               onClick={() => void selectDefaultStyle(style.id)}
               aria-pressed={defaultStyle === style.id}
               disabled={savingStyle}
-              className={`rounded-2xl border bg-ink-panel2 p-3 text-center transition-colors disabled:cursor-wait ${
+              className={`aurora-card rounded-2xl border bg-ink-panel2 p-3 text-center transition-colors disabled:cursor-wait ${
                 defaultStyle === style.id
                   ? 'border-brand ring-1 ring-brand'
                   : 'border-ink-border hover:border-brand/60'
@@ -637,7 +637,7 @@ export function CaptionsPage() {
                     type="button"
                     onClick={() => selectPreset(style.id)}
                     aria-pressed={selectedId === style.id}
-                    className={`rounded-2xl border bg-ink-panel p-3 text-center transition-colors ${
+                    className={`aurora-card rounded-2xl border bg-ink-panel p-3 text-center transition-colors ${
                       selectedId === style.id
                         ? 'border-brand ring-1 ring-brand'
                         : 'border-ink-border hover:border-brand/60'

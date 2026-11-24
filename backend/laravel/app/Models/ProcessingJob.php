@@ -245,6 +245,7 @@ class ProcessingJob extends Model
                 'aspect_ratio' => $clip->aspect_ratio,
                 'file_size_bytes' => $clip->file_size_bytes,
                 'score' => $clip->score,
+                'score_breakdown' => $clip->score_breakdown,
                 'reason' => $clip->reason,
                 'transcript_excerpt' => $clip->transcript_excerpt,
                 'thumbnail_path' => $clip->thumbnail_path,

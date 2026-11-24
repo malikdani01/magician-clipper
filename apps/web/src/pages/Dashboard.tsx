@@ -20,6 +20,8 @@ import { StatCard } from '../components/StatCard'
 import { formatBytes } from '../lib/format'
 import { formatDuration } from '../lib/format'
 import { API_URL, engineHealth, getToken, laravelHealth, type EngineHealth, type LaravelHealth } from '../lib/api'
+import { listJobs, type Job, type JobClip } from '../lib/jobs'
+import { viralScore } from '../lib/viralScore'
 import { useAuth } from '../state/auth'
 import { useProjects } from '../state/projects'
 
@@ -79,6 +81,8 @@ export function DashboardPage() {
   const [engine, setEngine] = useState<EngineHealth | null>(null)
   const [backend, setBackend] = useState<LaravelHealth | null>(null)
   const [stats, setStats] = useState<UserStats | null>(null)
+  // Top clips + recent activity — frontend-only, from real job data.
+  const [recentJobs, setRecentJobs] = useState<Job[]>([])
 
   useEffect(() => {
     let cancelled = false
@@ -87,6 +91,9 @@ export function DashboardPage() {
     })
     laravelHealth().then((h) => {
       if (!cancelled) setBackend(h)
+    })
+    listJobs({ status: 'all', perPage: 20 }).then(({ jobs }) => {
+      if (!cancelled) setRecentJobs(jobs)
     })
     const token = getToken()
     if (token) {
@@ -114,12 +121,24 @@ export function DashboardPage() {
   const recent = [...projects]
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
     .slice(0, 5)
+  // Top 5 clips by viral score across recent ready jobs.
+  const topClips = recentJobs
+    .flatMap((j) =>
+      j.clips.map((c) => ({ ...c, jobId: j.id }) as JobClip & { jobId: number }),
+    )
+    .filter((c) => c.score !== null)
+    .sort((a, b) => (b.score ?? -1) - (a.score ?? -1))
+    .slice(0, 5)
+  // Recent activity: the newest jobs with their real status + clip count.
+  const activity = [...recentJobs]
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+    .slice(0, 5)
   const firstName = user?.name?.trim().split(/\s+/)[0]
 
   return (
     <div>
       {/* Hero — design-reference welcome banner. */}
-      <section className="relative overflow-hidden rounded-2xl border border-ink-border bg-ink-panel p-6 shadow-card sm:p-8">
+      <section className="aurora-card relative overflow-hidden rounded-2xl border border-ink-border bg-ink-panel p-6 shadow-card backdrop-blur-xl sm:p-8">
         <div
           aria-hidden="true"
           className="pointer-events-none absolute inset-0"
@@ -135,7 +154,7 @@ export function DashboardPage() {
             </p>
             <h1 className="mt-2 text-3xl font-bold leading-tight text-white sm:text-4xl">
               Turn Long Videos Into Amazing Short Clips with{' '}
-              <span className="text-brand-light">Magician Clipper</span>
+              <span className="aurora-text">Magician Clipper</span>
             </h1>
             <p className="mt-3 max-w-lg text-sm leading-relaxed text-[var(--color-text-muted)] sm:text-base">
               AI-powered clipping studio with smart editing, animated captions
@@ -144,7 +163,7 @@ export function DashboardPage() {
             <div className="mt-5 flex flex-wrap gap-3">
               <Link
                 to="/clipper"
-                className="flex items-center gap-2 rounded-xl bg-brand px-5 py-3 text-sm font-semibold text-white shadow-glow transition-colors hover:bg-brand-light"
+                className="btn-aurora flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold text-white"
               >
                 <Wand2 className="h-4 w-4" />
                 Create New Project
@@ -167,7 +186,7 @@ export function DashboardPage() {
           {/* Decorative magic visual — original CSS/SVG art only. */}
           <div
             aria-hidden="true"
-            className="relative mx-auto hidden h-56 w-full max-w-sm items-center justify-center sm:flex lg:col-span-2"
+            className="animate-float-soft relative mx-auto hidden h-56 w-full max-w-sm items-center justify-center sm:flex lg:col-span-2"
           >
             <div className="absolute h-44 w-44 rounded-full bg-brand/25 blur-2xl" />
             <div className="absolute h-32 w-32 rounded-full bg-gradient-to-br from-brand-light/40 to-brand-dark/40 blur-md" />
@@ -243,7 +262,7 @@ export function DashboardPage() {
                 action={
                   <Link
                     to="/clipper"
-                    className="inline-flex items-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
+                    className="inline-flex items-center gap-2 rounded-xl btn-aurora px-4 py-2.5 text-sm font-semibold text-white"
                   >
                     <Wand2 className="h-4 w-4" />
                     Open AI Clipper
@@ -345,7 +364,7 @@ export function DashboardPage() {
               <Link
                 key={a.to}
                 to={a.to}
-                className="flex flex-col items-center gap-2 rounded-xl border border-ink-border bg-ink-panel2 px-3 py-4 text-center text-sm font-medium text-white transition-colors hover:border-brand/60"
+                className="aurora-card flex flex-col items-center gap-2 rounded-xl border border-ink-border bg-ink-panel2 px-3 py-4 text-center text-sm font-medium text-white"
               >
                 <span className="text-brand-light">{a.icon}</span>
                 {a.label}
@@ -384,6 +403,102 @@ export function DashboardPage() {
                 {backend === null ? 'Checking…' : backend.ok ? 'Up' : 'Down'}
               </span>
             </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Top clips + recent activity — real data from the user's jobs. */}
+      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <div className="rounded-2xl border border-ink-border bg-ink-panel p-6 lg:col-span-2">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold text-white">Top clips</h2>
+            <Link to="/library" className="text-sm font-medium text-brand-light hover:underline">
+              View All →
+            </Link>
+          </div>
+          <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+            Your highest-scoring clips so far. Viral score is an estimate,
+            not a guarantee.
+          </p>
+          <div className="mt-4">
+            {topClips.length === 0 ? (
+              <p className="text-sm text-[var(--color-text-muted)]">
+                No scored clips yet — finish a job and its best clips will
+                show up here.
+              </p>
+            ) : (
+              <ul className="divide-y divide-ink-border">
+                {topClips.map((clip) => {
+                  const viral = viralScore(clip.score)
+                  return (
+                    <li key={clip.id}>
+                      <Link
+                        to={`/jobs/${clip.jobId}`}
+                        className="flex items-center justify-between gap-3 py-3 transition-colors hover:opacity-80"
+                      >
+                        <span className="min-w-0">
+                          <span className="block truncate text-sm font-medium text-white">
+                            {clip.title}
+                          </span>
+                          <span className="mt-0.5 block text-xs text-[var(--color-text-muted)]">
+                            {clip.duration_seconds !== null
+                              ? formatDuration(clip.duration_seconds)
+                              : 'Duration unknown'}
+                            {` · job #${clip.jobId}`}
+                          </span>
+                        </span>
+                        <span className="shrink-0 rounded-full bg-ink-panel2 px-2.5 py-1 text-xs font-bold text-white tabular-nums">
+                          {viral.value ?? '—'}
+                          {viral.value != null ? ` · ${viral.label}` : ''}
+                        </span>
+                      </Link>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold text-white">Recent activity</h2>
+            <Link to="/jobs" className="text-sm font-medium text-brand-light hover:underline">
+              View All →
+            </Link>
+          </div>
+          <div className="mt-4">
+            {activity.length === 0 ? (
+              <p className="text-sm text-[var(--color-text-muted)]">
+                No jobs yet — your latest jobs will show up here.
+              </p>
+            ) : (
+              <ul className="divide-y divide-ink-border">
+                {activity.map((j) => (
+                  <li key={j.id}>
+                    <Link
+                      to={`/jobs/${j.id}`}
+                      className="flex items-center justify-between gap-3 py-3 transition-colors hover:opacity-80"
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm font-medium text-white">
+                          Job #{j.id}
+                        </span>
+                        <span className="mt-0.5 block text-xs capitalize text-[var(--color-text-muted)]">
+                          {j.status}
+                          {j.clips.length > 0
+                            ? ` · ${j.clips.length} clip${j.clips.length === 1 ? '' : 's'}`
+                            : ''}
+                        </span>
+                      </span>
+                      <span className="shrink-0 text-xs text-[var(--color-text-muted)]">
+                        {new Date(j.created_at).toLocaleDateString()}
+                      </span>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </div>
       </div>

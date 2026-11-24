@@ -87,7 +87,7 @@ export function CreateProjectPage() {
           <button
             type="button"
             onClick={() => submitLink(youtubeUrl)}
-            className="mt-4 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
+            className="mt-4 rounded-xl btn-aurora px-4 py-2.5 text-sm font-semibold text-white"
           >
             Import from YouTube
           </button>
@@ -119,7 +119,7 @@ export function CreateProjectPage() {
           <button
             type="button"
             onClick={() => submitLink(linkUrl)}
-            className="mt-4 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-light"
+            className="mt-4 rounded-xl btn-aurora px-4 py-2.5 text-sm font-semibold text-white"
           >
             Import from link
           </button>
