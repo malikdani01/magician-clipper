@@ -59,6 +59,22 @@ interface AdminProjectRow {
   jobs_completed?: number
 }
 
+interface AdminClipRow {
+  id: number
+  job_id: number
+  title: string | null
+  status: string
+  file_size_bytes: number | null
+  created_at: string
+  job?: {
+    id: number
+    project_id: number
+    user_id: number
+    user?: { id: number; name: string }
+    project?: { id: number; title: string }
+  }
+}
+
 interface DailyRow {
   date: string
   users: number
@@ -85,11 +101,13 @@ interface AdminJobRow {
 }
 
 interface DashboardPayload {
-  users: { total: number; admins: number; new_last_7_days: number; growth_pct?: number | null }
+  users: { total: number; admins: number; new_last_30_days: number; growth_pct?: number | null }
   projects: { total: number; by_status: Record<string, number>; growth_pct?: number | null }
   clips: { total: number; ready: number; growth_pct?: number | null }
   jobs: { total: number; by_state: Record<string, number>; failed: number; running: number; growth_pct?: number | null }
   storage: { app_bytes: number }
+  /** ffmpeg/ffprobe versions as last reported by the worker. */
+  engine?: { ffmpeg: string | null; ffprobe: string | null; reported_at: string | null }
   billing: { enabled: boolean; message: string }
   /** Daily created-counts, last 30 days (Analytics chart + sparklines). */
   daily?: DailyRow[]
@@ -349,7 +367,7 @@ function planPill(plan: string): string {
 
 function statusPill(status: string): string {
   const s = status.toLowerCase()
-  if (s === 'completed' || s === 'complete') return 'bg-emerald-500/15 text-emerald-300'
+  if (s === 'completed' || s === 'complete' || s === 'ready') return 'bg-emerald-500/15 text-emerald-300'
   if (s === 'processing' || s === 'running') return 'bg-amber-500/15 text-amber-300'
   if (s === 'failed') return 'bg-red-500/15 text-red-300'
   return 'bg-ink-panel2 text-[var(--color-text-muted)]'
@@ -566,7 +584,7 @@ export function AdminDashboardPage() {
             <StatCard
               label="Total Users"
               value={String(data.users.total)}
-              sublabel={`${data.users.admins} admins · ${data.users.new_last_7_days} new in the last 7 days`}
+              sublabel={`${data.users.admins} admins · ${data.users.new_last_30_days} new in the last 30 days`}
               icon={<Users className="h-5 w-5" />}
               accent="rgba(255,255,255,0.18)"
               gradient="linear-gradient(135deg, #4C1D95 0%, #7C3AED 100%)"
@@ -651,7 +669,7 @@ export function AdminDashboardPage() {
               <div className="mt-6 border-t border-ink-border pt-4">
                 <h3 className="text-sm font-semibold text-white">Storage &amp; engine</h3>
                 <p className="mt-2 text-sm text-[var(--color-text-muted)]">
-                  App storage used:{' '}
+                  Storage used (sources + clips):{' '}
                   <span className="font-medium text-white">{formatBytes(data.storage.app_bytes)}</span>
                 </p>
                 <p className="mt-1 flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
@@ -667,8 +685,8 @@ export function AdminDashboardPage() {
                 </p>
                 {engine ? (
                   <p className="mt-1 text-sm text-[var(--color-text-muted)]">
-                    FFmpeg: {engine.ffmpeg ?? 'not reported by the engine'} · FFprobe:{' '}
-                    {engine.ffprobe ?? 'not reported'}
+                    FFmpeg: {engine.ffmpeg ?? data.engine?.ffmpeg ?? 'not reported by the engine'} · FFprobe:{' '}
+                    {engine.ffprobe ?? data.engine?.ffprobe ?? 'not reported'}
                   </p>
                 ) : null}
               </div>
@@ -1012,19 +1030,52 @@ function ProjectsSection({ title, subtitle }: { title: string; subtitle: string 
 }
 
 /* ------------------------------------------------------------------ */
-/* Clips — no real source yet                                          */
+/* Clips — every rendered clip, with its job and owner                 */
 /* ------------------------------------------------------------------ */
 
 function ClipsSection({ title, subtitle }: { title: string; subtitle: string }) {
+  const [page, setPage] = useState(1)
+  const { data, loading, error, retry } = useAdminFetch<Paginated<AdminClipRow>>(
+    `/admin/clips?page=${page}`,
+  )
+  const rows = data?.data ?? []
+
   return (
     <div>
       <PageHeader title={title} subtitle={subtitle} />
-      <EmptyState
-        title="No clips generated yet"
-        description="Clips are created in Phase 3. There is no admin clips list endpoint yet, so nothing is shown here rather than a made-up list."
-        icon={<Clapperboard className="h-7 w-7" />}
-      />
-      <SourceNote source="No data source yet — admin clips list arrives in Phase 3" />
+      {loading ? <LoadingNote /> : null}
+      {error ? <LoadError error={error} onRetry={retry} /> : null}
+      {data && rows.length === 0 ? (
+        <EmptyState
+          title="No clips generated yet"
+          description="No clips have been rendered yet. Clips appear here once a job finishes rendering them."
+          icon={<Clapperboard className="h-7 w-7" />}
+        />
+      ) : null}
+      {rows.length > 0 ? (
+        <>
+          <AdminTable headers={['ID', 'Title', 'Job', 'Owner', 'Project', 'Status', 'Size', 'Created']}>
+            {rows.map((c) => (
+              <TableRow key={c.id}>
+                <Cell>{c.id}</Cell>
+                <Cell>{c.title ?? '—'}</Cell>
+                <Cell muted>#{c.job_id}</Cell>
+                <Cell muted>{c.job?.user?.name ?? '—'}</Cell>
+                <Cell muted>{c.job?.project?.title ?? '—'}</Cell>
+                <Cell>
+                  <span className={`rounded-full px-2.5 py-1 text-xs font-semibold capitalize ${statusPill(c.status)}`}>
+                    {c.status}
+                  </span>
+                </Cell>
+                <Cell muted>{c.file_size_bytes != null ? formatBytes(c.file_size_bytes) : '—'}</Cell>
+                <Cell muted>{formatDate(c.created_at)}</Cell>
+              </TableRow>
+            ))}
+          </AdminTable>
+          <Pager page={data?.current_page ?? 1} lastPage={data?.last_page ?? 1} total={data?.total ?? 0} onPage={setPage} />
+        </>
+      ) : null}
+      <SourceNote source="Laravel /api/v1/admin/clips" />
     </div>
   )
 }
@@ -1183,6 +1234,11 @@ function AiSettingsSection({ title, subtitle }: { title: string; subtitle: strin
 
 function FfmpegSection({ title, subtitle }: { title: string; subtitle: string }) {
   const engine = useEngineHealth()
+  const { data } = useAdminFetch<DashboardPayload>('/admin/dashboard')
+  // Direct probe first; the worker-reported versions from the admin
+  // dashboard are the fallback on the hosted site (no engine URL).
+  const ffmpeg = engine?.ffmpeg ?? data?.engine?.ffmpeg ?? null
+  const ffprobe = engine?.ffprobe ?? data?.engine?.ffprobe ?? null
   return (
     <div>
       <PageHeader title={title} subtitle={subtitle} />
@@ -1198,10 +1254,10 @@ function FfmpegSection({ title, subtitle }: { title: string; subtitle: string })
               Engine status: <span className="font-medium text-white">{engine.status}</span>
             </p>
             <p className="mt-1 text-sm text-[var(--color-text-muted)]">
-              FFmpeg: <span className="font-medium text-white">{engine.ffmpeg ?? 'not reported by the engine'}</span>
+              FFmpeg: <span className="font-medium text-white">{ffmpeg ?? 'not reported by the engine'}</span>
             </p>
             <p className="mt-1 text-sm text-[var(--color-text-muted)]">
-              FFprobe: <span className="font-medium text-white">{engine.ffprobe ?? 'not reported by the engine'}</span>
+              FFprobe: <span className="font-medium text-white">{ffprobe ?? 'not reported by the engine'}</span>
             </p>
           </>
         ) : (
@@ -1215,7 +1271,7 @@ function FfmpegSection({ title, subtitle }: { title: string; subtitle: string })
         </p>
         <DisabledAdminFormNote detail="FFmpeg settings endpoint not implemented" />
       </div>
-      <SourceNote source="Video-engine /health" />
+      <SourceNote source="Video-engine /health + Laravel /api/v1/admin/dashboard (worker-reported versions)" />
     </div>
   )
 }
@@ -1434,7 +1490,7 @@ function LogsSection({ title, subtitle }: { title: string; subtitle: string }) {
 function MonitorSection({ title, subtitle }: { title: string; subtitle: string }) {
   const engine = useEngineHealth()
   const [backend, setBackend] = useState<{ ok: boolean; error?: string } | null>(null)
-  const { data } = useAdminFetch<DashboardPayload>('/admin/dashboard')
+  const { data, retry } = useAdminFetch<DashboardPayload>('/admin/dashboard')
 
   useEffect(() => {
     let cancelled = false
@@ -1445,6 +1501,15 @@ function MonitorSection({ title, subtitle }: { title: string; subtitle: string }
       cancelled = true
     }
   }, [])
+
+  // A monitor that fetches once goes stale: it showed "0 running"
+  // while a job was processing because the fetch predated the job
+  // starting. Re-fetch every 10s (the job page polls every 5s) so the
+  // counts track the same live definition as the dashboard.
+  useEffect(() => {
+    const timer = setInterval(() => retry(), 10_000)
+    return () => clearInterval(timer)
+  }, [retry])
 
   return (
     <div>
@@ -1469,7 +1534,7 @@ function MonitorSection({ title, subtitle }: { title: string; subtitle: string }
           <p className="mt-2 text-sm text-[var(--color-text-muted)]">
             {engine
               ? engine.ok
-                ? `Up (${engine.status}) — FFmpeg ${engine.ffmpeg ?? 'not reported'}`
+                ? `Up (${engine.status}) — FFmpeg ${engine.ffmpeg ?? data?.engine?.ffmpeg ?? 'not reported'}`
                 : `Down — ${engine.error ?? engine.status}`
               : 'Checking…'}
           </p>

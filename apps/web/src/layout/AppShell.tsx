@@ -39,8 +39,12 @@ const NAV_ITEMS = [
 ] as const
 
 function Sidebar({ mobileOpen, onClose }: { mobileOpen: boolean; onClose: () => void }) {
-  const { user } = useAuth()
-  const initial = (user?.name ?? 'G').trim().charAt(0).toUpperCase() || 'G'
+  const { user, loading } = useAuth()
+  // While the stored session is still being verified, show a loading
+  // state — never the guest UI. Rendering "Guest User" + Sign in /
+  // Register for a signed-in user (even for a second) is the flash
+  // the audit caught on every page.
+  const initial = loading ? '…' : (user?.name ?? 'G').trim().charAt(0).toUpperCase() || 'G'
 
   return (
     <>
@@ -88,41 +92,47 @@ function Sidebar({ mobileOpen, onClose }: { mobileOpen: boolean; onClose: () => 
       </nav>
 
       <div className="border-t border-ink-border p-4">
-        <div className="flex items-center gap-3">
-          <span className="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-brand-light to-brand-dark text-sm font-bold text-white">
-            {initial}
-          </span>
-          <span className="min-w-0 leading-tight">
-            <span className="block truncate text-sm font-semibold text-white">
-              {user?.name ?? 'Guest User'}
-            </span>
-            <span className="block truncate text-xs capitalize text-[var(--color-text-muted)]">
-              {user ? `${user.plan} Plan` : 'Free Plan · not signed in'}
-            </span>
-          </span>
-        </div>
-        {user ? (
-          <Link
-            to="/settings"
-            className="mt-3 block rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2 text-center text-xs font-medium text-white hover:bg-ink-border"
-          >
-            Account settings
-          </Link>
+        {loading ? (
+          <p className="text-sm text-[var(--color-text-muted)]">Checking sign-in…</p>
         ) : (
-          <div className="mt-3 flex gap-2">
-            <Link
-              to="/login"
-              className="flex-1 rounded-xl bg-brand px-3 py-2 text-center text-xs font-semibold text-white hover:bg-brand-light"
-            >
-              Sign in
-            </Link>
-            <Link
-              to="/register"
-              className="flex-1 rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2 text-center text-xs font-medium text-white hover:bg-ink-border"
-            >
-              Register
-            </Link>
-          </div>
+          <>
+            <div className="flex items-center gap-3">
+              <span className="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-brand-light to-brand-dark text-sm font-bold text-white">
+                {initial}
+              </span>
+              <span className="min-w-0 leading-tight">
+                <span className="block truncate text-sm font-semibold text-white">
+                  {user?.name ?? 'Guest User'}
+                </span>
+                <span className="block truncate text-xs capitalize text-[var(--color-text-muted)]">
+                  {user ? `${user.plan} Plan` : 'Free Plan · not signed in'}
+                </span>
+              </span>
+            </div>
+            {user ? (
+              <Link
+                to="/settings"
+                className="mt-3 block rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2 text-center text-xs font-medium text-white hover:bg-ink-border"
+              >
+                Account settings
+              </Link>
+            ) : (
+              <div className="mt-3 flex gap-2">
+                <Link
+                  to="/login"
+                  className="flex-1 rounded-xl bg-brand px-3 py-2 text-center text-xs font-semibold text-white hover:bg-brand-light"
+                >
+                  Sign in
+                </Link>
+                <Link
+                  to="/register"
+                  className="flex-1 rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2 text-center text-xs font-medium text-white hover:bg-ink-border"
+                >
+                  Register
+                </Link>
+              </div>
+            )}
+          </>
         )}
       </div>
       </aside>
@@ -132,11 +142,11 @@ function Sidebar({ mobileOpen, onClose }: { mobileOpen: boolean; onClose: () => 
 
 function TopBar({ onMenuClick }: { onMenuClick: () => void }) {
   const { query, setQuery } = useProjectSearch()
-  const { user } = useAuth()
+  const { user, loading } = useAuth()
   const location = useLocation()
   const [showNotifications, setShowNotifications] = useState(false)
   const searchVisible = location.pathname === '/projects'
-  const initial = (user?.name ?? 'G').trim().charAt(0).toUpperCase() || 'G'
+  const initial = loading ? '…' : (user?.name ?? 'G').trim().charAt(0).toUpperCase() || 'G'
 
   return (
     <header className="relative flex h-16 shrink-0 items-center gap-4 border-b border-ink-border bg-ink-panel px-6">
@@ -183,7 +193,7 @@ function TopBar({ onMenuClick }: { onMenuClick: () => void }) {
         <Link
           to="/settings"
           aria-label="Account settings"
-          title={user ? `${user.name} — ${user.plan} plan` : 'Not signed in — open settings'}
+          title={loading ? 'Checking sign-in…' : user ? `${user.name} — ${user.plan} plan` : 'Not signed in — open settings'}
           className="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-brand-light to-brand-dark text-sm font-bold text-white"
         >
           {initial}

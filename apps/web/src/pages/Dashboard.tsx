@@ -29,6 +29,8 @@ interface UserStats {
   clips_total: number
   clips_ready: number
   storage_bytes: number
+  /** ffmpeg/ffprobe versions as last reported by the worker. */
+  engine?: { ffmpeg: string | null; ffprobe: string | null; reported_at: string | null }
 }
 
 /** Magician's hat — original SVG art for the hero visual. */
@@ -358,7 +360,7 @@ export function DashboardPage() {
                 {engine === null
                   ? 'Checking…'
                   : engine.ok
-                    ? `Running, ffmpeg ${engine.ffmpeg ?? 'version unknown'}`
+                    ? `Running, ffmpeg ${engine.ffmpeg ?? stats?.engine?.ffmpeg ?? 'version unknown'}`
                     : (engine.error ?? 'Down')}
               </span>
               <span

@@ -1,21 +1,45 @@
+import { useEffect, useState } from 'react'
 import { Coins, Crown, HardDrive } from 'lucide-react'
 import { PageHeader } from '../components/PageHeader'
 import { StatCard } from '../components/StatCard'
 import { formatBytes } from '../lib/format'
-import { getStoredUser } from '../lib/api'
+import { API_URL, getStoredUser, getToken } from '../lib/api'
 import { useProjects } from '../state/projects'
 
 /**
  * Usage & Credits — Phase 2.
  * No credits system exists yet, so nothing is invented: usage is 0 and
  * the remaining balance is honestly shown as "not enabled". Storage is
- * the real sum of project source files. The plan comes from the stored
+ * the canonical server total (rendered clips + source files) — the same
+ * number the dashboard shows. The plan comes from the stored
  * signed-in user when there is one; otherwise it is honestly "Free
  * Plan — not signed in".
  */
 export function UsagePage() {
   const { projects } = useProjects()
-  const storageBytes = projects.reduce((sum, p) => sum + (p.fileSize || 0), 0)
+  const [stats, setStats] = useState<{ storage_bytes: number } | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const token = getToken()
+    if (token) {
+      fetch(`${API_URL}/me/stats`, {
+        headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((body) => {
+          if (!cancelled && body) setStats(body as { storage_bytes: number })
+        })
+        .catch(() => {})
+    }
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Canonical storage total from the server; falls back to the browser
+  // project store's sum only while stats are loading.
+  const storageBytes = stats?.storage_bytes ?? projects.reduce((sum, p) => sum + (p.fileSize || 0), 0)
 
   const storedUser = getStoredUser() as { plan?: string } | null
   const planLabel =
@@ -48,7 +72,7 @@ export function UsagePage() {
           sublabel={
             storageBytes === 0
               ? 'Nothing uploaded yet'
-              : 'Sum of project source files'
+              : 'Sources + rendered clips on disk'
           }
           icon={<HardDrive className="h-5 w-5" />}
           accent="#059669"

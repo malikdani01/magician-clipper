@@ -57,7 +57,7 @@ const ADMIN_NAV_ITEMS = [
 ] as const
 
 export function AdminLayout() {
-  const { user } = useAuth()
+  const { user, loading } = useAuth()
   const isAdmin = user?.role === 'admin'
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
@@ -67,6 +67,9 @@ export function AdminLayout() {
   // admin dashboard endpoint. No badge renders when the count is 0 —
   // the design's red badges only appear when there is something to see.
   const [navCounts, setNavCounts] = useState<{ processing_jobs: number; failed_jobs: number } | null>(null)
+  // ffmpeg/ffprobe versions as last reported by the worker (the hosted
+  // site has no engine URL to probe).
+  const [reportedEngine, setReportedEngine] = useState<{ ffmpeg: string | null; ffprobe: string | null } | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -81,6 +84,7 @@ export function AdminLayout() {
         .then((r) => (r.ok ? r.json() : null))
         .then((body) => {
           if (!cancelled && body?.nav_counts) setNavCounts(body.nav_counts)
+          if (!cancelled && body?.engine) setReportedEngine(body.engine)
         })
         .catch(() => {})
     }
@@ -96,7 +100,9 @@ export function AdminLayout() {
     return null
   }
 
-  const initial = (user?.name ?? 'A').trim().charAt(0).toUpperCase() || 'A'
+  // While the stored session is still being verified, never show
+  // "Sign-in required" for a signed-in admin — show a loading state.
+  const initial = loading ? '…' : (user?.name ?? 'A').trim().charAt(0).toUpperCase() || 'A'
 
   return (
     <div className="flex h-full">
@@ -157,7 +163,7 @@ export function AdminLayout() {
             </p>
             <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">
               {engine?.ok
-                ? `FFmpeg ${engine.ffmpeg ?? 'version unknown'}`
+                ? `FFmpeg ${engine.ffmpeg ?? reportedEngine?.ffmpeg ?? 'version unknown'}`
                 : 'Engine health is checked live.'}
             </p>
           </div>
@@ -166,12 +172,20 @@ export function AdminLayout() {
               {initial}
             </span>
             <span className="min-w-0 leading-tight">
-              <span className="block truncate text-sm font-semibold text-white">
-                {isAdmin ? user.name : 'Admin'}
-              </span>
-              <span className="block text-xs text-[var(--color-text-muted)]">
-                {isAdmin ? 'Super Admin' : 'Sign-in required'}
-              </span>
+              {loading ? (
+                <span className="block truncate text-sm text-[var(--color-text-muted)]">
+                  Checking sign-in…
+                </span>
+              ) : (
+                <>
+                  <span className="block truncate text-sm font-semibold text-white">
+                    {isAdmin ? user.name : 'Admin'}
+                  </span>
+                  <span className="block text-xs text-[var(--color-text-muted)]">
+                    {isAdmin ? 'Super Admin' : 'Sign-in required'}
+                  </span>
+                </>
+              )}
             </span>
           </div>
           <Link
@@ -244,9 +258,9 @@ export function AdminLayout() {
               </span>
               <span className="hidden leading-tight md:block">
                 <span className="block text-sm font-semibold text-white">
-                  {isAdmin ? user.name : 'Admin'}
+                  {loading ? '…' : isAdmin ? user.name : 'Admin'}
                 </span>
-                <span className="block text-xs text-[var(--color-text-muted)]">Super Admin</span>
+                <span className="block text-xs text-[var(--color-text-muted)]">{loading ? 'Checking sign-in…' : 'Super Admin'}</span>
               </span>
             </span>
           </div>

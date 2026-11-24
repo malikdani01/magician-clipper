@@ -8,10 +8,11 @@ use App\Http\Requests\RegisterRequest;
 use App\Models\Clip;
 use App\Models\ProcessingJob;
 use App\Models\User;
+use App\Support\StorageUsage;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 
 class AuthController extends Controller
@@ -81,16 +82,9 @@ class AuthController extends Controller
         $user = $request->user();
         $jobIds = $user->processingJobs()->pluck('id');
 
-        $storageBytes = (int) Clip::whereIn('job_id', $jobIds)->sum('file_size_bytes');
-        foreach ($user->processingJobs()->whereNotNull('source_path')->pluck('source_path') as $path) {
-            try {
-                if (Storage::disk('local')->exists($path)) {
-                    $storageBytes += (int) Storage::disk('local')->size($path);
-                }
-            } catch (\Throwable) {
-                // A missing source file contributes 0, never an error.
-            }
-        }
+        // Canonical storage-used total (rendered clips + source files)
+        // — the same number the admin dashboard reports, so both agree.
+        $storageBytes = StorageUsage::totalBytes($user->id);
 
         return response()->json([
             'jobs_total' => $user->processingJobs()->count(),
@@ -103,6 +97,12 @@ class AuthController extends Controller
             'clips_ready' => Clip::whereIn('job_id', $jobIds)
                 ->where('status', Clip::STATUS_READY)->count(),
             'storage_bytes' => $storageBytes,
+            // ffmpeg/ffprobe versions as last reported by the worker
+            // (the hosted site has no engine URL to probe). Nulls
+            // until the first report — the UI says so honestly.
+            'engine' => Cache::get('engine_versions') ?? [
+                'ffmpeg' => null, 'ffprobe' => null, 'reported_at' => null,
+            ],
         ]);
     }
 }

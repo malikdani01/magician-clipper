@@ -7,7 +7,9 @@ use App\Models\Clip;
 use App\Models\ProcessingJob;
 use App\Models\Project;
 use App\Models\User;
+use App\Support\StorageUsage;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 
@@ -44,7 +46,7 @@ class AdminController extends Controller
             'users' => [
                 'total' => User::count(),
                 'admins' => User::where('role', 'admin')->count(),
-                'new_last_7_days' => User::where('created_at', '>=', now()->subDays(7))->count(),
+                'new_last_30_days' => User::where('created_at', '>=', now()->subDays(30))->count(),
                 'growth_pct' => $growth(User::class),
             ],
             'projects' => [
@@ -69,8 +71,16 @@ class AdminController extends Controller
                 'growth_pct' => $growth(ProcessingJob::class),
             ],
             'storage' => [
-                // Real on-disk usage of the local storage root.
-                'app_bytes' => $this->directorySize(storage_path('app')),
+                // Canonical storage-used total (rendered clips + source
+                // files) — the same number the user dashboard and the
+                // Usage page report, so all three agree.
+                'app_bytes' => StorageUsage::totalBytes(),
+            ],
+            // ffmpeg/ffprobe versions as last reported by the worker
+            // (the hosted site has no engine URL to probe). Nulls
+            // until the first report — the UI says so honestly.
+            'engine' => Cache::get('engine_versions') ?? [
+                'ffmpeg' => null, 'ffprobe' => null, 'reported_at' => null,
             ],
             'billing' => [
                 'enabled' => false,
@@ -226,6 +236,17 @@ class AdminController extends Controller
             ->paginate(20);
 
         return response()->json($jobs);
+    }
+
+    public function clips(Request $request)
+    {
+        $clips = Clip::with([
+            'job:id,project_id,user_id',
+            'job.user:id,name',
+            'job.project:id,title',
+        ])->latest()->paginate(20);
+
+        return response()->json($clips);
     }
 
     public function retryJob(Request $request, ProcessingJob $job)
@@ -413,25 +434,5 @@ class AdminController extends Controller
         } catch (\Throwable) {
             return false;
         }
-    }
-
-    private function directorySize(string $path): int
-    {
-        if (! is_dir($path)) {
-            return 0;
-        }
-
-        $size = 0;
-        $iterator = new \RecursiveIteratorIterator(
-            new \RecursiveDirectoryIterator($path, \FilesystemIterator::SKIP_DOTS)
-        );
-
-        foreach ($iterator as $file) {
-            if ($file->isFile()) {
-                $size += $file->getSize();
-            }
-        }
-
-        return $size;
     }
 }

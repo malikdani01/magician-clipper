@@ -19,9 +19,25 @@ import {
   setProjectFile,
   useProjects,
   type ClipSpec,
+  type ProjectRecord,
 } from '../state/projects'
 
 type EditorTab = 'media' | 'transcript' | 'clips' | 'captions' | 'text' | 'brand-kit'
+
+/** Detail line under a project in the picker: duration/resolution,
+ * plus the filename only when it names a different file than the
+ * title. The wizard names the project after the uploaded file
+ * (without its extension), so showing both echoes the same name
+ * twice — "source" and "source source.mp4 · 2:50 · 1280×720". */
+function pickerDetail(p: ProjectRecord): string {
+  const stem = p.fileName.replace(/\.[^.]+$/, '')
+  const parts = [
+    ...(stem && stem !== p.title ? [p.fileName] : []),
+    ...(p.durationSeconds != null ? [formatDuration(p.durationSeconds)] : []),
+    ...(p.width && p.height ? [`${p.width}×${p.height}`] : []),
+  ]
+  return parts.length > 0 ? parts.join(' · ') : '—'
+}
 
 const TABS: { id: EditorTab; label: string }[] = [
   { id: 'media', label: 'Media' },
@@ -384,9 +400,7 @@ export function EditorPage() {
                         {p.title}
                       </span>
                       <span className="block truncate text-xs text-[var(--color-text-muted)]">
-                        {p.fileName}
-                        {p.durationSeconds != null ? ` · ${formatDuration(p.durationSeconds)}` : ''}
-                        {p.width && p.height ? ` · ${p.width}×${p.height}` : ''}
+                        {pickerDetail(p)}
                       </span>
                     </span>
                   </button>

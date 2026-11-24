@@ -9,6 +9,7 @@ use App\Models\ProcessingJob;
 use App\Models\Project;
 use App\Models\UserSetting;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
@@ -231,6 +232,12 @@ class MuseJobController extends Controller
             // Human-readable note the worker leaves on the job (e.g. why
             // fewer clips were delivered). Shown on the job page.
             'note' => ['sometimes', 'nullable', 'string', 'max:1000'],
+            // The worker's own ffmpeg/ffprobe versions, reported with
+            // every status update — the hosted site has no engine URL
+            // to probe, so this is how the dashboards learn them.
+            'engine_versions' => ['sometimes', 'nullable', 'array'],
+            'engine_versions.ffmpeg' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'engine_versions.ffprobe' => ['sometimes', 'nullable', 'string', 'max:255'],
         ]);
 
         $public = strtolower($validated['status']);
@@ -244,8 +251,23 @@ class MuseJobController extends Controller
             $job->save();
         }
 
-        // Same-status report: just update stage/progress.
+        // Engine versions ride along with any status report and are
+        // kept in the cache for the dashboards. When nothing has been
+        // reported yet the UI says so honestly.
+        if (array_key_exists('engine_versions', $validated)) {
+            $versions = $validated['engine_versions'] ?? [];
+            Cache::forever('engine_versions', [
+                'ffmpeg' => $versions['ffmpeg'] ?? null,
+                'ffprobe' => $versions['ffprobe'] ?? null,
+                'reported_at' => now()->toIso8601String(),
+            ]);
+        }
+
+        // Same-status report: update stage/progress, and let the stored
+        // state follow the stage when the stage names a pipeline state
+        // (a job stuck at "probing" while rendering is a stale state).
         if ($job->publicStatus() === $public) {
+            $job->followStage($stage);
             if ($stage !== null) {
                 $job->stage = $stage;
             }
@@ -260,7 +282,14 @@ class MuseJobController extends Controller
         try {
             match ($public) {
                 'queued' => $job->advanceTo(ProcessingJob::STATE_QUEUED, $stage, $progress),
-                'processing' => $job->advanceTo(ProcessingJob::STATE_PROBING, $stage ?? 'Processing', $progress ?? 0),
+                // First Processing report: start at the pipeline state
+                // the stage names (e.g. transcribing), not always
+                // probing — otherwise the state lags behind the stage.
+                'processing' => $job->advanceTo(
+                    ProcessingJob::STAGE_TO_STATE[$stage ?? ''] ?? ProcessingJob::STATE_PROBING,
+                    $stage ?? 'Processing',
+                    $progress ?? 0
+                ),
                 'ready' => $job->advanceTo(ProcessingJob::STATE_COMPLETED, $stage ?? 'Ready', 100),
                 'failed' => $job->fail(
                     'worker_failed',

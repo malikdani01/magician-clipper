@@ -93,6 +93,7 @@ Route::prefix('v1')->group(function () {
             Route::get('/users', [AdminController::class, 'users']);
             Route::get('/projects', [AdminController::class, 'projects']);
             Route::get('/jobs', [AdminController::class, 'jobs']);
+            Route::get('/clips', [AdminController::class, 'clips']);
             Route::post('/jobs/{job}/retry', [AdminController::class, 'retryJob']);
             Route::post('/jobs/{job}/cancel', [AdminController::class, 'cancelJob']);
             Route::get('/system/health', [AdminController::class, 'health']);

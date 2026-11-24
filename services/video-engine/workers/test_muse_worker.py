@@ -332,5 +332,50 @@ class LayoutRenderTests(unittest.TestCase):
             self.assertAlmostEqual(rendered["duration"], 5.0, delta=0.5)
 
 
+class EngineVersionsTests(unittest.TestCase):
+    """The worker reports its own ffmpeg/ffprobe versions with every
+    status update (audit 2026-11-24): the hosted site has no engine
+    URL to probe, so this is how the dashboards learn the versions."""
+
+    def test_versions_are_first_lines_of_version_output(self):
+        versions = muse_worker.engine_versions()
+        self.assertTrue(
+            (versions["ffmpeg"] or "").startswith("ffmpeg version"),
+            f"unexpected ffmpeg version: {versions['ffmpeg']!r}",
+        )
+        self.assertTrue(
+            (versions["ffprobe"] or "").startswith("ffprobe version"),
+            f"unexpected ffprobe version: {versions['ffprobe']!r}",
+        )
+
+    def test_set_status_carries_engine_versions(self):
+        captured = {}
+
+        class FakeResp:
+            status_code = 200
+            text = "{}"
+
+            def json(self):
+                return {}
+
+        class FakeRequests:
+            def request(self, method, url, headers=None, **kwargs):
+                captured["payload"] = kwargs.get("json")
+                return FakeResp()
+
+        api = muse_worker.JobApi("test-key")
+        api._requests = FakeRequests()
+        api.set_status(1, "Processing", stage="rendering", progress=60)
+        payload = captured["payload"]
+        self.assertEqual(payload["status"], "Processing")
+        self.assertIn("engine_versions", payload)
+        self.assertTrue(
+            (payload["engine_versions"]["ffmpeg"] or "").startswith("ffmpeg version")
+        )
+        self.assertTrue(
+            (payload["engine_versions"]["ffprobe"] or "").startswith("ffprobe version")
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

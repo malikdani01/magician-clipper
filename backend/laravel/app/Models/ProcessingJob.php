@@ -52,6 +52,26 @@ class ProcessingJob extends Model
     ];
 
     /**
+     * Worker stage names that name a pipeline state. When the worker
+     * reports one of these stages, the stored state follows the stage
+     * so the job page never shows a stale state (e.g. "probing" while
+     * the stage is "rendering"). Stages not listed here
+     * (acquiring_source, uploading_clips, claimed, ready, ...) carry
+     * no state of their own and leave the state untouched.
+     */
+    public const STAGE_TO_STATE = [
+        'probing' => self::STATE_PROBING,
+        'extracting_audio' => self::STATE_EXTRACTING_AUDIO,
+        'transcribing' => self::STATE_TRANSCRIBING,
+        'detecting_scenes' => self::STATE_DETECTING_SCENES,
+        'analyzing' => self::STATE_ANALYZING,
+        'selecting_clips' => self::STATE_SELECTING_CLIPS,
+        'rendering' => self::STATE_RENDERING,
+        'captioning' => self::STATE_CAPTIONING,
+        'validating' => self::STATE_VALIDATING,
+    ];
+
+    /**
      * Allowed state transitions. A transition not listed here is invalid
      * and must be rejected, never silently applied (spec §11/§12).
      *
@@ -283,6 +303,63 @@ class ProcessingJob extends Model
     public function canTransitionTo(string $to): bool
     {
         return in_array($to, self::VALID_TRANSITIONS[$this->state] ?? [], true);
+    }
+
+    /**
+     * Advance the stored state to the pipeline state a worker stage
+     * names, when that state is reachable from here. Unknown stages,
+     * backwards targets and terminal/failed/cancelling jobs leave the
+     * state untouched — the stage string itself is still recorded by
+     * the caller, so nothing is lost.
+     */
+    public function followStage(?string $stage): static
+    {
+        if ($stage === null) {
+            return $this;
+        }
+
+        if ($this->isTerminal()
+            || $this->state === self::STATE_FAILED
+            || $this->state === self::STATE_CANCELLING) {
+            return $this;
+        }
+
+        $target = self::STAGE_TO_STATE[$stage] ?? null;
+        if ($target === null || $target === $this->state) {
+            return $this;
+        }
+
+        // Only ever move forward along the pipeline: the state
+        // machine's failed -> queued retry edge would otherwise let
+        // advanceTo() walk backwards through a failure (rendering ->
+        // failed -> queued -> probing). A stage naming an earlier
+        // state is ignored, never a 422.
+        $order = [
+            self::STATE_UPLOADED,
+            self::STATE_QUEUED,
+            self::STATE_PROBING,
+            self::STATE_EXTRACTING_AUDIO,
+            self::STATE_TRANSCRIBING,
+            self::STATE_DETECTING_SCENES,
+            self::STATE_ANALYZING,
+            self::STATE_SELECTING_CLIPS,
+            self::STATE_RENDERING,
+            self::STATE_CAPTIONING,
+            self::STATE_VALIDATING,
+            self::STATE_COMPLETED,
+        ];
+        $currentPos = array_search($this->state, $order, true);
+        $targetPos = array_search($target, $order, true);
+        if ($currentPos === false || $targetPos === false || $targetPos <= $currentPos) {
+            return $this;
+        }
+
+        try {
+            return $this->advanceTo($target);
+        } catch (InvalidArgumentException) {
+            // Backwards or otherwise illegal: keep the state.
+            return $this;
+        }
     }
 
     /**

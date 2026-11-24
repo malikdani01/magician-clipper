@@ -737,6 +737,83 @@ class MuseJobApiTest extends TestCase
             ->assertJsonPath('job.progress', 20);
     }
 
+    public function test_worker_stage_advances_the_stored_state(): void
+    {
+        // Regression (audit 2026-11-24): a job stuck at state "probing"
+        // while its stage was "rendering" — same-status reports only
+        // updated the stage, never the state.
+        $user = User::factory()->create();
+        $job = $this->createLinkJob($user);
+        $url = "/api/v1/muse/jobs/{$job['id']}/status";
+
+        // First Processing report: the state starts at the pipeline
+        // state the stage names, not always probing.
+        $this->patchJson(
+            $url,
+            ['status' => 'Processing', 'stage' => 'transcribing', 'progress' => 20],
+            $this->museHeaders()
+        )->assertStatus(200)
+            ->assertJsonPath('job.state', 'transcribing')
+            ->assertJsonPath('job.stage', 'transcribing');
+
+        // Later stage, same public status: the state follows.
+        $this->patchJson(
+            $url,
+            ['status' => 'Processing', 'stage' => 'rendering', 'progress' => 60],
+            $this->museHeaders()
+        )->assertStatus(200)
+            ->assertJsonPath('job.state', 'rendering')
+            ->assertJsonPath('job.stage', 'rendering');
+
+        // A stage with no pipeline state leaves the state alone but
+        // is still recorded.
+        $this->patchJson(
+            $url,
+            ['status' => 'Processing', 'stage' => 'uploading_clips', 'progress' => 90],
+            $this->museHeaders()
+        )->assertStatus(200)
+            ->assertJsonPath('job.state', 'rendering')
+            ->assertJsonPath('job.stage', 'uploading_clips');
+
+        // A backwards stage never moves the state backwards — and is
+        // not a 422 either.
+        $this->patchJson(
+            $url,
+            ['status' => 'Processing', 'stage' => 'probing', 'progress' => 95],
+            $this->museHeaders()
+        )->assertStatus(200)
+            ->assertJsonPath('job.state', 'rendering')
+            ->assertJsonPath('job.stage', 'probing');
+    }
+
+    public function test_worker_engine_versions_surface_in_user_stats(): void
+    {
+        // The hosted site has no engine URL to probe: the worker
+        // reports its ffmpeg/ffprobe versions with its status updates
+        // and the dashboards read them from there.
+        $user = User::factory()->create();
+        $job = $this->createLinkJob($user);
+
+        $this->patchJson(
+            "/api/v1/muse/jobs/{$job['id']}/status",
+            [
+                'status' => 'Processing',
+                'stage' => 'transcribing',
+                'engine_versions' => [
+                    'ffmpeg' => 'ffmpeg version 8.1.2',
+                    'ffprobe' => 'ffprobe version 8.1.2',
+                ],
+            ],
+            $this->museHeaders()
+        )->assertStatus(200);
+
+        $this->actingAs($user, 'sanctum')
+            ->getJson('/api/v1/me/stats')
+            ->assertStatus(200)
+            ->assertJsonPath('engine.ffmpeg', 'ffmpeg version 8.1.2')
+            ->assertJsonPath('engine.ffprobe', 'ffprobe version 8.1.2');
+    }
+
     // --- Muse clip upload ---
 
     public function test_muse_clip_upload_requires_processing_job(): void

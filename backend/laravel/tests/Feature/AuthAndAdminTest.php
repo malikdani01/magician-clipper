@@ -2,8 +2,11 @@
 
 namespace Tests\Feature;
 
+use App\Models\Clip;
+use App\Models\ProcessingJob;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class AuthAndAdminTest extends TestCase
@@ -62,6 +65,21 @@ class AuthAndAdminTest extends TestCase
                 'daily', 'usage', 'resources', 'nav_counts',
                 'recent_jobs', 'recent_clips',
             ]);
+    }
+
+    public function test_admin_dashboard_new_users_window_is_30_days(): void
+    {
+        // Regression (audit 2026-11-24): the card said "2 new in the
+        // last 7 days" under a "New in the last 30 days" heading — the
+        // count and the heading used different windows. Both are 30
+        // days now, matching the growth and daily-series windows.
+        $admin = User::factory()->admin()->create();
+        User::factory()->create(['created_at' => now()->subDays(10)]);
+
+        $this->actingAs($admin, 'sanctum')
+            ->getJson('/api/v1/admin/dashboard')
+            ->assertStatus(200)
+            ->assertJsonPath('users.new_last_30_days', 2);
     }
 
     public function test_admin_dashboard_usage_counts_job_settings(): void
@@ -190,5 +208,106 @@ class AuthAndAdminTest extends TestCase
         $this->actingAs($other, 'sanctum')
             ->getJson("/api/v1/projects/{$project->id}")
             ->assertStatus(403);
+    }
+
+    public function test_admin_clips_lists_real_clips_with_job_and_owner(): void
+    {
+        // Regression (audit 2026-11-24): the admin clips page said
+        // "no admin clips list endpoint yet" while the dashboard
+        // counted 5 real clips. The list must show those same clips.
+        $admin = User::factory()->admin()->create();
+        $user = User::factory()->create(['name' => 'Clip Owner']);
+        $project = $user->projects()->create(['title' => 'Owner project']);
+        $job = $user->processingJobs()->create([
+            'project_id' => $project->id,
+            'state' => ProcessingJob::STATE_COMPLETED,
+            'stage' => 'ready',
+            'progress' => 100,
+            'settings' => ['platform' => 'tiktok'],
+            'source_type' => 'link',
+            'source_url' => 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+        ]);
+        Clip::create([
+            'project_id' => $project->id,
+            'job_id' => $job->id,
+            'title' => 'Test clip',
+            'status' => Clip::STATUS_READY,
+            'start_seconds' => 7.0,
+            'end_seconds' => 39.0,
+            'duration_seconds' => 32.0,
+            'aspect_ratio' => '9:16',
+            'file_size_bytes' => 13_100_000,
+            'score' => 0.75,
+        ]);
+
+        $this->actingAs($admin, 'sanctum')
+            ->getJson('/api/v1/admin/clips')
+            ->assertStatus(200)
+            ->assertJsonPath('total', 1)
+            ->assertJsonPath('data.0.title', 'Test clip')
+            ->assertJsonPath('data.0.status', 'ready')
+            ->assertJsonPath('data.0.file_size_bytes', 13_100_000)
+            ->assertJsonPath('data.0.job.id', $job->id)
+            ->assertJsonPath('data.0.job.user.name', 'Clip Owner')
+            ->assertJsonPath('data.0.job.project.title', 'Owner project');
+
+        // The dashboard count and the list agree on the same clips.
+        $this->actingAs($admin, 'sanctum')
+            ->getJson('/api/v1/admin/dashboard')
+            ->assertStatus(200)
+            ->assertJsonPath('clips.total', 1)
+            ->assertJsonPath('clips.ready', 1);
+
+        $this->actingAs($user, 'sanctum')
+            ->getJson('/api/v1/admin/clips')
+            ->assertStatus(403);
+    }
+
+    public function test_storage_total_is_clips_plus_sources_and_agrees_everywhere(): void
+    {
+        // Regression (audit 2026-11-24): the user dashboard said
+        // 42.9 MB while Usage and the admin dashboard said 15.6 MB —
+        // three different definitions. One canonical total (rendered
+        // clips + source files) must be reported by all three.
+        Storage::fake('local');
+        $admin = User::factory()->admin()->create();
+        $user = User::factory()->create();
+        $project = $user->projects()->create(['title' => 'Storage project']);
+        $job = $user->processingJobs()->create([
+            'project_id' => $project->id,
+            'state' => ProcessingJob::STATE_COMPLETED,
+            'stage' => 'ready',
+            'progress' => 100,
+            'settings' => ['platform' => 'tiktok'],
+            'source_type' => 'upload',
+            'source_path' => 'uploads/test-source.mp4',
+        ]);
+        Storage::disk('local')->put('uploads/test-source.mp4', str_repeat('0', 1_500_000));
+        foreach ([13_100_000, 10_100_000] as $i => $size) {
+            Clip::create([
+                'project_id' => $project->id,
+                'job_id' => $job->id,
+                'title' => 'Clip '.($i + 1),
+                'status' => Clip::STATUS_READY,
+                'start_seconds' => 0.0,
+                'end_seconds' => 32.0,
+                'duration_seconds' => 32.0,
+                'aspect_ratio' => '9:16',
+                'file_size_bytes' => $size,
+                'score' => 0.7,
+            ]);
+        }
+        $expected = 13_100_000 + 10_100_000 + 1_500_000;
+
+        $this->actingAs($user, 'sanctum')
+            ->getJson('/api/v1/me/stats')
+            ->assertStatus(200)
+            ->assertJsonPath('clips_total', 2)
+            ->assertJsonPath('storage_bytes', $expected);
+
+        $this->actingAs($admin, 'sanctum')
+            ->getJson('/api/v1/admin/dashboard')
+            ->assertStatus(200)
+            ->assertJsonPath('storage.app_bytes', $expected);
     }
 }

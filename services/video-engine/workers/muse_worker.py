@@ -78,6 +78,37 @@ FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
 FFPROBE = shutil.which("ffprobe") or "ffprobe"
 YT_DLP = shutil.which("yt-dlp") or "/usr/local/bin/yt-dlp"
 
+
+def _binary_version(binary: str) -> str | None:
+    """First line of `<binary> -version`, or None when it cannot be run."""
+    try:
+        out = subprocess.run(
+            [binary, "-version"], capture_output=True, text=True, timeout=5
+        )
+        lines = (out.stdout or "").splitlines()
+        return lines[0] if lines else None
+    except Exception:
+        return None
+
+
+_engine_versions: dict | None = None
+
+
+def engine_versions() -> dict:
+    """ffmpeg/ffprobe version strings for this worker, cached per process.
+
+    The hosted site has no engine URL to probe, so the worker reports
+    its own versions with every status update and the backend serves
+    them to the dashboards.
+    """
+    global _engine_versions
+    if _engine_versions is None:
+        _engine_versions = {
+            "ffmpeg": _binary_version(FFMPEG),
+            "ffprobe": _binary_version(FFPROBE),
+        }
+    return _engine_versions
+
 # Model: "base" is the default since 2026-11-22 (was "tiny"). Measured on
 # the same 170s demo file, 3 runs each, threads=1, int8: tiny gave 52-86
 # segments (words varied wildly), base gave 67/80/71 segments with
@@ -327,6 +358,10 @@ class JobApi:
                    stage: str | None = None, progress: int | None = None,
                    note: str | None = None) -> dict:
         payload: dict = {"status": status}
+        # The worker's own ffmpeg/ffprobe versions ride along with
+        # every status update — the hosted site has no engine URL to
+        # probe, so this is how the dashboards learn the versions.
+        payload["engine_versions"] = engine_versions()
         if error_reason is not None:
             payload["error_reason"] = error_reason[:500]
         if stage is not None:
