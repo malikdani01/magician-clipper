@@ -82,8 +82,17 @@ class PlatformGate
         // the same gate, or a campaign job could silently re-enable
         // a feature the admin turned off. A client that sends OST
         // text without the flag gets Required, same as buildSettings.
+        // Batch 14: the requirement can come from the parsed brief
+        // even when the wizard sent no structured fields — parse
+        // the brief here too (pure, cheap) so the gate never depends
+        // on which client created the job.
         $requiredOst = ! empty($validated['campaign_ost'])
             && ($validated['campaign_ost_required'] ?? true);
+        if (! $requiredOst && ! empty($validated['campaign_brief'])) {
+            $parsed = CampaignBriefParser::parse($validated['campaign_brief']);
+            $requiredOst = (bool) $parsed['ost']['required']
+                && ! empty($parsed['ost']['choices']);
+        }
         if ($requiredOst && ! PlatformSettings::feature('on_screen_text')) {
             return $deny('on_screen_text', 'On-screen text is disabled by the admin.');
         }

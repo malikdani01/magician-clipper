@@ -375,6 +375,11 @@ export interface JobSettings {
   campaign_ost?: string | null
   campaign_ost_required?: boolean
   ost_hint?: string | null
+  /** Batch 14: the backend's deterministic parse of the brief
+   * (CampaignBriefParser) — what was extracted (with priority) and
+   * what was not parsed. Null on jobs created before this batch
+   * (they fall back to the Batch 12 structured fields above). */
+  campaign_parsed?: CampaignParsed | null
   /** Free-text notes for Muse (campaign brief, extra instructions). */
   notes?: string | null
   layout: ClipLayout
@@ -423,7 +428,7 @@ export interface JobClip {
   title_suggestion?: string | null
   hashtags?: string[] | null
   post_caption?: string | null
-  caption_source?: 'required' | 'auto' | null
+  caption_source?: 'required' | 'auto' | 'example' | null
   ost_burned_text?: string | null
   required_items_applied?: string[] | null
   /** Batch 13: the grade this clip actually rendered with + the
@@ -454,6 +459,29 @@ export interface ManualCheck {
   id: string
   text: string
   checked: boolean
+}
+
+/** Batch 14: the backend's deterministic parse of the pasted
+ * campaign brief (CampaignBriefParser, PHP). `music_allowed` is
+ * false when the brief forbids background music; `manual_lines`
+ * are the brief lines the parser could not follow — they become
+ * the job's manual checks. Audio links are for posting time only:
+ * the worker never downloads or mixes campaign audio. */
+export interface CampaignParsed {
+  title: string | null
+  ost: { required: boolean; must_include: boolean; choices: string[] }
+  caption: { required: boolean; verbatim: string | null; examples: string[] }
+  hashtags: string[]
+  hashtags_required: boolean
+  audio: { required: boolean; links: { label: string; url: string }[] }
+  reference_videos: string[]
+  music_allowed: boolean
+  clip_types: string[]
+  requirements: string[]
+  not_allowed: string[]
+  editing_rules: string[]
+  unparsed: string[]
+  manual_lines: string[]
 }
 
 export interface Job {
@@ -570,17 +598,6 @@ export interface CreateJobInput {
   progressBar: boolean
   jobType: 'myself' | 'campaign'
   campaignRequirements?: string
-  /** Batch 12 structured campaign fields (2026-11-25). Each text
-   * field carries its own Required/Optional flag (default Required
-   * when typed); the OST hint is used only when the OST is
-   * Optional. */
-  campaignCaption?: string
-  campaignCaptionRequired?: boolean
-  campaignHashtags?: string
-  campaignHashtagsRequired?: boolean
-  campaignOst?: string
-  campaignOstRequired?: boolean
-  ostHint?: string
   /** Free-text notes for Muse (campaign brief, extra instructions). */
   notes?: string
   layout: ClipLayout
@@ -700,23 +717,6 @@ function appendSettingsForm(form: FormData, input: CreateJobInput): void {
     form.append('campaign_requirements', input.campaignRequirements)
     form.append('campaign_brief', input.campaignRequirements)
   }
-  if (input.jobType === 'campaign') {
-    if (input.campaignCaption?.trim()) {
-      form.append('campaign_caption', input.campaignCaption.trim().slice(0, 2200))
-      form.append('campaign_caption_required', String(input.campaignCaptionRequired ?? true))
-    }
-    if (input.campaignHashtags?.trim()) {
-      form.append('campaign_hashtags', input.campaignHashtags.trim().slice(0, 1000))
-      form.append('campaign_hashtags_required', String(input.campaignHashtagsRequired ?? true))
-    }
-    if (input.campaignOst?.trim()) {
-      form.append('campaign_ost', input.campaignOst.trim().slice(0, 60))
-      form.append('campaign_ost_required', String(input.campaignOstRequired ?? true))
-    }
-    if (input.ostHint?.trim()) {
-      form.append('ost_hint', input.ostHint.trim().slice(0, 200))
-    }
-  }
   if (input.notes) {
     form.append('notes', input.notes)
   }
@@ -791,28 +791,6 @@ export async function createJob(input: CreateJobInput): Promise<JobResult> {
             input.jobType === 'campaign' ? (input.campaignRequirements ?? null) : null,
           campaign_brief:
             input.jobType === 'campaign' ? (input.campaignRequirements ?? null) : null,
-          campaign_caption:
-            input.jobType === 'campaign' && input.campaignCaption?.trim()
-              ? input.campaignCaption.trim().slice(0, 2200)
-              : null,
-          campaign_caption_required:
-            input.jobType === 'campaign' ? (input.campaignCaptionRequired ?? true) : false,
-          campaign_hashtags:
-            input.jobType === 'campaign' && input.campaignHashtags?.trim()
-              ? input.campaignHashtags.trim().slice(0, 1000)
-              : null,
-          campaign_hashtags_required:
-            input.jobType === 'campaign' ? (input.campaignHashtagsRequired ?? true) : false,
-          campaign_ost:
-            input.jobType === 'campaign' && input.campaignOst?.trim()
-              ? input.campaignOst.trim().slice(0, 60)
-              : null,
-          campaign_ost_required:
-            input.jobType === 'campaign' ? (input.campaignOstRequired ?? true) : false,
-          ost_hint:
-            input.jobType === 'campaign' && input.ostHint?.trim()
-              ? input.ostHint.trim().slice(0, 200)
-              : null,
           notes: input.notes ?? null,
           layout: input.layout,
           content_type: input.contentType,

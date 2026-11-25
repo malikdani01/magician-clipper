@@ -103,17 +103,12 @@ export interface ClipSpec {
   durationMaxSeconds: number
   jobType: 'myself' | 'campaign'
   campaignRequirements: string
-  /** Batch 12 campaign requirements (2026-11-25) — the structured
-   * fields: post caption, hashtags, on-screen text, each with its
-   * own Required/Optional selector (default Required when typed),
-   * plus an OST hint used only when the OST is Optional. */
-  campaignCaption: string
-  campaignCaptionRequired: boolean
-  campaignHashtags: string
-  campaignHashtagsRequired: boolean
-  campaignOst: string
-  campaignOstRequired: boolean
-  ostHint: string
+  /** Batch 12 campaign requirements (2026-11-25) — the full pasted
+   * brief. Batch 14: the wizard sends ONLY the brief now — the
+   * structured fields it used to carry (post caption, hashtags,
+   * on-screen text, each with a Required/Optional selector, plus
+   * the OST hint) are gone; the backend parses the brief and
+   * derives them at creation. */
   layout: ClipLayout
   quality: 'draft' | 'standard' | 'high'
   captionsLanguage: 'english' | 'roman_urdu' | 'hindi' | 'auto'
@@ -170,13 +165,6 @@ export function defaultClipSpec(): ClipSpec {
     durationMaxSeconds: 90,
     jobType: 'myself',
     campaignRequirements: '',
-    campaignCaption: '',
-    campaignCaptionRequired: true,
-    campaignHashtags: '',
-    campaignHashtagsRequired: true,
-    campaignOst: '',
-    campaignOstRequired: true,
-    ostHint: '',
     layout: 'center_crop',
     quality: 'standard',
     captionsLanguage: 'english',

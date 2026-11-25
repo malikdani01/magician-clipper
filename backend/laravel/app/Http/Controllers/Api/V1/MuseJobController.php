@@ -459,13 +459,13 @@ class MuseJobController extends Controller
             // SERVER on completion, from the stored per-clip facts
             // the worker reported — never claimed by the worker
             // itself. Manual brief checks are initialised from the
-            // brief lines (unchecked) when the job has none yet.
+            // brief (Batch 14: only the lines the parser could not
+            // follow) when the job has none yet.
             $job->campaign_checklist = CampaignChecklist::compute($job->fresh());
             if ($job->campaign_manual_checks === null) {
-                $brief = $job->settings['campaign_brief']
-                    ?? $job->settings['campaign_requirements']
-                    ?? null;
-                $job->campaign_manual_checks = CampaignChecklist::manualChecksFromBrief($brief);
+                $job->campaign_manual_checks = CampaignChecklist::manualChecksForJob(
+                    $job->settings ?? []
+                );
             }
             $job->save();
         }
@@ -588,7 +588,7 @@ class MuseJobController extends Controller
             'title_suggestion' => ['sometimes', 'nullable', 'string', 'max:120'],
             'hashtags' => ['sometimes', 'nullable', 'string'],
             'post_caption' => ['sometimes', 'nullable', 'string', 'max:2200'],
-            'caption_source' => ['sometimes', 'nullable', 'string', Rule::in(['required', 'auto'])],
+            'caption_source' => ['sometimes', 'nullable', 'string', Rule::in(['required', 'auto', 'example'])],
             'ost_burned_text' => ['sometimes', 'nullable', 'string', 'max:60'],
             'required_items_applied' => ['sometimes', 'nullable', 'string'],
             // Batch 13: the grade this clip actually rendered with

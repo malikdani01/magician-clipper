@@ -3244,6 +3244,17 @@ def derive_clip_title_hashtags(segments: list[dict], start: float,
     return title, _top_hashtags(_clip_words(segments, start, end))
 
 
+def _campaign_parsed(settings: dict) -> dict:
+    """The backend's deterministic parse of the campaign brief
+    (settings.campaign_parsed, Batch 14), or {} when the job has
+    none — an old job, or a brief the backend never parsed. The
+    backend is the single source of truth for the parse: the worker
+    NEVER re-parses the raw brief text, so the two can never
+    disagree about what the brief said."""
+    parsed = settings.get("campaign_parsed")
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def parse_required_hashtags(raw: str | None) -> list[str]:
     """Parse the campaign hashtags field into an ordered list:
     "#a #b, c" -> ["#a", "#b", "#c"]. A '#' is added when missing;
@@ -3267,12 +3278,18 @@ def parse_required_hashtags(raw: str | None) -> list[str]:
 
 
 def apply_campaign_caption(settings: dict, title: str | None,
-                           auto_hashtags: list[str]) -> dict:
+                           auto_hashtags: list[str],
+                           clip_index: int = 0) -> dict:
     """A clip's post caption + hashtag set under the campaign rules.
 
     Required post caption -> verbatim, source "required". Otherwise
-    the clip's own derived title is the caption, source "auto"
-    (None when the clip has no title to derive — a silent clip).
+    Batch 14: when the brief gave example captions (optional
+    CAPTION GUIDELINES with example lines), the examples ROTATE
+    across clips — clip N gets examples[N % len(examples)], source
+    "example" — so the set is used evenly instead of one line on
+    every clip. When there are no examples, the clip's own derived
+    title is the caption, source "auto" (None when the clip has no
+    title to derive — a silent clip).
     Required hashtags come first, in the given order; auto-derived
     tags fill the set to 8 total (never duplicating a required tag,
     case-insensitively). Required items are NEVER translated — they
@@ -3286,7 +3303,13 @@ def apply_campaign_caption(settings: dict, title: str | None,
         post_caption, source = caption, "required"
         applied = ["caption"]
     else:
-        post_caption, source = title, "auto"
+        examples = [e.strip() for e in
+                    _campaign_parsed(settings).get("caption", {}).get("examples", [])
+                    if isinstance(e, str) and e.strip()]
+        if examples:
+            post_caption, source = examples[clip_index % len(examples)], "example"
+        else:
+            post_caption, source = title, "auto"
         applied = []
     required_tags = (
         parse_required_hashtags(settings.get("campaign_hashtags"))
@@ -6399,7 +6422,21 @@ def _download_music_bed(api: "JobApi", job: dict, job_dir: Path
     could not be used (download failed / no audio stream) — the job
     still renders, without the bed, and the note says why;
     (None, None, None) when the job has no bed at all.
+
+    Batch 14: when the campaign brief forbids background music
+    (parsed music_allowed is False — "background music NOT
+    ALLOWED"), the job NEVER mixes a bed, even when a bed file
+    exists: return the suppression reason WITHOUT attempting the
+    download at all. The suppression reason reaches the job note
+    through music_bed_note (the caller's "Music bed: …" line); the
+    per-clip "music bed file missing" stat never fires for it,
+    because no path is handed to the renders.
     """
+    # Batch 14: the brief's music rule outranks any bed on the job.
+    parsed = _campaign_parsed(job.get("settings") or {})
+    if parsed.get("music_allowed") is False:
+        return (None, job.get("music_bed_name"),
+                "brief forbids background music — no music bed mixed")
     url = job.get("music_bed_url")
     name = job.get("music_bed_name")
     if not url:
@@ -6957,6 +6994,96 @@ def process_rerender(api: JobApi, rerender: dict) -> None:
         raise
 
 
+def _reduced_aspect(width: int, height: int) -> str:
+    """1280x720 -> "16:9". The ratio reduced to lowest terms."""
+    g = math.gcd(width, height)
+    return f"{width // g}:{height // g}"
+
+
+def _analyse_reference_file(path: Path) -> dict:
+    """Measure a downloaded reference video — pacing, shot length,
+    aspect, audio. Returns a dict with duration / width / height /
+    aspect / has_audio / cuts / cuts_per_minute / avg_shot_seconds,
+    or {"error": reason} when the file cannot be probed.
+
+    Batch 14: the brief's reference video is watched ONCE and only
+    MEASURABLE style signals are mirrored. Caption/OST presence in
+    the reference is NOT measured (no OCR in the worker) and no
+    selector weight is changed by the pacing — the analysis is
+    surfaced on the job page so the user can see what the example
+    actually does. A failure here never fails the job.
+    """
+    try:
+        info = ffprobe_json(path)
+    except Exception as exc:  # noqa: BLE001 - unprobeable file
+        return {"error": f"could not probe reference: {exc}"}
+    fmt = info.get("format", {})
+    streams = info.get("streams", [])
+    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    if video is None:
+        return {"error": "no video stream in reference"}
+    duration = float(fmt.get("duration") or 0)
+    width = int(video.get("width") or 0)
+    height = int(video.get("height") or 0)
+    aspect = _reduced_aspect(width, height) if width and height else None
+    has_audio = any(s.get("codec_type") == "audio" for s in streams)
+    cuts = None
+    try:
+        # Scene-change detection: each frame the filter selects is
+        # one cut (the first frame scores 0, so it is never selected).
+        proc = run([
+            FFMPEG, "-i", str(path), "-vf", "select='gt(scene,0.4)'",
+            "-vsync", "0", "-f", "null", "-",
+        ], timeout=300)
+        frames = None
+        for line in (proc.stderr or "").splitlines():
+            m = re.search(r"frame=\s*(\d+)", line)
+            if m:
+                frames = int(m.group(1))
+        cuts = frames if frames is not None else 0
+    except Exception as exc:  # noqa: BLE001 - cut count is optional
+        log.warning("Reference scene detection failed: %s", exc)
+        cuts = None
+    out: dict = {
+        "duration": round(duration, 1),
+        "width": width,
+        "height": height,
+        "aspect": aspect,
+        "has_audio": has_audio,
+    }
+    if cuts is not None:
+        out["cuts"] = cuts
+        out["cuts_per_minute"] = round(cuts / (duration / 60), 1) if duration > 0 else None
+        out["avg_shot_seconds"] = round(duration / (cuts + 1), 1) if duration > 0 else None
+    return out
+
+
+def _analyse_reference_video(api: "JobApi", job: dict, job_dir: Path,
+                             url: str) -> dict:
+    """Download + analyse ONE reference video from the brief.
+    Returns {"url": url, **measurements} or {"url": url, "error":
+    reason} — Instagram links often fail behind a login wall, and
+    that is a manual note on the job page, never a job failure.
+    The file is deleted after analysis; nothing is reposted."""
+    result: dict = {"url": url}
+    dest = job_dir / "reference_video.mp4"
+    try:
+        try:
+            download_with_ytdlp(url, dest, is_live=False)
+        except Exception:
+            # A direct file URL (or a host yt-dlp cannot read) gets
+            # the plain-HTTP fallback before giving up.
+            download_direct(url, dest)
+        result.update(_analyse_reference_file(dest))
+    except Exception as exc:  # noqa: BLE001 - reference is best-effort
+        result["error"] = str(exc)[:300]
+        log.warning("Job %s: reference video %s could not be analysed: %s",
+                    job.get("id"), url, exc)
+    finally:
+        dest.unlink(missing_ok=True)
+    return result
+
+
 def process_job(api: JobApi, job: dict) -> None:
     job_id = job["id"]
     settings = job.get("settings") or {}
@@ -7012,6 +7139,16 @@ def process_job(api: JobApi, job: dict) -> None:
         # (all clips share it); a failed download never fails the job.
         music_bed_path, music_bed_name, music_bed_note = _download_music_bed(
             api, job, job_dir)
+        # Batch 14: the brief's reference video is downloaded +
+        # analysed ONCE (first link only), before the renders — its
+        # measured pacing/aspect are surfaced in the job note. A
+        # failure is a manual note, never a job failure.
+        reference_info: dict | None = None
+        ref_urls = _campaign_parsed(settings).get("reference_videos") or []
+        if settings.get("job_type") == "campaign" and ref_urls:
+            reference_info = _analyse_reference_video(
+                api, job, job_dir, ref_urls[0])
+            log.info("Job %s reference video: %s", job_id, reference_info)
 
         api.set_status(job_id, "Processing", stage="transcribing", progress=20)
         wav_path = job_dir / "audio_16k.wav"
@@ -7309,7 +7446,10 @@ def process_job(api: JobApi, job: dict) -> None:
             # field means "none", never the string "None".
             clip_title, auto_tags = derive_clip_title_hashtags(
                 segments, clip["start"], clip["end"])
-            campaign = apply_campaign_caption(settings, clip_title, auto_tags)
+            # Batch 14: the clip's 0-based index drives the example
+            # caption rotation (the render loop is 1-based).
+            campaign = apply_campaign_caption(
+                settings, clip_title, auto_tags, clip_index=i - 1)
             clip_stats = clip.get("_batch1_stats") or {}
             burned = clip_stats.get("ost_burned_text")
             applied = list(campaign["required_items_applied"])
@@ -7440,6 +7580,33 @@ def process_job(api: JobApi, job: dict) -> None:
             extra_notes.append(f"Music bed: {music_bed_note}.")
         else:
             extra_notes.append("Music bed: none set.")
+        # Batch 14: what the reference video measured — or why it
+        # could not be analysed (an Instagram login wall is the
+        # usual reason). The aspect note only fires on a mismatch:
+        # the job keeps the aspect the user chose.
+        if reference_info is not None:
+            if "error" in reference_info:
+                extra_notes.append(
+                    "Reference video: could not be analysed "
+                    f"({reference_info['error']}) — check the example by eye.")
+            else:
+                bits = []
+                if reference_info.get("duration") is not None:
+                    bits.append(f"{reference_info['duration']}s")
+                if reference_info.get("aspect"):
+                    bits.append(str(reference_info["aspect"]))
+                if reference_info.get("cuts_per_minute") is not None:
+                    bits.append(f"{reference_info['cuts_per_minute']} cuts/min")
+                if reference_info.get("avg_shot_seconds") is not None:
+                    bits.append(f"avg shot {reference_info['avg_shot_seconds']}s")
+                extra_notes.append(
+                    "Reference video: " + (", ".join(bits) + "." if bits
+                                           else "analysed."))
+                if (reference_info.get("aspect")
+                        and reference_info["aspect"] != settings.get("aspect_ratio")):
+                    extra_notes.append(
+                        f"Reference is {reference_info['aspect']} but this job "
+                        f"renders {settings.get('aspect_ratio')} (your chosen ratio).")
         sfx_setting = (settings.get("sfx") or "none").lower()
         sfx_whoosh = sum((c.get("_batch1_stats") or {}).get("sfx_counts", {}).get("whoosh", 0)
                          for c in primary_rendered)

@@ -8,6 +8,7 @@ use App\Models\Plan;
 use App\Models\ProcessingJob;
 use App\Models\Project;
 use App\Models\User;
+use App\Support\CampaignBriefParser;
 use App\Support\CampaignChecklist;
 use App\Support\JobSettingsRules;
 use App\Support\MediaStorage;
@@ -281,10 +282,9 @@ class JobController extends Controller
             'disk' => $diskName ?? MediaStorage::DISK_LOCAL,
             // Batch 12: the manual brief checks start unchecked from
             // job creation, so they are tickable while the job runs —
-            // not only after it completes.
-            'campaign_manual_checks' => CampaignChecklist::manualChecksFromBrief(
-                $settings['campaign_brief'] ?? null
-            ),
+            // not only after it completes. Batch 14: parsed briefs
+            // contribute only the lines the parser could not follow.
+            'campaign_manual_checks' => CampaignChecklist::manualChecksForJob($settings),
         ]);
 
         // Batch 9: the music bed is stored after the job exists so
@@ -439,9 +439,7 @@ class JobController extends Controller
                 'disk' => $diskName,
                 // Batch 12: manual brief checks start unchecked from
                 // job creation (see store()).
-                'campaign_manual_checks' => CampaignChecklist::manualChecksFromBrief(
-                    $settings['campaign_brief'] ?? null
-                ),
+                'campaign_manual_checks' => CampaignChecklist::manualChecksForJob($settings),
             ]);
             $jobs[] = $job->fresh()->toUserArray();
             // Batch 9: the shared music bed is copied under each
@@ -504,8 +502,37 @@ class JobController extends Controller
         $brief = $validated['campaign_brief']
             ?? $validated['campaign_requirements']
             ?? null;
-        $requiredOst = ! empty($validated['campaign_ost'])
-            && ($validated['campaign_ost_required'] ?? false);
+        // Batch 14: the brief is parsed deterministically (no LLM —
+        // see CampaignBriefParser). The wizard sends only the brief
+        // now, so the Batch 12 structured fields are DERIVED from
+        // the parse when the client did not send them: first OST
+        // choice, verbatim caption, hashtags. A client-sent value
+        // still wins (Batch 12 API contract — old clients and old
+        // presets keep working exactly as before).
+        $parsed = CampaignBriefParser::parse($brief);
+        $hasSent = fn (string $key): bool => isset($validated[$key])
+            && trim((string) $validated[$key]) !== '';
+        $campaignOst = $hasSent('campaign_ost')
+            ? $validated['campaign_ost']
+            : (($parsed['ost']['required'] && ! empty($parsed['ost']['choices']))
+                ? $parsed['ost']['choices'][0]
+                : null);
+        $campaignOstRequired = $hasSent('campaign_ost')
+            ? ($validated['campaign_ost_required'] ?? true)
+            : (bool) $parsed['ost']['required'];
+        $campaignCaption = $hasSent('campaign_caption')
+            ? $validated['campaign_caption']
+            : $parsed['caption']['verbatim'];
+        $campaignCaptionRequired = $hasSent('campaign_caption')
+            ? ($validated['campaign_caption_required'] ?? true)
+            : (bool) $parsed['caption']['required'];
+        $campaignHashtags = $hasSent('campaign_hashtags')
+            ? $validated['campaign_hashtags']
+            : (! empty($parsed['hashtags']) ? implode(' ', $parsed['hashtags']) : null);
+        $campaignHashtagsRequired = $hasSent('campaign_hashtags')
+            ? ($validated['campaign_hashtags_required'] ?? true)
+            : (bool) ($parsed['hashtags_required'] ?? false);
+        $requiredOst = ! empty($campaignOst) && $campaignOstRequired;
 
         return [
             'platform' => $validated['platform'],
@@ -591,23 +618,21 @@ class JobController extends Controller
             // Required/Optional flag (default Required when typed —
             // the wizard sends the flag explicitly; an API client
             // that omits it gets Required for a non-empty field).
+            // Batch 14: when the client sends no structured fields
+            // (the wizard sends only the brief now), they are
+            // derived from the parsed brief above — first OST choice,
+            // verbatim caption, hashtags — and the full parse is
+            // stored as campaign_parsed for the worker + job page.
+            // A client-sent structured field still wins.
             'campaign_brief' => $brief,
             'campaign_requirements' => $brief,
-            'campaign_caption' => $validated['campaign_caption'] ?? null,
-            'campaign_caption_required' => isset($validated['campaign_caption'])
-                && trim((string) $validated['campaign_caption']) !== ''
-                ? ($validated['campaign_caption_required'] ?? true)
-                : false,
-            'campaign_hashtags' => $validated['campaign_hashtags'] ?? null,
-            'campaign_hashtags_required' => isset($validated['campaign_hashtags'])
-                && trim((string) $validated['campaign_hashtags']) !== ''
-                ? ($validated['campaign_hashtags_required'] ?? true)
-                : false,
-            'campaign_ost' => $validated['campaign_ost'] ?? null,
-            'campaign_ost_required' => isset($validated['campaign_ost'])
-                && trim((string) $validated['campaign_ost']) !== ''
-                ? ($validated['campaign_ost_required'] ?? true)
-                : false,
+            'campaign_parsed' => $brief !== null ? $parsed : null,
+            'campaign_caption' => $campaignCaption,
+            'campaign_caption_required' => $campaignCaptionRequired,
+            'campaign_hashtags' => $campaignHashtags,
+            'campaign_hashtags_required' => $campaignHashtagsRequired,
+            'campaign_ost' => $campaignOst,
+            'campaign_ost_required' => $campaignOstRequired,
             'ost_hint' => $validated['ost_hint'] ?? null,
             'notes' => $validated['notes'] ?? null,
             'layout' => $validated['layout'] ?? 'center_crop',
@@ -808,9 +833,9 @@ class JobController extends Controller
      * brief checks (Batch 12). The brief lines the user flagged as
      * things to verify by eye are the ones the system CANNOT verify
      * itself (visual / subjective rules); the user ticks each one
-     * before submitting. Only lines from the job's own brief are
-     * accepted — a check id that is not a brief line is ignored, so
-     * a client can never invent a checked item.
+     * before submitting. Only checks derived from the job's own
+     * brief are accepted — a check id that is not one of them is
+     * ignored, so a client can never invent a checked item.
      */
     public function updateCampaignChecks(Request $request, ProcessingJob $job)
     {
@@ -822,10 +847,7 @@ class JobController extends Controller
             'manual_checks.*.checked' => ['required', 'boolean'],
         ]);
 
-        $brief = $job->settings['campaign_brief']
-            ?? $job->settings['campaign_requirements']
-            ?? null;
-        $fresh = CampaignChecklist::manualChecksFromBrief($brief);
+        $fresh = CampaignChecklist::manualChecksForJob($job->settings ?? []);
         $byId = [];
         foreach ($fresh as $check) {
             $byId[$check['id']] = $check;

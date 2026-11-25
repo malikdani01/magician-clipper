@@ -4981,5 +4981,141 @@ class Batch13LayoutRatioTests(unittest.TestCase):
             self._render("split", "4:5", tmp)
 
 
+class Batch14CampaignParsedTests(unittest.TestCase):
+    """Batch 14 (2026-11-25): the campaign brief is parsed by the
+    backend (CampaignBriefParser, PHP) and stored on the job as
+    settings.campaign_parsed — the worker reads the parse, it never
+    re-parses the raw brief. These tests cover the worker's side:
+    example-caption rotation, the required-caption precedence,
+    music-bed suppression when the brief forbids it, and the
+    one-shot reference-video analysis."""
+
+    DEMO = (Path(__file__).resolve().parents[3]
+            / "demo" / "demo-source-3min.mp4")
+
+    def _parsed_settings(self, **overrides):
+        settings = {
+            "campaign_parsed": {
+                "ost": {"required": True, "must_include": True,
+                        "choices": ["is you okay??",
+                                    "me leaving the function at 10:01",
+                                    "my calendar vs my bank account"]},
+                "caption": {"required": False, "verbatim": None,
+                            "examples": ["When the backflip does not go to plan",
+                                         "Me leaving before it gets weird",
+                                         "Some days you just ain’t got time"]},
+                "hashtags": [],
+                "audio": {"required": True, "links": []},
+                "reference_videos": [],
+                "music_allowed": False,
+            },
+            "campaign_ost": "is you okay??",
+            "campaign_ost_required": True,
+        }
+        settings.update(overrides)
+        return settings
+
+    # --- Example caption rotation -------------------------------------
+
+    def test_example_captions_rotate_across_clips(self):
+        settings = self._parsed_settings()
+        examples = ["When the backflip does not go to plan",
+                    "Me leaving before it gets weird",
+                    "Some days you just ain’t got time"]
+        for index, expected in [(0, examples[0]), (1, examples[1]),
+                                (2, examples[2]), (3, examples[0]),
+                                (4, examples[1])]:
+            out = muse_worker.apply_campaign_caption(
+                settings, "Derived Title", ["#clip"], clip_index=index)
+            self.assertEqual(out["post_caption"], expected,
+                             f"clip_index {index} should get {expected!r}")
+            self.assertEqual(out["caption_source"], "example")
+
+    def test_required_caption_still_wins_over_examples(self):
+        settings = self._parsed_settings(
+            campaign_caption="The exact required caption.",
+            campaign_caption_required=True)
+        out = muse_worker.apply_campaign_caption(
+            settings, "Derived Title", [], clip_index=1)
+        self.assertEqual(out["post_caption"], "The exact required caption.")
+        self.assertEqual(out["caption_source"], "required")
+
+    def test_auto_caption_when_no_examples_and_nothing_required(self):
+        settings = {"campaign_parsed": {"caption": {"examples": []}}}
+        out = muse_worker.apply_campaign_caption(
+            settings, "Derived Title", ["#clip"], clip_index=2)
+        self.assertEqual(out["post_caption"], "Derived Title")
+        self.assertEqual(out["caption_source"], "auto")
+
+    def test_required_ost_is_the_parsed_first_choice(self):
+        # The backend derives campaign_ost from the parse (first
+        # choice); the worker burns that derived value verbatim.
+        self.assertEqual(
+            muse_worker._required_campaign_ost(self._parsed_settings()),
+            "is you okay??")
+        self.assertIsNone(
+            muse_worker._required_campaign_ost(
+                self._parsed_settings(campaign_ost_required=False)))
+
+    # --- Music-bed suppression -----------------------------------------
+
+    def test_music_bed_suppressed_when_brief_forbids_it(self):
+        # The download must NEVER be attempted — the API raises if
+        # it is called at all.
+        class _Api:
+            def download_brand_asset(self, url, dest):
+                raise AssertionError("must not download when the brief forbids music")
+
+        job = {"id": 1, "music_bed_url": "http://x/bed",
+               "music_bed_name": "bed.mp3",
+               "settings": self._parsed_settings()}
+        path, name, note = muse_worker._download_music_bed(
+            _Api(), job, Path("/tmp"))
+        self.assertIsNone(path)
+        self.assertEqual(name, "bed.mp3")
+        self.assertIn("brief forbids background music", note)
+
+    def test_music_bed_attempted_when_brief_does_not_forbid_it(self):
+        class _Api:
+            def download_brand_asset(self, url, dest):
+                raise RuntimeError("HTTP 404")
+
+        job = {"id": 1, "music_bed_url": "http://x/bed",
+               "music_bed_name": "bed.mp3",
+               "settings": {"campaign_parsed": {"music_allowed": True}}}
+        path, name, note = muse_worker._download_music_bed(
+            _Api(), job, Path("/tmp"))
+        self.assertIsNone(path)
+        self.assertIn("download failed", note)
+
+    # --- Reference-video analysis --------------------------------------
+
+    def test_analyse_reference_file_on_demo(self):
+        if not self.DEMO.exists():
+            self.skipTest(f"demo source missing: {self.DEMO}")
+        out = muse_worker._analyse_reference_file(self.DEMO)
+        self.assertNotIn("error", out)
+        self.assertEqual(out["aspect"], "16:9")
+        self.assertEqual((out["width"], out["height"]), (1280, 720))
+        self.assertAlmostEqual(out["duration"], 170.02, delta=1.0)
+        self.assertTrue(out["has_audio"])
+        self.assertIsInstance(out["cuts"], int)
+        self.assertGreaterEqual(out["cuts"], 0)
+        self.assertGreater(out["avg_shot_seconds"], 0)
+
+    def test_analyse_reference_video_failure_is_an_error_not_a_raise(self):
+        class _Api:
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = muse_worker._analyse_reference_video(
+                _Api(), {"id": 1}, Path(tmp),
+                "https://example.invalid/reference.mp4")
+        self.assertEqual(out["url"], "https://example.invalid/reference.mp4")
+        self.assertIn("error", out)
+        self.assertIsInstance(out["error"], str)
+        self.assertTrue(out["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

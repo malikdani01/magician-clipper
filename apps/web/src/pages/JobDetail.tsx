@@ -48,6 +48,7 @@ import {
   retryJob,
   SELECTION_MODE_LABELS,
   SFX_LABELS,
+  type CampaignParsed,
   type CaptionPosition,
   type CaptionTranslation,
   type ClipLayout,
@@ -646,10 +647,11 @@ function SuggestionsCard({ job }: { job: Job }) {
  * Batch 12: one clip's attached post caption — the title, caption
  * and hashtags to post with the clip, with Copy buttons. Labelled
  * "Campaign required" when the caption came from the campaign's
- * Required field, "Auto-generated" when the worker derived it from
- * the clip's own transcript. Renders nothing when the clip has no
- * caption data at all (clips rendered before this batch, or silent
- * clips with no required caption).
+ * Required field, "Campaign example" (Batch 14) when it is one of
+ * the brief's example caption lines, "Auto-generated" when the
+ * worker derived it from the clip's own transcript. Renders nothing
+ * when the clip has no caption data at all (clips rendered before
+ * this batch, or silent clips with no required caption).
  */
 function PostCaptionCard({ clip }: { clip: JobClip }) {
   const title = clip.title_suggestion ?? clip.title
@@ -657,6 +659,7 @@ function PostCaptionCard({ clip }: { clip: JobClip }) {
   const caption = clip.post_caption ?? ''
   if (!clip.title_suggestion && caption === '' && hashtags.length === 0) return null
   const required = clip.caption_source === 'required'
+  const example = clip.caption_source === 'example'
   const allText = [title, caption, hashtags.join(' ')]
     .filter((p) => p !== '')
     .join('\n')
@@ -668,10 +671,12 @@ function PostCaptionCard({ clip }: { clip: JobClip }) {
           className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${
             required
               ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-              : 'border-ink-border bg-ink-panel2 text-[var(--color-text-muted)]'
+              : example
+                ? 'border-sky-500/40 bg-sky-500/10 text-sky-300'
+                : 'border-ink-border bg-ink-panel2 text-[var(--color-text-muted)]'
           }`}
         >
-          {required ? 'Campaign required' : 'Auto-generated'}
+          {required ? 'Campaign required' : example ? 'Campaign example' : 'Auto-generated'}
         </span>
       </div>
       <p className="mt-3 min-w-0 break-words text-sm font-medium text-white">{title}</p>
@@ -698,6 +703,170 @@ function PostCaptionCard({ clip }: { clip: JobClip }) {
         <CopyButton text={allText} label="Copy all" />
       </div>
     </div>
+  )
+}
+
+/**
+ * Batch 14: what the system read from the pasted brief — the
+ * deterministic parse (CampaignBriefParser), shown with priority
+ * (Required vs Optional). Only renders when the job has a parse
+ * (jobs created before this batch show the Batch 12 "Settings used"
+ * rail instead). Audio links are for posting time only — the worker
+ * never downloads or mixes campaign audio, so the user adds the
+ * official sound themselves when posting. The reference video was
+ * analysed once during the run; its measured pacing/aspect are in
+ * the job note.
+ */
+function ParsedBriefSection({
+  parsed,
+  appliedOst,
+}: {
+  parsed: CampaignParsed
+  appliedOst: string | null
+}) {
+  const ostChoices = parsed.ost.choices
+  const hasOst = ostChoices.length > 0
+  const hasCaption = parsed.caption.verbatim !== null || parsed.caption.examples.length > 0
+  const hasAudio = parsed.audio.links.length > 0
+  const hasReference = parsed.reference_videos.length > 0
+  const unparsedCount = parsed.unparsed.length
+  if (!hasOst && !hasCaption && parsed.hashtags.length === 0 && !hasAudio && !hasReference && parsed.music_allowed && unparsedCount === 0) {
+    return null
+  }
+  return (
+    <section className="rounded-2xl border border-ink-border bg-ink-panel p-6">
+      <h2 className="text-lg font-semibold text-white">What the system read from the brief</h2>
+      {parsed.title ? (
+        <p className="mt-1 text-xs text-[var(--color-text-muted)]">{parsed.title}</p>
+      ) : null}
+      <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+        Required items are followed strictly, optional items best-effort. The parser reads the
+        standard campaign format — it does not understand free-form prose the way a person would.
+      </p>
+      <div className="mt-4 space-y-4">
+        {hasOst ? (
+          <div>
+            <h3 className="text-sm font-semibold text-white">
+              On-screen text{' '}
+              <span className="text-xs font-medium text-emerald-300">
+                {parsed.ost.required ? 'Required' : 'Optional'}
+              </span>
+            </h3>
+            <ul className="mt-2 space-y-1">
+              {ostChoices.map((choice) => (
+                <li key={choice} className="flex items-start gap-2 text-sm text-white">
+                  <span className="mt-0.5 shrink-0 text-[var(--color-text-muted)]">•</span>
+                  <span className="min-w-0 break-words">
+                    {choice}
+                    {appliedOst === choice ? (
+                      <span className="ml-2 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">
+                        Applied to every clip
+                      </span>
+                    ) : null}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+              The first choice is burned verbatim on every clip; any of the lines above is accepted
+              by the checklist.
+            </p>
+          </div>
+        ) : null}
+        {hasCaption ? (
+          <div>
+            <h3 className="text-sm font-semibold text-white">
+              Post caption{' '}
+              <span className="text-xs font-medium text-emerald-300">
+                {parsed.caption.required ? 'Required' : 'Optional'}
+              </span>
+            </h3>
+            {parsed.caption.verbatim ? (
+              <p className="mt-2 break-words text-sm text-white">{parsed.caption.verbatim}</p>
+            ) : null}
+            {parsed.caption.examples.length > 0 ? (
+              <>
+                <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                  Example lines from the brief — rotated across clips:
+                </p>
+                <ul className="mt-1 space-y-1">
+                  {parsed.caption.examples.map((example) => (
+                    <li key={example} className="flex items-start gap-2 text-sm text-white">
+                      <span className="mt-0.5 shrink-0 text-[var(--color-text-muted)]">•</span>
+                      <span className="min-w-0 break-words">{example}</span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+        {parsed.hashtags.length > 0 ? (
+          <div>
+            <h3 className="text-sm font-semibold text-white">
+              Hashtags{' '}
+              <span className="text-xs font-medium text-emerald-300">
+                {parsed.hashtags_required ? 'Required' : 'Optional'}
+              </span>
+            </h3>
+            <p className="mt-2 break-words text-sm text-brand-light">{parsed.hashtags.join(' ')}</p>
+          </div>
+        ) : null}
+        {hasAudio ? (
+          <div>
+            <h3 className="text-sm font-semibold text-white">
+              Official sound{' '}
+              <span className="text-xs font-medium text-emerald-300">
+                {parsed.audio.required ? 'Required' : 'Optional'}
+              </span>
+            </h3>
+            <ul className="mt-2 space-y-2">
+              {parsed.audio.links.map((link) => (
+                <li key={link.url} className="flex items-start justify-between gap-3">
+                  <span className="min-w-0 flex-1 break-words text-sm text-white">
+                    <span className="font-medium">{link.label}:</span>{' '}
+                    <span className="text-[var(--color-text-muted)]">{link.url}</span>
+                  </span>
+                  <CopyButton text={link.url} label={`Copy ${link.label} link`} />
+                </li>
+              ))}
+            </ul>
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+              Add this sound yourself when you post — clips are delivered without the campaign audio.
+            </p>
+          </div>
+        ) : null}
+        {!parsed.music_allowed ? (
+          <p className="text-sm text-white">
+            Background music:{' '}
+            <span className="font-medium text-amber-300">NOT ALLOWED by the brief</span>
+            {' — no music bed was mixed into these clips.'}
+          </p>
+        ) : null}
+        {hasReference ? (
+          <div>
+            <h3 className="text-sm font-semibold text-white">Reference video</h3>
+            <ul className="mt-2 space-y-1">
+              {parsed.reference_videos.map((url) => (
+                <li key={url} className="break-words text-sm text-[var(--color-text-muted)]">
+                  {url}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+              Analysed once during the run — see the job note for the measured pacing and aspect.
+              Only measurable style signals are matched; creative choices cannot be copied by code.
+            </p>
+          </div>
+        ) : null}
+        {unparsedCount > 0 ? (
+          <p className="text-xs text-[var(--color-text-muted)]">
+            {unparsedCount} line{unparsedCount === 1 ? '' : 's'} from the brief could not be read
+            automatically — {unparsedCount === 1 ? 'it is' : 'they are'} a manual check below.
+          </p>
+        ) : null}
+      </div>
+    </section>
   )
 }
 
@@ -775,6 +944,9 @@ function CampaignSection({
 
   return (
     <div className="space-y-4">
+      {s.campaign_parsed ? (
+        <ParsedBriefSection parsed={s.campaign_parsed} appliedOst={s.campaign_ost ?? null} />
+      ) : null}
       {job.status === 'ready' && failedTotal > 0 ? (
         <div
           role="alert"

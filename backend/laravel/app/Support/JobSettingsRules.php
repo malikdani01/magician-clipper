@@ -161,7 +161,12 @@ class JobSettingsRules
             // Optional items are hints / auto-derived. The brief is
             // the same text campaign_requirements has always carried
             // (kept in sync in buildSettings for old clients).
+            // Batch 14: the wizard sends only the brief now — the
+            // structured fields are DERIVED from the parsed brief at
+            // creation, and the parse itself is stored as
+            // campaign_parsed (client-sent value is overwritten).
             'campaign_brief' => ['sometimes', 'nullable', 'string', 'max:5000'],
+            'campaign_parsed' => ['sometimes', 'nullable', 'array'],
             'campaign_caption' => ['sometimes', 'nullable', 'string', 'max:2200'],
             'campaign_caption_required' => ['sometimes', 'boolean'],
             'campaign_hashtags' => ['sometimes', 'nullable', 'string', 'max:1000'],

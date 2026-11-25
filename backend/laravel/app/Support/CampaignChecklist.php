@@ -57,11 +57,24 @@ class CampaignChecklist
      * The job's required campaign items, read from its stored
      * settings. A field only counts when it is non-empty AND its
      * Required/Optional selector is on Required.
+     *
+     * Batch 14: the wizard sends only the brief now — buildSettings
+     * derives these fields from the parsed brief (first OST choice,
+     * verbatim caption, hashtags), so this method reads the same
+     * fields for old and new jobs alike. `ost_choices` carries every
+     * parsed OST line: the burn may be any of them (the worker burns
+     * the first), so the OST check accepts any choice, not just the
+     * first.
      */
     public static function requiredItems(array $settings): array
     {
         $caption = trim((string) ($settings['campaign_caption'] ?? ''));
         $ost = trim((string) ($settings['campaign_ost'] ?? ''));
+        $parsed = $settings['campaign_parsed'] ?? null;
+        $choices = is_array($parsed) && isset($parsed['ost']['choices'])
+            && is_array($parsed['ost']['choices'])
+            ? array_values(array_filter($parsed['ost']['choices'], fn ($c) => is_string($c) && trim($c) !== ''))
+            : [];
 
         return [
             'caption' => $caption !== '' && ($settings['campaign_caption_required'] ?? false)
@@ -73,6 +86,7 @@ class CampaignChecklist
             'ost' => $ost !== '' && ($settings['campaign_ost_required'] ?? false)
                 ? $ost
                 : null,
+            'ost_choices' => $choices,
         ];
     }
 
@@ -109,7 +123,7 @@ class CampaignChecklist
             $items[] = self::hashtagsItem($required['hashtags'], $clips, $count);
         }
         if ($required['ost'] !== null) {
-            $items[] = self::ostItem($required['ost'], $clips, $count);
+            $items[] = self::ostItem($required['ost'], $required['ost_choices'] ?? [], $clips, $count);
         }
 
         $failed = count(array_filter($items, fn ($i) => ! $i['passed']));
@@ -190,17 +204,29 @@ class CampaignChecklist
             'note' => 'Missing '.$bad->map(fn ($b) => implode(' ', $b['missing']).' on '.$b['title'])->implode('; ').'.'];
     }
 
-    private static function ostItem(string $required, $clips, int $count): array
+    private static function ostItem(string $required, array $choices, $clips, int $count): array
     {
+        // Batch 14: the required text is the FIRST parsed choice, but
+        // any parsed choice line is an acceptable burn — show all of
+        // them as the requirement so the user sees what was allowed.
+        $shown = $choices !== [] ? $choices : $required;
         $base = [
             'key' => 'ost',
             'label' => 'Required on-screen text',
-            'required' => $required,
+            'required' => $shown,
         ];
         if ($count === 0) {
             return [...$base, 'passed' => false, 'note' => 'No clips rendered — nothing to check against.'];
         }
-        $bad = $clips->filter(fn ($c) => $c->ost_burned_text !== $required);
+        // Pass when every clip burned the required text — or, when
+        // the brief offered choices, any one of the parsed lines.
+        $bad = $clips->filter(function ($c) use ($required, $choices) {
+            $burned = $c->ost_burned_text;
+            if ($burned === $required) {
+                return false;
+            }
+            return ! ($choices !== [] && in_array($burned, $choices, true));
+        });
         if ($bad->isEmpty()) {
             return [...$base, 'passed' => true, 'note' => "Burned verbatim in all {$count} clip(s)."];
         }
@@ -238,6 +264,55 @@ class CampaignChecklist
         }
 
         return $checks;
+    }
+
+    /**
+     * Manual checks from the parsed brief (Batch 14): one per
+     * `manual_lines` entry — the lines the parser could not follow
+     * itself (instructions, hook windows, visual/subjective rules,
+     * posting facts). The id is the same stable md5 of the line text
+     * as manualChecksFromBrief, so a job created before Batch 14
+     * keeps its ticked state when its checks are re-derived.
+     */
+    public static function manualChecksFromParsed(array $parsed): array
+    {
+        $checks = [];
+        foreach ($parsed['manual_lines'] ?? [] as $text) {
+            $text = trim((string) $text);
+            if ($text === '') {
+                continue;
+            }
+            $checks[] = [
+                'id' => md5($text),
+                'text' => $text,
+                'checked' => false,
+            ];
+        }
+
+        return $checks;
+    }
+
+    /**
+     * The manual checks for a job's settings: the parsed brief wins
+     * when the job has one (Batch 14 — parsed lines only, so the
+     * auto-enforced items are not listed as manual work); otherwise
+     * every non-empty brief line, as Batch 12 did. All three call
+     * sites (creation x2, ready transition, PATCH) go through here
+     * so the fresh list — and therefore the accepted ids — can never
+     * drift apart.
+     */
+    public static function manualChecksForJob(array $settings): array
+    {
+        $parsed = $settings['campaign_parsed'] ?? null;
+        if (is_array($parsed) && ! empty($parsed['manual_lines'])) {
+            return self::manualChecksFromParsed($parsed);
+        }
+
+        return self::manualChecksFromBrief(
+            $settings['campaign_brief']
+                ?? $settings['campaign_requirements']
+                ?? null
+        );
     }
 
     /**

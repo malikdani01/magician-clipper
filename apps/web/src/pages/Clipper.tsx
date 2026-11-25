@@ -232,79 +232,6 @@ function Toggle({
 }
 
 /**
- * Batch 12: one structured campaign field — a label, a
- * Required/Optional selector (a real <select>, like the Batch 9
- * position dropdowns), the input itself, a live character counter
- * and a hint line. Required is the default when the user types;
- * the selector lets them flip a typed value to Optional.
- */
-function CampaignField({
-  label,
-  hint,
-  value,
-  required,
-  maxLength,
-  rows,
-  placeholder,
-  onValue,
-  onRequired,
-}: {
-  label: string
-  hint: string
-  value: string
-  required: boolean
-  maxLength: number
-  rows?: number
-  placeholder: string
-  onValue: (value: string) => void
-  onRequired: (value: boolean) => void
-}) {
-  const inputClass =
-    'mt-2 w-full rounded-xl border border-ink-border bg-ink-panel px-3 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)] focus:border-brand focus:outline-none'
-  return (
-    <label className="block">
-      <span className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-sm font-medium text-white">{label}</span>
-        <select
-          aria-label={`${label} — Required or Optional`}
-          value={required ? 'required' : 'optional'}
-          onChange={(e) => onRequired(e.target.value === 'required')}
-          className="rounded-lg border border-ink-border bg-ink-panel px-2 py-1 text-xs font-medium text-white focus:border-brand focus:outline-none"
-        >
-          <option value="required">Required</option>
-          <option value="optional">Optional</option>
-        </select>
-      </span>
-      {rows ? (
-        <textarea
-          value={value}
-          onChange={(e) => onValue(e.target.value)}
-          rows={rows}
-          maxLength={maxLength}
-          placeholder={placeholder}
-          className={inputClass}
-        />
-      ) : (
-        <input
-          type="text"
-          value={value}
-          onChange={(e) => onValue(e.target.value)}
-          maxLength={maxLength}
-          placeholder={placeholder}
-          className={inputClass}
-        />
-      )}
-      <span className="mt-1 flex items-center justify-between gap-2 text-xs text-[var(--color-text-muted)]">
-        <span>{hint}</span>
-        <span className="shrink-0 tabular-nums">
-          {value.length}/{maxLength}
-        </span>
-      </span>
-    </label>
-  )
-}
-
-/**
  * AI Clipper — 5-step wizard (Import → Style → Process → Review → Ship).
  *
  * Step 1 (Import) is REAL in Phase 2: a video file is previewed from an
@@ -831,31 +758,13 @@ export function ClipperPage() {
     if (typeof s.campaign_requirements === 'string') {
       patch.campaignRequirements = s.campaign_requirements
     }
-    // Batch 12: structured campaign fields — the brief prefers the
-    // new campaign_brief key, falling back to the old one.
+    // Batch 12: the brief prefers the new campaign_brief key,
+    // falling back to the old one. Batch 14: the structured fields
+    // are gone from the wizard — an old job/preset that still has
+    // them is loaded as brief-only (the backend re-derives them
+    // from the brief at creation).
     if (typeof s.campaign_brief === 'string' && s.campaign_brief) {
       patch.campaignRequirements = s.campaign_brief
-    }
-    if (typeof s.campaign_caption === 'string') {
-      patch.campaignCaption = s.campaign_caption
-    }
-    if (typeof s.campaign_caption_required === 'boolean') {
-      patch.campaignCaptionRequired = s.campaign_caption_required
-    }
-    if (typeof s.campaign_hashtags === 'string') {
-      patch.campaignHashtags = s.campaign_hashtags
-    }
-    if (typeof s.campaign_hashtags_required === 'boolean') {
-      patch.campaignHashtagsRequired = s.campaign_hashtags_required
-    }
-    if (typeof s.campaign_ost === 'string') {
-      patch.campaignOst = s.campaign_ost
-    }
-    if (typeof s.campaign_ost_required === 'boolean') {
-      patch.campaignOstRequired = s.campaign_ost_required
-    }
-    if (typeof s.ost_hint === 'string') {
-      patch.ostHint = s.ost_hint
     }
     if (
       s.layout === 'center_crop' ||
@@ -997,17 +906,12 @@ export function ClipperPage() {
     campaign_requirements: spec.campaignRequirements.trim()
       ? spec.campaignRequirements.trim()
       : null,
-    // Batch 12: structured campaign fields ride in presets too.
+    // Batch 12: the brief rides in presets too. Batch 14: only
+    // the brief — the structured fields are derived from the
+    // parse at creation.
     campaign_brief: spec.campaignRequirements.trim()
       ? spec.campaignRequirements.trim()
       : null,
-    campaign_caption: spec.campaignCaption.trim() ? spec.campaignCaption.trim() : null,
-    campaign_caption_required: spec.campaignCaptionRequired,
-    campaign_hashtags: spec.campaignHashtags.trim() ? spec.campaignHashtags.trim() : null,
-    campaign_hashtags_required: spec.campaignHashtagsRequired,
-    campaign_ost: spec.campaignOst.trim() ? spec.campaignOst.trim() : null,
-    campaign_ost_required: spec.campaignOstRequired,
-    ost_hint: spec.ostHint.trim() ? spec.ostHint.trim() : null,
     notes: null,
     layout: spec.layout,
     content_type: spec.contentType,
@@ -1107,13 +1011,6 @@ export function ClipperPage() {
       progressBar: spec.progressBar ?? false,
       jobType: spec.jobType,
       campaignRequirements: spec.campaignRequirements.trim(),
-      campaignCaption: spec.campaignCaption.trim(),
-      campaignCaptionRequired: spec.campaignCaptionRequired,
-      campaignHashtags: spec.campaignHashtags.trim(),
-      campaignHashtagsRequired: spec.campaignHashtagsRequired,
-      campaignOst: spec.campaignOst.trim(),
-      campaignOstRequired: spec.campaignOstRequired,
-      ostHint: spec.ostHint.trim(),
       // Batch 13: the chosen layout is stored for every ratio —
       // the worker renders it per ratio (only layouts that apply to
       // the ratio are offered, so nothing is silently discarded).
@@ -2766,92 +2663,41 @@ export function ClipperPage() {
                 </div>
                 {spec.jobType === 'campaign' ? (
                   <div className="mt-3 space-y-4 rounded-xl border border-ink-border bg-ink-panel2 p-4">
+                    {/* Batch 14: ONE box — the full campaign brief
+                        pasted from the campaign site (e.g. Genni).
+                        The backend reads it and extracts what it can
+                        follow (required vs optional, on-screen text,
+                        captions, hashtags, audio links); anything it
+                        cannot read becomes a manual check on the job
+                        page. The old per-item sections are gone — the
+                        user never fills them one by one. */}
                     <label className="block">
-                      <span className="text-sm font-medium text-white">Campaign requirements</span>
+                      <span className="text-sm font-medium text-white">Campaign informations</span>
                       <textarea
                         value={spec.campaignRequirements}
                         onChange={(e) => updateSpec({ campaignRequirements: e.target.value })}
-                        rows={4}
+                        rows={10}
                         maxLength={5000}
-                        placeholder="What must the clips do for this campaign? Tone, hooks, product moments, things to avoid…"
+                        placeholder="Paste the full campaign brief here — copied from the campaign site (e.g. Genni)…"
                         className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel px-3 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)] focus:border-brand focus:outline-none"
                       />
-                      <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
-                        Required for campaign jobs — the worker clips to this brief. Each line below
-                        becomes a manual check you tick on the job page before submitting.
+                      <span className="mt-1 flex items-center justify-between gap-2 text-xs text-[var(--color-text-muted)]">
+                        <span>
+                          The system reads the brief and follows required items strictly, optional
+                          items best-effort. Anything it cannot read becomes a manual check on the
+                          job page. It reads the standard campaign format — it does not understand
+                          free-form prose the way a person would.
+                        </span>
+                        <span className="shrink-0 tabular-nums">
+                          {spec.campaignRequirements.length}/5000
+                        </span>
                       </span>
                     </label>
-
-                    {/* Batch 12: structured campaign fields. Each one
-                        carries its own Required/Optional selector —
-                        Required is the default when you type; Required
-                        items are applied verbatim to every clip and
-                        checked by the server on completion. */}
-                    <CampaignField
-                      label="Required post caption"
-                      hint="The caption posted with every clip — verbatim when Required, auto-written per clip when Optional."
-                      value={spec.campaignCaption}
-                      required={spec.campaignCaptionRequired}
-                      maxLength={2200}
-                      rows={3}
-                      placeholder="The exact caption for the post…"
-                      onValue={(v) => updateSpec({ campaignCaption: v })}
-                      onRequired={(r) => updateSpec({ campaignCaptionRequired: r })}
-                    />
-                    <CampaignField
-                      label="Required hashtags"
-                      hint="Space ya comma se alag karein — Required hashtags come first in every clip, in this order."
-                      value={spec.campaignHashtags}
-                      required={spec.campaignHashtagsRequired}
-                      maxLength={1000}
-                      placeholder="#laptop #workflow #tech"
-                      onValue={(v) => updateSpec({ campaignHashtags: v })}
-                      onRequired={(r) => updateSpec({ campaignHashtagsRequired: r })}
-                    />
-                    <CampaignField
-                      label="Required on-screen text"
-                      hint="Burned verbatim onto every clip (60 chars max) — never translated, never re-worded."
-                      value={spec.campaignOst}
-                      required={spec.campaignOstRequired}
-                      maxLength={60}
-                      placeholder="NEW LAPTOP DROP"
-                      onValue={(v) =>
-                        updateSpec(
-                          spec.campaignOstRequired && v.trim()
-                            ? { campaignOst: v, onScreenText: true }
-                            : { campaignOst: v },
-                        )
-                      }
-                      onRequired={(r) =>
-                        updateSpec(
-                          r && spec.campaignOst.trim()
-                            ? { campaignOstRequired: r, onScreenText: true }
-                            : { campaignOstRequired: r },
-                        )
-                      }
-                    />
-                    {!spec.campaignOstRequired ? (
-                      <label className="block">
-                        <span className="text-sm font-medium text-white">OST hint</span>
-                        <input
-                          type="text"
-                          value={spec.ostHint}
-                          onChange={(e) => updateSpec({ ostHint: e.target.value })}
-                          maxLength={200}
-                          placeholder="e.g. question style"
-                          className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel px-3 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)] focus:border-brand focus:outline-none"
-                        />
-                        <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
-                          Only used when the on-screen text is Optional — the headline scorer prefers
-                          this style (e.g. a question). Optional text itself is the hint when this is empty.
-                        </span>
-                      </label>
-                    ) : null}
                   </div>
                 ) : null}
                 {campaignInvalid ? (
                   <p role="alert" className="mt-2 text-xs text-red-300">
-                    Describe the campaign requirements — the worker clips to that brief.
+                    Paste the campaign informations — the worker clips to that brief.
                   </p>
                 ) : null}
               </fieldset>
