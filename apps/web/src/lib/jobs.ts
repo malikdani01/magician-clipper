@@ -286,6 +286,10 @@ export interface JobSettings {
   /** Batch 3 export ratios (2026-11-25); absent means the job's own
    * aspect_ratio only. */
   export_ratios?: string[]
+  /** Batch 11 export tier (2026-11-25); absent means the Free 720p
+   * default — the server stores the plan's cap as
+   * max_export_height and the worker renders at that cap. */
+  export_quality?: '720p' | '1080p'
   /** Batch 4 logo overlay (2026-11-25); absent means OFF — the
    * worker treats a missing key as OFF. */
   logo_overlay?: boolean
@@ -366,6 +370,9 @@ export interface Job {
   hashtags?: string[] | null
   /** Batch 9: the music bed's original file name (null = no bed). */
   music_bed_name?: string | null
+  /** Batch 11: queue position + estimated wait (null on ready /
+   * failed / cancelled jobs — there is nothing to wait for). */
+  queue?: import('../components/QueueInfo').QueueInfoData | null
   settings: JobSettings | null
   source_type: 'upload' | 'link'
   source_url: string | null

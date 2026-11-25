@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
 import {
   CreditCard,
+  Crown,
   HelpCircle,
   History,
   LayoutDashboard,
@@ -36,6 +37,8 @@ const NAV_ITEMS: { to: string; labelKey: TranslationKey; icon: typeof LayoutDash
   { to: '/brand-kit', labelKey: 'navBrandKit', icon: Palette },
   { to: '/exports', labelKey: 'navExportHistory', icon: History },
   { to: '/usage', labelKey: 'navUsageCredits', icon: CreditCard },
+  // Batch 11: plans (current plan, limits, upgrade requests).
+  { to: '/plans', labelKey: 'navPlans', icon: Crown },
   { to: '/settings', labelKey: 'navSettings', icon: Settings },
   { to: '/help', labelKey: 'navHelpSupport', icon: HelpCircle },
 ] as const

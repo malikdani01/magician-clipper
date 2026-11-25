@@ -2208,6 +2208,47 @@ class Batch3Tests(unittest.TestCase):
                 30, ["9:16", "1:1", "16:9"]), 16)
         self.assertEqual(
             muse_worker.windows_per_ratio(3, ["9:16", "1:1"]), 3)
+
+    # --- Batch 11 export tiers ---
+
+    def test_capped_target_size_free_720p(self):
+        # The "p" number is the SHORT side: 720x1280 for 9:16,
+        # 1280x720 for 16:9, 720x720 for 1:1, 720x900 for 4:5.
+        self.assertEqual(
+            muse_worker.capped_target_size("9:16", 720), (720, 1280))
+        self.assertEqual(
+            muse_worker.capped_target_size("16:9", 720), (1280, 720))
+        self.assertEqual(
+            muse_worker.capped_target_size("1:1", 720), (720, 720))
+        self.assertEqual(
+            muse_worker.capped_target_size("4:5", 720), (720, 900))
+
+    def test_capped_target_size_paid_1080p_is_full(self):
+        self.assertEqual(
+            muse_worker.capped_target_size("9:16", 1080), (1080, 1920))
+        self.assertEqual(
+            muse_worker.capped_target_size("16:9", 1080), (1920, 1080))
+
+    def test_capped_target_size_missing_or_high_cap_is_full(self):
+        # Jobs made before Batch 11 carry no cap: full size.
+        self.assertEqual(
+            muse_worker.capped_target_size("9:16", None), (1080, 1920))
+        # A junk value never breaks the render either.
+        self.assertEqual(
+            muse_worker.capped_target_size("9:16", "bogus"), (1080, 1920))
+        # A cap above the short side never upscales.
+        self.assertEqual(
+            muse_worker.capped_target_size("9:16", 2160), (1080, 1920))
+
+    def test_export_maxrate_follows_tier(self):
+        # 1080p keeps the Batch 2 16 Mbps ceiling; 720p halves it.
+        # CRF 18 is untouched by the tier (checked in render_clip).
+        self.assertEqual(
+            muse_worker.export_maxrate(1080), ("16000k", "32000k"))
+        self.assertEqual(
+            muse_worker.export_maxrate(None), ("16000k", "32000k"))
+        self.assertEqual(
+            muse_worker.export_maxrate(720), ("8000k", "16000k"))
         self.assertEqual(muse_worker.windows_per_ratio(30, ["9:16"]), 30)
 
     def test_multi_ratio_renders_two_ratios(self):

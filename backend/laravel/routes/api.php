@@ -6,12 +6,14 @@ use App\Http\Controllers\Api\V1\BrandAssetController;
 use App\Http\Controllers\Api\V1\ClipController;
 use App\Http\Controllers\Api\V1\CloudStorageController;
 use App\Http\Controllers\Api\V1\ExportController;
+use App\Http\Controllers\Api\V1\GoogleAuthController;
 use App\Http\Controllers\Api\V1\InsightsController;
 use App\Http\Controllers\Api\V1\JobController;
 use App\Http\Controllers\Api\V1\JobPresetController;
 use App\Http\Controllers\Api\V1\MediaController;
 use App\Http\Controllers\Api\V1\MuseJobController;
 use App\Http\Controllers\Api\V1\NotificationController;
+use App\Http\Controllers\Api\V1\PlanController;
 use App\Http\Controllers\Api\V1\PlatformSettingsController;
 use App\Http\Controllers\Api\V1\ProjectController;
 use App\Http\Controllers\Api\V1\SettingsController;
@@ -41,12 +43,28 @@ Route::prefix('v1')->group(function () {
         ->middleware('throttle:10,1');
     Route::post('/auth/login', [AuthController::class, 'login'])
         ->middleware('throttle:10,1');
+    // Batch 11: Google sign-in (public). The redirect endpoint
+    // returns { redirect_url } or 422 google_not_configured when
+    // the keys are not set yet; the callback is where Google
+    // returns the user (it redirects on to the frontend).
+    Route::get('/auth/google/redirect', [GoogleAuthController::class, 'redirect'])
+        ->middleware('throttle:10,1');
+    Route::get('/auth/google/callback', [GoogleAuthController::class, 'callback'])
+        ->middleware('throttle:10,1');
 
     Route::middleware('auth:sanctum')->group(function () {
 
         Route::post('/auth/logout', [AuthController::class, 'logout']);
         Route::get('/me', [AuthController::class, 'me']);
         Route::get('/me/stats', [AuthController::class, 'stats']);
+
+        // Batch 11: plans — the active plans, my current plan +
+        // usage, and my plan requests.
+        Route::get('/plans', [PlanController::class, 'index']);
+        Route::get('/me/plan', [PlanController::class, 'myPlan']);
+        Route::get('/plan-requests', [PlanController::class, 'myRequests']);
+        Route::post('/plan-requests', [PlanController::class, 'requestPlan'])
+            ->middleware('throttle:6,1');
 
         // Batch 10: the platform view — limits, feature toggles, page
         // visibility, maintenance mode, announcement + this user's
@@ -152,6 +170,18 @@ Route::prefix('v1')->group(function () {
             Route::delete('/users/{user}', [AdminController::class, 'deleteUser']);
             Route::post('/users/{user}/reset-password', [AdminController::class, 'resetUserPassword']);
             Route::patch('/users/{user}/overrides', [AdminController::class, 'updateUserOverrides']);
+            // Batch 11: plans — CRUD, requests (approve/decline),
+            // assign to a user, revoke early. Manual activation
+            // only; there is no payment gateway.
+            Route::get('/plans', [AdminController::class, 'plans']);
+            Route::post('/plans', [AdminController::class, 'storePlan']);
+            Route::patch('/plans/{plan}', [AdminController::class, 'updatePlan']);
+            Route::delete('/plans/{plan}', [AdminController::class, 'deletePlan']);
+            Route::get('/plan-requests', [AdminController::class, 'planRequests']);
+            Route::post('/plan-requests/{planRequest}/approve', [AdminController::class, 'approvePlanRequest']);
+            Route::post('/plan-requests/{planRequest}/decline', [AdminController::class, 'declinePlanRequest']);
+            Route::post('/users/{user}/plans', [AdminController::class, 'assignPlan']);
+            Route::post('/user-plans/{userPlan}/revoke', [AdminController::class, 'revokeUserPlan']);
             Route::get('/projects', [AdminController::class, 'projects']);
             Route::delete('/projects/{project}', [AdminController::class, 'deleteProject']);
             Route::get('/jobs', [AdminController::class, 'jobs']);

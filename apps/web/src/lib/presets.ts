@@ -49,6 +49,9 @@ export interface PresetSettings {
   caption_translation: 'none' | TranslationLanguageCode
   /** Batch 3 export ratios (2026-11-25); default ['9:16']. */
   export_ratios: string[]
+  /** Batch 11 export tier (2026-11-25); absent on old presets,
+   * where the wizard keeps '720p'. */
+  export_quality?: '720p' | '1080p'
   /** Batch 4 logo overlay (2026-11-25); default OFF. */
   logo_overlay: boolean
   /** Batch 6 caption safe zone (2026-11-25); default ON. */

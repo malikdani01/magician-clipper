@@ -4,6 +4,7 @@ import { AppShell } from './layout/AppShell'
 import { AuthProvider } from './state/auth'
 import { PreferencesProvider } from './state/preferences'
 import { ProjectProvider } from './state/projects'
+import { AuthGoogleCallbackPage } from './pages/AuthGoogleCallback'
 import { BrandKitPage } from './pages/BrandKit'
 import { ClipperPage } from './pages/Clipper'
 import { DashboardPage } from './pages/Dashboard'
@@ -15,10 +16,12 @@ import { JobsPage } from './pages/Jobs'
 import { LibraryPage } from './pages/Library'
 import { LoginPage } from './pages/Login'
 import { NotFoundPage } from './pages/NotFound'
+import { PlansPage } from './pages/Plans'
 import { RegisterPage } from './pages/Register'
 import { SettingsPage } from './pages/Settings'
 import { UsagePage } from './pages/Usage'
 import { AdminDashboardPage, AdminGenericPage, AdminSettingsPage } from './pages/admin/AdminPages'
+import { AdminPlansPage, AdminPlanRequestsPage } from './pages/admin/AdminPlans'
 import { AdminClipsPage, AdminFailedJobsPage, AdminJobsPage, AdminProjectsPage, AdminUserDetailPage, AdminUsersPage } from './pages/admin/AdminUsers'
 import { AdminPlatformPage } from './pages/admin/AdminPlatform'
 import { AdminLogsPage, AdminMonitorPage, AdminNotificationsPage, AdminReportsPage } from './pages/admin/AdminSystem'
@@ -45,6 +48,8 @@ export function App() {
               {/* Auth pages — outside the app shell (no sidebar). */}
               <Route path="login" element={<LoginPage />} />
               <Route path="register" element={<RegisterPage />} />
+              {/* Batch 11: Google sign-in landing page (token/error in the query string). */}
+              <Route path="auth/google/callback" element={<AuthGoogleCallbackPage />} />
 
               {/* User panel */}
               <Route element={<AppShell />}>
@@ -61,6 +66,8 @@ export function App() {
                 <Route path="brand-kit" element={<BrandKitPage />} />
                 <Route path="exports" element={<ExportsPage />} />
                 <Route path="usage" element={<UsagePage />} />
+                {/* Batch 11: plans (current plan, limits, upgrade requests). */}
+                <Route path="plans" element={<PlansPage />} />
                 <Route path="settings" element={<SettingsPage />} />
                 <Route path="help" element={<HelpPage />} />
               </Route>
@@ -80,6 +87,9 @@ export function App() {
             <Route path="clips" element={<AdminClipsPage />} />
             <Route path="jobs" element={<AdminJobsPage />} />
             <Route path="failed-jobs" element={<AdminFailedJobsPage />} />
+            {/* Batch 11: plans (CRUD + assign) and plan requests (approve/decline). */}
+            <Route path="plans" element={<AdminPlansPage />} />
+            <Route path="plan-requests" element={<AdminPlanRequestsPage />} />
             <Route path="platform" element={<AdminPlatformPage />} />
             <Route
               path="payments"

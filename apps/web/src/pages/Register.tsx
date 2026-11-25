@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { UserPlus } from 'lucide-react'
+import { GoogleSignInButton } from '../components/GoogleSignInButton'
 import { useAuth } from '../state/auth'
 
 const inputClass =
@@ -54,7 +55,11 @@ export function RegisterPage() {
 
   return (
     <div className="mx-auto max-w-md">
-      <div className="rounded-2xl border border-ink-border bg-ink-panel p-6 sm:p-8">
+      <div className="overflow-hidden rounded-2xl border border-ink-border bg-ink-panel">
+        {/* Batch 11: Aurora accent — a plain linear gradient bar
+            (safe CSS: no conic gradients, no backdrop blur). */}
+        <div aria-hidden="true" className="h-1.5 bg-gradient-to-r from-violet-500 via-fuchsia-500 to-cyan-400" />
+        <div className="p-6 sm:p-8">
         <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-brand/15 text-brand-light">
           <UserPlus className="h-6 w-6" />
         </span>
@@ -73,7 +78,18 @@ export function RegisterPage() {
           </p>
         ) : null}
 
-        <form onSubmit={onSubmit} className="mt-6 space-y-4" noValidate>
+        {/* Batch 11: Google sign-in (keys come later — until then the
+            button shows the honest not-configured message). */}
+        <div className="mt-6">
+          <GoogleSignInButton />
+        </div>
+        <div className="my-5 flex items-center gap-3" aria-hidden="true">
+          <span className="h-px flex-1 bg-ink-border" />
+          <span className="text-xs text-[var(--color-text-muted)]">or create an account with email</span>
+          <span className="h-px flex-1 bg-ink-border" />
+        </div>
+
+        <form onSubmit={onSubmit} className="space-y-4" noValidate>
           <label className="block">
             <span className="text-sm font-medium text-white">Name</span>
             <input
@@ -140,6 +156,7 @@ export function RegisterPage() {
             Sign in
           </Link>
         </p>
+        </div>
       </div>
     </div>
   )

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { Briefcase, CheckCircle2, Clock, ListVideo, Loader2, Pencil, Search, Trash2, XCircle } from 'lucide-react'
 import { EmptyState } from '../components/EmptyState'
 import { JobStatusPill, jobSummary } from '../components/JobStatusPill'
+import { QueueInfo } from '../components/QueueInfo'
 import { PageHeader } from '../components/PageHeader'
 import { StatCard } from '../components/StatCard'
 import { formatDuration } from '../lib/format'
@@ -457,6 +458,10 @@ export function JobsPage() {
                             Stage: {job.stage}
                             {typeof job.progress === 'number' ? ` · ${job.progress}%` : ''}
                           </p>
+                        ) : null}
+                        {/* Batch 11: queue position + estimated wait. */}
+                        {(job.status === 'queued' || job.status === 'processing') && job.queue ? (
+                          <QueueInfo queue={job.queue} />
                         ) : null}
                       </div>
                       <div className="text-right text-xs text-[var(--color-text-muted)]">

@@ -4,12 +4,16 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Models\MediaAsset;
+use App\Models\Plan;
 use App\Models\ProcessingJob;
 use App\Models\Project;
+use App\Models\User;
 use App\Support\JobSettingsRules;
 use App\Support\MediaStorage;
 use App\Support\PlatformGate;
 use App\Support\PlatformSettings;
+use App\Support\PlanService;
+use App\Support\QueueEstimate;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -50,7 +54,15 @@ class JobController extends Controller
             ->latest()
             ->paginate(20);
 
-        $jobs->getCollection()->transform(fn ($job) => $job->toUserArray());
+        // Batch 11: queue position + estimated wait, from one shared
+        // snapshot so positions stay consistent across pages.
+        $snapshot = QueueEstimate::snapshot();
+        $jobs->getCollection()->transform(function ($job) use ($snapshot) {
+            $arr = $job->toUserArray();
+            $arr['queue'] = QueueEstimate::forJob($job, $snapshot);
+
+            return $arr;
+        });
 
         return response()->json($jobs);
     }
@@ -108,9 +120,9 @@ class JobController extends Controller
 
         // Settings rules live in JobSettingsRules so presets validate
         // against the exact same rules as job creation (no drift).
-        // Batch 10: the file-size cap and the clip-count cap come from
-        // the platform settings (admin-controlled), with the user's
-        // per-user clip override winning over the platform default.
+        // Batch 11: the clip-count cap is the user's EFFECTIVE cap —
+        // admin per-user override > plan > platform default
+        // (PlanService). The file-size cap stays platform-controlled.
         $validated = $request->validate(array_merge([
             'title' => ['sometimes', 'nullable', 'string', 'max:255'],
             'project_id' => ['sometimes', 'nullable', 'integer', 'exists:projects,id'],
@@ -119,7 +131,7 @@ class JobController extends Controller
             // Batch 9: optional music bed (mp3/wav/m4a, max 50 MB).
             // ffprobe-validated as audio in checkMusicBed below.
             'music_bed' => ['sometimes', 'file', 'mimes:mp3,wav,m4a', 'max:51200'],
-        ], JobSettingsRules::rules(PlatformSettings::maxClipsFor($user))));
+        ], JobSettingsRules::rules(PlanService::effectiveMaxClips($user))));
 
         $hasFile = $request->hasFile('file');
         $hasUrl = ! empty($validated['source_url']);
@@ -146,6 +158,19 @@ class JobController extends Controller
         }
         if (($limitError = PlatformGate::dailyLimit($user)) !== null) {
             return $limitError;
+        }
+        // Batch 11: the plan's lifetime clip total and the export
+        // tier are enforced the same way, before any file is stored.
+        $expectedRows = QueueEstimate::expectedClipRows([
+            'clip_count' => $validated['clip_count'],
+            'export_ratios' => $validated['export_ratios'] ?? null,
+            'aspect_ratio' => $validated['aspect_ratio'],
+        ]);
+        if (($clipsError = PlatformGate::totalClips($user, $expectedRows)) !== null) {
+            return $clipsError;
+        }
+        if (($tierError = PlatformGate::exportTier($user, $validated['export_quality'] ?? null)) !== null) {
+            return $tierError;
         }
 
         $project = null;
@@ -234,7 +259,7 @@ class JobController extends Controller
             ]);
         }
 
-        $settings = $this->buildSettings($validated, $sourceType, $sourceUrl, $sourcePath);
+        $settings = $this->buildSettings($validated, $sourceType, $sourceUrl, $sourcePath, $user);
 
         $job = ProcessingJob::create([
             'project_id' => $project->id,
@@ -289,7 +314,7 @@ class JobController extends Controller
             'files.*' => ['file', 'mimes:mp4,mov,mkv,webm', 'max:' . (PlatformSettings::limit('max_upload_mb') * 1024)],
             // Batch 9: one shared music bed for all bulk jobs.
             'music_bed' => ['sometimes', 'file', 'mimes:mp3,wav,m4a', 'max:51200'],
-        ], JobSettingsRules::rules(PlatformSettings::maxClipsFor($user))));
+        ], JobSettingsRules::rules(PlanService::effectiveMaxClips($user))));
 
         if (! empty($request->input('source_url'))) {
             return response()->json([
@@ -316,6 +341,19 @@ class JobController extends Controller
         $files = $request->file('files');
         if (($limitError = PlatformGate::dailyLimit($user, count($files))) !== null) {
             return $limitError;
+        }
+        // Batch 11: the plan total counts every file in the bulk
+        // request; the export tier is shared across all of them.
+        $expectedRows = QueueEstimate::expectedClipRows([
+            'clip_count' => $validated['clip_count'],
+            'export_ratios' => $validated['export_ratios'] ?? null,
+            'aspect_ratio' => $validated['aspect_ratio'],
+        ]) * count($files);
+        if (($clipsError = PlatformGate::totalClips($user, $expectedRows)) !== null) {
+            return $clipsError;
+        }
+        if (($tierError = PlatformGate::exportTier($user, $validated['export_quality'] ?? null)) !== null) {
+            return $tierError;
         }
 
         $project = null;
@@ -376,7 +414,7 @@ class JobController extends Controller
                 'status' => MediaAsset::STATUS_READY,
             ]);
 
-            $settings = $this->buildSettings($validated, 'upload', null, $relativePath);
+            $settings = $this->buildSettings($validated, 'upload', null, $relativePath, $user);
 
             $job = ProcessingJob::create([
                 'project_id' => $jobProject->id,
@@ -438,7 +476,7 @@ class JobController extends Controller
      * Defaults mirror the pre-feature behaviour for every key an
      * old client omits.
      */
-    private function buildSettings(array $validated, string $sourceType, ?string $sourceUrl, ?string $sourcePath): array
+    private function buildSettings(array $validated, string $sourceType, ?string $sourceUrl, ?string $sourcePath, User $user): array
     {
         return [
             'platform' => $validated['platform'],
@@ -519,6 +557,21 @@ class JobController extends Controller
             'layout' => $validated['layout'] ?? 'center_crop',
             'content_type' => $validated['content_type'] ?? 'general',
             'quality' => $validated['quality'] ?? 'standard',
+            // Batch 11: export tier. export_quality is what the user
+            // asked for (or their effective tier when omitted);
+            // max_export_height is the cap the worker renders at —
+            // computed SERVER-SIDE from the user's effective plan
+            // (min of requested and cap), never trusted from the
+            // client. The tier caps resolution + bitrate only; the
+            // Batch 2 base quality (CRF 18 etc.) is unchanged.
+            'export_quality' => $validated['export_quality']
+                ?? (PlanService::effectiveMaxExportHeight($user) >= 1080 ? '1080p' : '720p'),
+            'max_export_height' => min(
+                isset($validated['export_quality'])
+                    ? (Plan::TIER_HEIGHTS[$validated['export_quality']] ?? 720)
+                    : PHP_INT_MAX,
+                PlanService::effectiveMaxExportHeight($user),
+            ),
             'source_type' => $sourceType,
             'source_url' => $sourceUrl,
             'source_path' => $sourcePath,
@@ -622,7 +675,12 @@ class JobController extends Controller
 
         $job->load('clips');
 
-        return response()->json(['job' => $job->toUserArray()]);
+        // Batch 11: queue position + estimated wait (null once the
+        // job is terminal — there is nothing left to wait for).
+        $arr = $job->toUserArray();
+        $arr['queue'] = QueueEstimate::forJob($job);
+
+        return response()->json(['job' => $arr]);
     }
 
     /**

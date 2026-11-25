@@ -6,12 +6,16 @@ use App\Http\Controllers\Controller;
 use App\Models\AdminActivityLog;
 use App\Models\Clip;
 use App\Models\Notification;
+use App\Models\Plan;
+use App\Models\PlanRequest;
 use App\Models\ProcessingJob;
 use App\Models\Project;
 use App\Models\User;
+use App\Models\UserPlan;
 use App\Models\UserSetting;
 use App\Support\DatabaseBackup;
 use App\Support\MediaStorage;
+use App\Support\PlanService;
 use App\Support\StorageUsage;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -222,6 +226,11 @@ class AdminController extends Controller
                 'storage_bytes' => StorageUsage::totalBytes($user->id),
             ],
             'settings' => UserSetting::where('user_id', $user->id)->first(),
+            // Batch 11: the user's current plan + usage (Free when
+            // no active plan) and their plan history.
+            'plan' => PlanService::planSummary($user),
+            'user_plans' => $user->userPlans()->with('plan:id,name')
+                ->latest()->limit(10)->get(),
             'jobs' => $user->processingJobs()->with('clips:id,job_id')
                 ->latest()->limit(10)->get(['id', 'state', 'created_at']),
         ]);
@@ -1067,6 +1076,219 @@ class AdminController extends Controller
             array_values($patterns),
             $line
         );
+    }
+
+    // --- Plans (Batch 11: manual activation, no payment gateway) ---
+
+    /**
+     * GET /api/v1/admin/plans — every plan (active + inactive) with
+     * live counts: users currently on it and pending requests.
+     */
+    public function plans(Request $request)
+    {
+        $plans = Plan::withCount([
+            'userPlans as active_users' => fn ($q) => $q->where('status', UserPlan::STATUS_ACTIVE),
+            'planRequests as pending_requests' => fn ($q) => $q->where('status', PlanRequest::STATUS_PENDING),
+        ])->orderBy('id')->get();
+
+        return response()->json(['plans' => $plans]);
+    }
+
+    /** Shared plan create/update validation (admin only). On create the
+     * three core fields are required; on update they are `sometimes`
+     * so a partial PATCH (e.g. only {"active": false}) is valid. */
+    private function validatePlanPayload(Request $request, bool $forUpdate = false): array
+    {
+        $required = $forUpdate ? 'sometimes' : 'required';
+
+        return $request->validate([
+            'name' => [$required, 'string', 'max:100'],
+            'price_display' => [$required, 'string', 'max:100'],
+            'duration_days' => [$required, 'integer', 'min:1', 'max:3650'],
+            'total_clips' => ['sometimes', 'nullable', 'integer', 'min:1', 'max:1000000'],
+            'daily_clips' => ['sometimes', 'nullable', 'integer', 'min:1', 'max:1000'],
+            'max_export_quality' => ['sometimes', 'string', Rule::in(Plan::EXPORT_QUALITIES)],
+            'features' => ['sometimes', 'nullable', 'array'],
+            'features.*' => ['string', 'max:200'],
+            'active' => ['sometimes', 'boolean'],
+        ]);
+    }
+
+    /** POST /api/v1/admin/plans — create a plan. */
+    public function storePlan(Request $request)
+    {
+        $plan = Plan::create($this->validatePlanPayload($request));
+
+        AdminActivityLog::record($request->user(), 'plan.created', 'plan', $plan->id, [
+            'name' => $plan->name,
+        ]);
+
+        return response()->json(['plan' => $plan->fresh()], 201);
+    }
+
+    /** PATCH /api/v1/admin/plans/{plan} — edit a plan. New limits
+     * apply to the NEXT gated call immediately (enforcement reads
+     * the plan row live); already-granted user_plans keep their own
+     * ends_at and clips_used. */
+    public function updatePlan(Request $request, Plan $plan)
+    {
+        $plan->update($this->validatePlanPayload($request, true));
+
+        AdminActivityLog::record($request->user(), 'plan.updated', 'plan', $plan->id, [
+            'name' => $plan->name,
+        ]);
+
+        return response()->json(['plan' => $plan->fresh()]);
+    }
+
+    /**
+     * DELETE /api/v1/admin/plans/{plan} — delete a plan that was
+     * never bought. A plan with ANY user_plans history is blocked
+     * (deactivate it instead) — deleting it would orphan the
+     * purchase history; the FK restrictOnDelete is the backstop.
+     */
+    public function deletePlan(Request $request, Plan $plan)
+    {
+        if ($plan->userPlans()->exists()) {
+            return response()->json([
+                'error' => 'invalid_state',
+                'message' => 'This plan has been bought before — deactivate it instead of deleting it, so the purchase history stays intact.',
+            ], 422);
+        }
+
+        $plan->delete();
+
+        AdminActivityLog::record($request->user(), 'plan.deleted', 'plan', $plan->id, [
+            'name' => $plan->name,
+        ]);
+
+        return response()->json(['deleted' => true]);
+    }
+
+    /**
+     * GET /api/v1/admin/plan-requests — user requests, newest first.
+     * ?status=pending|approved|declined filters; default is all.
+     */
+    public function planRequests(Request $request)
+    {
+        $requests = PlanRequest::with(['user:id,name,email', 'plan:id,name,price_display,duration_days'])
+            ->when($request->filled('status'), fn ($q) => $q->where('status', $request->input('status')))
+            ->latest()
+            ->paginate(20);
+
+        return response()->json($requests);
+    }
+
+    /**
+     * POST /api/v1/admin/plan-requests/{planRequest}/approve — the
+     * admin confirmed the (off-app) payment: create the user_plan
+     * (starts now, ends now + plan duration) and mark the request
+     * approved. Any plan the user already has active ends early
+     * (PlanService::grantPlan supersedes it).
+     */
+    public function approvePlanRequest(Request $request, PlanRequest $planRequest)
+    {
+        if ($planRequest->status !== PlanRequest::STATUS_PENDING) {
+            return response()->json([
+                'error' => 'invalid_state',
+                'message' => "This request is already {$planRequest->status}.",
+            ], 422);
+        }
+
+        $userPlan = PlanService::grantPlan($planRequest->user, $planRequest->plan);
+        $planRequest->update(['status' => PlanRequest::STATUS_APPROVED]);
+
+        AdminActivityLog::record($request->user(), 'plan_request.approved', 'plan_request', $planRequest->id, [
+            'user_id' => $planRequest->user_id,
+            'plan' => $planRequest->plan->name,
+            'ends_at' => $userPlan->ends_at->toIso8601String(),
+        ]);
+
+        return response()->json([
+            'request' => $planRequest->fresh(),
+            'user_plan' => $userPlan->load('plan:id,name'),
+        ]);
+    }
+
+    /**
+     * POST /api/v1/admin/plan-requests/{planRequest}/decline — a
+     * reason is REQUIRED (the user sees it on their Plans page).
+     */
+    public function declinePlanRequest(Request $request, PlanRequest $planRequest)
+    {
+        if ($planRequest->status !== PlanRequest::STATUS_PENDING) {
+            return response()->json([
+                'error' => 'invalid_state',
+                'message' => "This request is already {$planRequest->status}.",
+            ], 422);
+        }
+
+        $validated = $request->validate([
+            'reason' => ['required', 'string', 'max:1000'],
+        ]);
+
+        $planRequest->update([
+            'status' => PlanRequest::STATUS_DECLINED,
+            'decline_reason' => $validated['reason'],
+        ]);
+
+        AdminActivityLog::record($request->user(), 'plan_request.declined', 'plan_request', $planRequest->id, [
+            'user_id' => $planRequest->user_id,
+            'plan' => $planRequest->plan->name,
+        ]);
+
+        return response()->json(['request' => $planRequest->fresh()]);
+    }
+
+    /**
+     * POST /api/v1/admin/users/{user}/plans — assign any plan to any
+     * user directly (no request needed). ends_at is optional: omit
+     * it for now + plan duration, or pass a custom end date.
+     */
+    public function assignPlan(Request $request, User $user)
+    {
+        $validated = $request->validate([
+            'plan_id' => ['required', 'integer', 'exists:plans,id'],
+            'ends_at' => ['sometimes', 'nullable', 'date', 'after:now'],
+        ]);
+
+        $plan = Plan::findOrFail($validated['plan_id']);
+        $endsAt = ! empty($validated['ends_at'])
+            ? new \DateTimeImmutable($validated['ends_at'])
+            : null;
+
+        $userPlan = PlanService::grantPlan($user, $plan, $endsAt);
+
+        AdminActivityLog::record($request->user(), 'plan.assigned', 'user_plan', $userPlan->id, [
+            'user_id' => $user->id,
+            'plan' => $plan->name,
+            'ends_at' => $userPlan->ends_at->toIso8601String(),
+        ]);
+
+        return response()->json(['user_plan' => $userPlan->load('plan:id,name')], 201);
+    }
+
+    /**
+     * POST /api/v1/admin/user-plans/{userPlan}/revoke — end a
+     * user's plan early. The user drops to Free immediately.
+     */
+    public function revokeUserPlan(Request $request, UserPlan $userPlan)
+    {
+        if ($userPlan->status !== UserPlan::STATUS_ACTIVE) {
+            return response()->json([
+                'error' => 'invalid_state',
+                'message' => "This plan is already {$userPlan->status}.",
+            ], 422);
+        }
+
+        PlanService::revokePlan($userPlan);
+
+        AdminActivityLog::record($request->user(), 'plan.revoked', 'user_plan', $userPlan->id, [
+            'user_id' => $userPlan->user_id,
+            'plan_id' => $userPlan->plan_id,
+        ]);
+
+        return response()->json(['user_plan' => $userPlan->fresh()->load('plan:id,name')]);
     }
 
     private function databaseOk(): bool

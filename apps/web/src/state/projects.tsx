@@ -65,6 +65,12 @@ export interface ClipSpec {
   /** Batch 3 export ratios (2026-11-25); default ['9:16'] — 9:16 is
    * always on, 1:1 and 16:9 are optional extras. */
   exportRatios: string[]
+  /** Batch 11 export tier (2026-11-25) — '720p' (Free) or '1080p'
+   * (paid plan). The tier caps resolution + bitrate only; the
+   * render quality (draft/standard/high) is separate. The server
+   * enforces the cap from the user's plan, so a stale '1080p'
+   * here is rejected at submit with an upgrade hint. */
+  exportQuality: '720p' | '1080p'
   /** Batch 4 logo overlay (2026-11-25); default OFF. */
   logoOverlay: boolean
   /** Batch 6 caption safe zone (2026-11-25); default ON — keep
@@ -134,6 +140,7 @@ export function defaultClipSpec(): ClipSpec {
     beatSync: true,
     captionTranslation: 'none',
     exportRatios: ['9:16'],
+    exportQuality: '720p',
     logoOverlay: false,
     captionSafeZone: true,
     ostPersistent: false,

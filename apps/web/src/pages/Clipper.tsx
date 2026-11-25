@@ -23,7 +23,7 @@ import {
 import { PageHeader } from '../components/PageHeader'
 import { LayoutPicker } from '../components/LayoutPicker'
 import { CaptionStylePicker, HeadlineStylePicker } from '../components/StylePicker'
-import { API_URL, ENGINE_URL, extractAudio, probeVideo, type ProbeResult } from '../lib/api'
+import { API_URL, ENGINE_URL, extractAudio, fetchMyPlan, probeVideo, type ProbeResult } from '../lib/api'
 import { formatBytes, formatDuration } from '../lib/format'
 import {
   CAPTION_LANGUAGES,
@@ -311,6 +311,21 @@ export function ClipperPage() {
   // with the job at submit. No file = no music bed.
   const [musicBed, setMusicBed] = useState<File | null>(null)
   const [musicBedError, setMusicBedError] = useState<string | null>(null)
+  // Batch 11: the user's export cap (720 Free / 1080 paid), from
+  // GET /me/plan. Null while loading — the 1080p option stays
+  // enabled until the cap is known, and the SERVER is the
+  // enforcement (a Free user submitting 1080p gets a 422 with an
+  // upgrade hint), so a slow load can never leak the tier.
+  const [maxExportHeight, setMaxExportHeight] = useState<number | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    void fetchMyPlan().then((summary) => {
+      if (!cancelled && summary) setMaxExportHeight(summary.limits.max_export_height)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
   const musicBedInputRef = useRef<HTMLInputElement>(null)
   // Batch 9: whether the user picked an OST position explicitly.
   // Until then, changing the headline style moves the position to
@@ -695,6 +710,12 @@ export function ClipperPage() {
       const mode = QUALITY_TO_PROCESSING_MODE[s.quality]
       if (mode) patch.processingMode = mode
     }
+    // Batch 11 (2026-11-25): export tier. An old preset without it
+    // keeps '720p'; a '1080p' preset on a Free account is rejected
+    // at submit by the server with an upgrade hint.
+    if (s.export_quality === '720p' || s.export_quality === '1080p') {
+      patch.exportQuality = s.export_quality
+    }
     // Batch 9: captions language (which language the speech is in).
     if (
       s.captions_language === 'english' ||
@@ -787,6 +808,9 @@ export function ClipperPage() {
     beat_sync: spec.beatSync ?? true,
     caption_translation: spec.captionTranslation ?? 'none',
     export_ratios: spec.exportRatios ?? ['9:16'],
+    // Batch 11: export tier (the server caps it from the plan —
+    // a Free user asking for 1080p gets a 422 + upgrade hint).
+    export_quality: spec.exportQuality ?? '720p',
     logo_overlay: spec.logoOverlay ?? false,
     caption_safe_zone: spec.captionSafeZone ?? true,
     ost_persistent: spec.ostPersistent ?? false,
@@ -2721,6 +2745,42 @@ export function ClipperPage() {
                 </select>
                 <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
                   Render quality for this job. High quality takes longer.
+                </span>
+              </label>
+
+              {/* Batch 11: export tier — 720p (Free) or 1080p (paid
+                  plan). The tier caps resolution + bitrate only; the
+                  render quality above is separate. 1080p is locked
+                  while the plan cap is 720p; the server enforces the
+                  same rule at submit. */}
+              <label className="block">
+                <span className="text-sm font-medium text-white">Export quality</span>
+                <select
+                  value={spec.exportQuality ?? '720p'}
+                  onChange={(e) => updateSpec({ exportQuality: e.target.value as ClipSpec['exportQuality'] })}
+                  aria-label="Export quality"
+                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
+                >
+                  <option value="720p">720p (Free)</option>
+                  <option value="1080p" disabled={maxExportHeight !== null && maxExportHeight < 1080}>
+                    1080p{maxExportHeight !== null && maxExportHeight < 1080 ? ' — locked' : ''}
+                  </option>
+                </select>
+                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
+                  {maxExportHeight !== null && maxExportHeight < 1080 ? (
+                    <>
+                      1080p needs a paid plan.{' '}
+                      <button
+                        type="button"
+                        onClick={() => navigate('/plans')}
+                        className="font-medium text-brand-light hover:underline"
+                      >
+                        See Plans to upgrade
+                      </button>
+                    </>
+                  ) : (
+                    'Free exports are capped at 720p; paid plans go to 1080p.'
+                  )}
                 </span>
               </label>
 

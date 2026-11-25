@@ -11,6 +11,7 @@ use App\Models\ProcessingJob;
 use App\Models\Project;
 use App\Models\UserSetting;
 use App\Support\MediaStorage;
+use App\Support\PlanService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
@@ -684,6 +685,10 @@ class MuseJobController extends Controller
             'variant_of_clip_id' => $variantOf?->id,
         ]);
 
+        // Batch 11: one rendered clip against the job owner's
+        // active plan (no-op on Free / expired plans).
+        PlanService::recordClipRendered($job);
+
         return response()->json(['clip' => $clip->fresh()], 201);
     }
 
@@ -1079,6 +1084,12 @@ class MuseJobController extends Controller
             'variant_of_clip_id' => $clip->id,
         ]);
         $rerender->update(['status' => ClipRerender::STATUS_READY, 'error_message' => null]);
+
+        // Batch 11: a Variant B is a new rendered clip row — it
+        // counts against the owner's active plan like a main clip.
+        if ($clip->job !== null) {
+            PlanService::recordClipRendered($clip->job);
+        }
 
         return response()->json([
             'clip' => $variant->fresh(),

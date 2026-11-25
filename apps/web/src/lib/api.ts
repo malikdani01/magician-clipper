@@ -602,3 +602,167 @@ export async function updateLaravelProject(
     cancel()
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Plans (Batch 11)                                                    */
+/* ------------------------------------------------------------------ */
+
+export interface PlanInfo {
+  id: number
+  name: string
+  price_display: string
+  duration_days: number
+  total_clips: number | null
+  daily_clips: number | null
+  max_export_quality: string
+  features: string[] | null
+  active: boolean
+}
+
+export interface MyPlanSummary {
+  current: {
+    name: string
+    price_display: string
+    plan_id?: number
+    user_plan_id?: number
+    starts_at?: string
+    ends_at?: string
+    clips_used: number | null
+    total_clips: number | null
+    clips_remaining: number | null
+    clips_reserved?: number
+    daily_clips: number | null
+    max_export_quality: string
+  }
+  limits: {
+    daily_limit: number | null
+    daily_limit_source: string
+    max_clips_per_job: number
+    max_export_height: number
+    total_clips_remaining: number | null
+  }
+  precedence: string
+}
+
+export interface PlanRequestInfo {
+  id: number
+  plan_id: number
+  note: string | null
+  status: string
+  decline_reason: string | null
+  created_at: string
+  plan?: { id: number; name: string; price_display: string }
+}
+
+/** GET /plans — the active plans a user can request. */
+export async function fetchPlans(): Promise<PlanInfo[]> {
+  if (!getToken()) return []
+  const { signal, cancel } = timeoutSignal(10000)
+  try {
+    const res = await fetch(`${API_URL}/plans`, { headers: laravelHeaders(), signal })
+    if (!res.ok) return []
+    const body = (await res.json()) as { plans?: unknown }
+    return Array.isArray(body.plans) ? (body.plans as PlanInfo[]) : []
+  } catch {
+    return []
+  } finally {
+    cancel()
+  }
+}
+
+/** GET /me/plan — my current plan + usage + effective limits. */
+export async function fetchMyPlan(): Promise<MyPlanSummary | null> {
+  if (!getToken()) return null
+  const { signal, cancel } = timeoutSignal(10000)
+  try {
+    const res = await fetch(`${API_URL}/me/plan`, { headers: laravelHeaders(), signal })
+    if (!res.ok) return null
+    return (await res.json()) as MyPlanSummary
+  } catch {
+    return null
+  } finally {
+    cancel()
+  }
+}
+
+/** GET /plan-requests — my plan requests, newest first. */
+export async function fetchMyPlanRequests(): Promise<PlanRequestInfo[]> {
+  if (!getToken()) return []
+  const { signal, cancel } = timeoutSignal(10000)
+  try {
+    const res = await fetch(`${API_URL}/plan-requests`, { headers: laravelHeaders(), signal })
+    if (!res.ok) return []
+    const body = (await res.json()) as { requests?: unknown }
+    return Array.isArray(body.requests) ? (body.requests as PlanRequestInfo[]) : []
+  } catch {
+    return []
+  } finally {
+    cancel()
+  }
+}
+
+/** POST /plan-requests — request a plan (admin approves it after confirming payment). */
+export async function requestPlan(
+  planId: number,
+  note?: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const { signal, cancel } = timeoutSignal(10000)
+  try {
+    const res = await fetch(`${API_URL}/plan-requests`, {
+      method: 'POST',
+      headers: { ...laravelHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plan_id: planId, ...(note ? { note } : {}) }),
+      signal,
+    })
+    const body: unknown = await res.json().catch(() => null)
+    if (!res.ok) return { ok: false, error: serverMessage(body, `Request failed (HTTP ${res.status})`) }
+    return { ok: true }
+  } catch {
+    return { ok: false, error: 'Backend is not reachable.' }
+  } finally {
+    cancel()
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Google sign-in (Batch 11)                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * GET /auth/google/redirect — the URL to send the user to. When the
+ * Google keys are not configured yet the backend answers 422
+ * google_not_configured; the caller shows that message instead of
+ * attempting any login — never a fake login.
+ */
+export async function googleRedirectUrl(): Promise<
+  | { ok: true; url: string }
+  | { ok: false; error: string; notConfigured: boolean }
+> {
+  const { signal, cancel } = timeoutSignal(10000)
+  try {
+    const res = await fetch(`${API_URL}/auth/google/redirect`, {
+      headers: laravelHeaders(false),
+      signal,
+    })
+    const body: unknown = await res.json().catch(() => null)
+    if (!res.ok) {
+      const b = body as { error?: string; message?: string } | null
+      return {
+        ok: false,
+        error:
+          (b && typeof b.message === 'string' && b.message) ||
+          `Google sign-in failed (HTTP ${res.status})`,
+        notConfigured: b?.error === 'google_not_configured',
+      }
+    }
+    const data = body as { redirect_url?: string }
+    if (!data.redirect_url) {
+      return { ok: false, error: 'Google sign-in returned no redirect URL.', notConfigured: false }
+    }
+    return { ok: true, url: data.redirect_url }
+  } catch {
+    return { ok: false, error: 'Backend is not reachable.', notConfigured: false }
+  } finally {
+    cancel()
+  }
+}

@@ -19,6 +19,7 @@ export type Theme = 'dark' | 'light'
 export type TranslationKey =
   | 'navDashboard'
   | 'navMyProjects'
+  | 'navPlans'
   | 'navVideoLibrary'
   | 'navAiClipper'
   | 'navMyJobs'
@@ -166,6 +167,7 @@ export type TranslationKey =
 const EN: Record<TranslationKey, string> = {
   navDashboard: 'Dashboard',
   navMyProjects: 'My Projects',
+  navPlans: 'Plans',
   navVideoLibrary: 'Video Library',
   navAiClipper: 'AI Clipper',
   navMyJobs: 'My Jobs',
@@ -316,6 +318,7 @@ const EN: Record<TranslationKey, string> = {
 const UR: Partial<Record<TranslationKey, string>> = {
   navDashboard: 'Dashboard',
   navMyProjects: 'Mere Projects',
+  navPlans: 'Plans',
   navVideoLibrary: 'Video Library',
   navAiClipper: 'AI Clipper',
   navMyJobs: 'Meri Jobs',

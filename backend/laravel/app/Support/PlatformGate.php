@@ -2,6 +2,7 @@
 
 namespace App\Support;
 
+use App\Models\Plan;
 use App\Models\ProcessingJob;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
@@ -99,11 +100,15 @@ class PlatformGate
     /**
      * Free daily limit: $newJobs more jobs today would exceed the
      * user's effective limit → 429 with the exact counts. Admins are
-     * exempt (dailyLimitFor returns null for them).
+     * exempt (effectiveDailyLimit returns null for them).
+     *
+     * Batch 11: the limit is the effective one — admin per-user
+     * override > active plan's daily_clips > Free platform default
+     * (see PlanService for the precedence).
      */
     public static function dailyLimit(User $user, int $newJobs = 1): ?JsonResponse
     {
-        $limit = PlatformSettings::dailyLimitFor($user);
+        $limit = PlanService::effectiveDailyLimit($user);
         if ($limit === null) {
             return null;
         }
@@ -119,6 +124,63 @@ class PlatformGate
                 'limit' => $limit,
                 'used_today' => $usedToday,
             ], 429);
+        }
+
+        return null;
+    }
+
+    /**
+     * Batch 11: a paid plan's lifetime clip total. $newClips more
+     * rendered clips would exceed the plan's remaining total → 429
+     * with the exact counts. Free users have no lifetime total (only
+     * the daily limit above), and a plan with total_clips = null is
+     * unlimited. Admins are exempt.
+     */
+    public static function totalClips(User $user, int $newClips): ?JsonResponse
+    {
+        if ($user->isAdmin()) {
+            return null;
+        }
+
+        $remaining = PlanService::effectiveLimits($user)['total_clips_remaining'];
+        if ($remaining === null) {
+            return null;
+        }
+
+        if ($newClips > $remaining) {
+            return response()->json([
+                'error' => 'plan_clips_exhausted',
+                'message' => "Your plan has {$remaining} clips left — this job would render {$newClips}. Upgrade or wait for your next plan.",
+                'clips_remaining' => $remaining,
+                'clips_requested' => $newClips,
+            ], 429);
+        }
+
+        return null;
+    }
+
+    /**
+     * Batch 11: export tier. A '1080p' request from a user whose
+     * effective cap is 720p → 422 naming the tier and the upgrade
+     * path. Free users are capped at 720p; the tier caps resolution
+     * and bitrate only (Batch 2 base quality is unchanged).
+     */
+    public static function exportTier(User $user, ?string $requestedQuality): ?JsonResponse
+    {
+        if ($requestedQuality === null || $requestedQuality === '720p') {
+            return null;
+        }
+
+        $cap = PlanService::effectiveMaxExportHeight($user);
+        $wanted = Plan::TIER_HEIGHTS[$requestedQuality] ?? 720;
+
+        if ($wanted > $cap) {
+            return response()->json([
+                'error' => 'export_tier_locked',
+                'message' => "1080p export needs a paid plan — your current tier caps exports at {$cap}p. See Plans to upgrade.",
+                'max_export_height' => $cap,
+                'requested' => $requestedQuality,
+            ], 422);
         }
 
         return null;

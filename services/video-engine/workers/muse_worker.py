@@ -177,6 +177,47 @@ def windows_per_ratio(requested: int, ratios: list[str]) -> int:
         return requested
     return min(requested, MAX_TOTAL_CLIPS // len(ratios))
 
+
+# Batch 11 export tiers: Free caps exports at 720p, paid plans at
+# 1080p. The "p" number is the SHORT side of the frame (720x1280
+# for 9:16, 1280x720 for 16:9). The job carries
+# settings["max_export_height"], set SERVER-SIDE from the user's
+# plan — never trusted from the client. A job without the setting
+# (made before Batch 11) renders at full size, unchanged.
+FULL_MAX_EXPORT_HEIGHT = 1080
+
+
+def capped_target_size(ratio: str, max_export_height) -> tuple[int, int]:
+    """Render target for a ratio under the plan's export cap.
+
+    Both dimensions scale down together (even-rounded, so libx264
+    accepts them) and the ratio stays exact. A cap at or above the
+    target's short side (or a missing/invalid cap) leaves the full
+    target untouched.
+    """
+    tw, th = RATIO_TARGETS.get(ratio, (1080, 1920))
+    try:
+        cap = FULL_MAX_EXPORT_HEIGHT if max_export_height is None else int(max_export_height)
+    except (TypeError, ValueError):
+        cap = FULL_MAX_EXPORT_HEIGHT
+    short = min(tw, th)
+    if cap <= 0 or cap >= short:
+        return tw, th
+    scale = cap / short
+    return (max(2, int(tw * scale) // 2 * 2),
+            max(2, int(th * scale) // 2 * 2))
+
+
+def export_maxrate(max_export_height) -> tuple[str, str]:
+    """Video bitrate ceiling for the tier: 16 Mbps at 1080p (Batch 2),
+    8 Mbps at 720p. The tier caps resolution + bitrate only — CRF 18
+    and the rest of the Batch 2 pipeline are unchanged."""
+    try:
+        cap = FULL_MAX_EXPORT_HEIGHT if max_export_height is None else int(max_export_height)
+    except (TypeError, ValueError):
+        cap = FULL_MAX_EXPORT_HEIGHT
+    return ("16000k", "32000k") if cap >= 1080 else ("8000k", "16000k")
+
 LANGUAGE_MAP = {"english": "en", "roman_urdu": "ur", "hindi": "hi", "auto": None}
 
 # Highlight scoring weights (documented, deterministic).
@@ -5069,7 +5110,9 @@ def render_clip(source: Path, clip: dict, settings: dict,
     before.
     """
     ratio = settings.get("aspect_ratio", "9:16")
-    tw, th = RATIO_TARGETS.get(ratio, (1080, 1920))
+    # Batch 11: the plan's export cap (720p Free / 1080p paid) —
+    # the short side of the frame, set server-side from the plan.
+    tw, th = capped_target_size(ratio, settings.get("max_export_height"))
     layout = (settings.get("layout") or "center_crop").lower()
     captions_on = bool(settings.get("captions_enabled", True))
     start, end = clip["start"], clip["end"]
@@ -5082,7 +5125,12 @@ def render_clip(source: Path, clip: dict, settings: dict,
              "end_card": False, "keyword_popups": 0,
              "keyword_popups_on": False, "lower_third": False,
              "progress_bar": False,
-             # Batch 9: colour grade applied ("none" when ungraded);
+             # Batch 11: export tier actually rendered (the job note
+            # reads these, never the settings) — the rendered frame
+            # size and whether the plan cap shrank it.
+            "export_size": f"{tw}x{th}",
+            "export_capped": capped_target_size(ratio, settings.get("max_export_height")) != RATIO_TARGETS.get(ratio, (1080, 1920)),
+            # Batch 9: colour grade applied ("none" when ungraded);
              # the job note reads this, never the settings.
              "colour_grade": "none",
              # Batch 9: music bed + SFX applied to this clip (the job
@@ -5566,10 +5614,13 @@ def render_clip(source: Path, clip: dict, settings: dict,
         cmd += ["-map", "0:a"]
         cmd += ["-af", "loudnorm=I=-14:TP=-1.5:LRA=11"]
         cmd += ["-c:a", "aac", "-b:a", "192k"]
-    # Batch 2: CRF 18 (was 20) with a 16 Mbps ceiling — visibly cleaner
-    # on busy gameplay, same preset so render time barely moves.
+    # Batch 2: CRF 18 (was 20) with a bitrate ceiling — visibly
+    # cleaner on busy gameplay, same preset so render time barely
+    # moves. Batch 11: the ceiling follows the export tier (16 Mbps
+    # at 1080p, 8 Mbps at 720p); CRF 18 itself never changes.
+    maxrate, bufsize = export_maxrate(settings.get("max_export_height"))
     cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-            "-maxrate", "16000k", "-bufsize", "32000k",
+            "-maxrate", maxrate, "-bufsize", bufsize,
             "-movflags", "+faststart", "-t", str(render_duration), str(out_path)]
     proc = run(cmd, timeout=1800)
     if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
@@ -5630,7 +5681,8 @@ def validate_clip(clip_path: Path, expected: dict, source_info: dict) -> dict:
                 f"Clip {clip_path.name} failed validation: duration "
                 f"{actual:.2f}s is below minimum {min_s:.0f}s."
             )
-    tw, th = RATIO_TARGETS.get(settings.get("aspect_ratio", "9:16"), (1080, 1920))
+    tw, th = capped_target_size(settings.get("aspect_ratio", "9:16"),
+                                settings.get("max_export_height"))
     if (info["width"], info["height"]) != (tw, th):
         raise RuntimeError(
             f"Clip {clip_path.name} failed validation: resolution "
@@ -6864,6 +6916,15 @@ def process_job(api: JobApi, job: dict) -> None:
             extra_notes.append(
                 f"Sound effects ({sfx_setting}): no trigger in these "
                 f"clips, so none sounded.")
+        # Batch 11: export tier — stated when the plan cap shrank
+        # the renders (720p Free tier). Full-size renders need no
+        # note: 1080p is the default expectation.
+        _capped_sizes = sorted({(c.get("_batch1_stats") or {}).get("export_size")
+                                for c in primary_rendered
+                                if (c.get("_batch1_stats") or {}).get("export_capped")} - {None})
+        if _capped_sizes:
+            extra_notes.append(
+                f"Exported at {', '.join(_capped_sizes)} (720p plan cap).")
         api.set_status(job_id, "Ready", stage="ready", progress=100,
                        note=_ready_note(clips, windows_requested, failed,
                                         rendered=primary_rendered,

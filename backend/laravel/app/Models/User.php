@@ -24,6 +24,8 @@ class User extends Authenticatable
         'role',
         'plan',
         'storage_quota_mb',
+        // Batch 11: Google sign-in link (null for password-only accounts).
+        'google_id',
         // Batch 10: admin-set suspension + per-user limit overrides.
         'suspended_at',
         'daily_limit_override',
@@ -97,5 +99,17 @@ class User extends Authenticatable
     public function brandAssets()
     {
         return $this->hasMany(BrandAsset::class);
+    }
+
+    /** Batch 11: bought plans (at most one active at a time). */
+    public function userPlans()
+    {
+        return $this->hasMany(UserPlan::class);
+    }
+
+    /** Batch 11: requests for paid plans. */
+    public function planRequests()
+    {
+        return $this->hasMany(PlanRequest::class);
     }
 }

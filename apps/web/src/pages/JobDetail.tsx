@@ -18,6 +18,7 @@ import { ClipFavouriteButton, ClipThumbnailPicker } from '../components/ClipActi
 import { ClipPlayerModal } from '../components/ClipPlayerModal'
 import { ClipThumbnail } from '../components/ClipThumbnail'
 import { JobStatusPill, jobSummary } from '../components/JobStatusPill'
+import { QueueInfo } from '../components/QueueInfo'
 import { PageHeader } from '../components/PageHeader'
 import { ScoreBreakdown } from '../components/ScoreBreakdown'
 import { ViralChecklist } from '../components/ViralChecklist'
@@ -936,6 +937,17 @@ export function JobDetailPage() {
                 The worker has not reported a measurable percentage for this
                 stage yet — showing the stage only, no estimated progress.
               </p>
+            ) : null}
+
+            {/* Batch 11: queue position + estimated wait (refreshes
+                with the 5s poll while the job is queued/processing). */}
+            {(job.status === 'queued' || job.status === 'processing') && job.queue ? (
+              <div className="mt-4 rounded-xl border border-ink-border bg-ink-panel2 px-4 py-3">
+                <QueueInfo queue={job.queue} />
+                {job.queue.status === 'queued' && job.queue.note ? (
+                  <p className="mt-1 text-xs text-[var(--color-text-muted)]">{job.queue.note}</p>
+                ) : null}
+              </div>
             ) : null}
 
             {job.status === 'failed' ? (

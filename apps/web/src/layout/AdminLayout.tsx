@@ -8,7 +8,9 @@ import {
   Coins,
   Cpu,
   CreditCard,
+  Crown,
   Eye,
+  FileText,
   FileWarning,
   Folder,
   Globe,
@@ -36,7 +38,7 @@ import { API_URL, engineHealth, getToken, type EngineHealth } from '../lib/api'
 import { useAuth } from '../state/auth'
 import { usePreferences } from '../state/preferences'
 
-/** The 21 admin nav items (prompt §8). */
+/** The 23 admin nav items (prompt §8). */
 const ADMIN_NAV_ITEMS = [
   { to: '/admin', label: 'Dashboard', icon: LayoutDashboard, end: true },
   { to: '/admin/users', label: 'Users Management', icon: Users },
@@ -44,6 +46,9 @@ const ADMIN_NAV_ITEMS = [
   { to: '/admin/clips', label: 'Generated Clips', icon: Clapperboard },
   { to: '/admin/jobs', label: 'Processing Jobs', icon: RefreshCw },
   { to: '/admin/failed-jobs', label: 'Failed Jobs', icon: FileWarning },
+  // Batch 11: plans (manual activation) + plan requests.
+  { to: '/admin/plans', label: 'Plans', icon: Crown },
+  { to: '/admin/plan-requests', label: 'Plan Requests', icon: FileText },
   { to: '/admin/payments', label: 'Payments & Billing', icon: CreditCard },
   { to: '/admin/subscriptions', label: 'Subscriptions', icon: Wallet },
   { to: '/admin/credits', label: 'Credits Management', icon: Coins },

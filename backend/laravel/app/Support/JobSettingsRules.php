@@ -106,6 +106,14 @@ class JobSettingsRules
             'caption_translation' => ['sometimes', 'string', Rule::in(array_merge(['none'], self::translationLanguages()))],
             'export_ratios' => ['sometimes', 'array', 'max:3'],
             'export_ratios.*' => ['string', Rule::in(['9:16', '1:1', '16:9'])],
+            // Batch 11 (2026-11-25): export tier — '720p' (Free) or
+            // '1080p' (paid plan). The tier caps resolution + bitrate
+            // only. The API rejects an above-tier request in
+            // PlatformGate::exportTier; the worker caps the render
+            // at settings.max_export_height (set server-side from
+            // the user's effective plan — never trusted from the
+            // client). Omitted = the user's effective tier.
+            'export_quality' => ['sometimes', 'string', Rule::in(['720p', '1080p'])],
             // Batch 6 (2026-11-25): caption safe zone (default ON) —
             // captions keep clear of TikTok's right action rail and
             // the bottom bar (worker caps the block at ~78% of frame

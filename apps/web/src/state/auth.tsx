@@ -37,6 +37,12 @@ interface AuthState {
   /** True when the Laravel backend answered its health check. */
   authAvailable: boolean
   login: (email: string, password: string) => Promise<{ ok: boolean; error?: string; user?: AuthUser }>
+  /**
+   * Batch 11: finish a Google sign-in. The callback page hands over
+   * the Sanctum token Google's callback produced; this verifies it
+   * against GET /api/v1/me and stores the session like a login.
+   */
+  loginWithToken: (token: string) => Promise<{ ok: boolean; error?: string; user?: AuthUser }>
   register: (
     name: string,
     email: string,
@@ -173,6 +179,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [],
   )
 
+  const loginWithToken = useCallback(async (token: string) => {
+    setToken(token)
+    const me = await laravelMe()
+    const authUser = normalizeUser(me)
+    if (!authUser) {
+      setToken(null)
+      return { ok: false as const, error: 'Google sign-in succeeded but the server returned an unusable account.' }
+    }
+    storeSession(token, authUser)
+    setTokenState(token)
+    setUser(authUser)
+    return { ok: true as const, user: authUser }
+  }, [])
+
   const logout = useCallback(() => {
     void laravelLogout().catch(() => {
       // Logout is best-effort: the local session is cleared regardless.
@@ -194,8 +214,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const value = useMemo<AuthState>(
-    () => ({ user, token, loading, authAvailable, login, register, logout, refreshUser }),
-    [user, token, loading, authAvailable, login, register, logout, refreshUser],
+    () => ({ user, token, loading, authAvailable, login, loginWithToken, register, logout, refreshUser }),
+    [user, token, loading, authAvailable, login, loginWithToken, register, logout, refreshUser],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
