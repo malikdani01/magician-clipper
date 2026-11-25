@@ -77,6 +77,16 @@ class PlatformGate
         if (($validated['on_screen_text'] ?? false) === true && ! PlatformSettings::feature('on_screen_text')) {
             return $deny('on_screen_text', 'On-screen text is disabled by the admin.');
         }
+        // Batch 12: a REQUIRED on-screen text implies on-screen
+        // text is on (buildSettings forces it) — so it must pass
+        // the same gate, or a campaign job could silently re-enable
+        // a feature the admin turned off. A client that sends OST
+        // text without the flag gets Required, same as buildSettings.
+        $requiredOst = ! empty($validated['campaign_ost'])
+            && ($validated['campaign_ost_required'] ?? true);
+        if ($requiredOst && ! PlatformSettings::feature('on_screen_text')) {
+            return $deny('on_screen_text', 'On-screen text is disabled by the admin.');
+        }
         if (($validated['beat_sync'] ?? false) === true && ! PlatformSettings::feature('beat_sync')) {
             return $deny('beat_sync', 'Beat sync is disabled by the admin.');
         }

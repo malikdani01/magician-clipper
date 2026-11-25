@@ -309,6 +309,20 @@ export interface JobSettings {
   progress_bar?: boolean
   job_type: 'myself' | 'campaign'
   campaign_requirements: string | null
+  /** Batch 12 structured campaign requirements (2026-11-25) — the
+   * full brief plus three fields that each carry their own
+   * Required/Optional flag. Required items are applied verbatim by
+   * the worker (caption, hashtags first, OST burned) and never
+   * translated; Optional items are hints / auto-derived. The
+   * ost_hint is used only when the OST is Optional. */
+  campaign_brief?: string | null
+  campaign_caption?: string | null
+  campaign_caption_required?: boolean
+  campaign_hashtags?: string | null
+  campaign_hashtags_required?: boolean
+  campaign_ost?: string | null
+  campaign_ost_required?: boolean
+  ost_hint?: string | null
   /** Free-text notes for Muse (campaign brief, extra instructions). */
   notes?: string | null
   layout: ClipLayout
@@ -348,7 +362,41 @@ export interface JobClip {
    * Variant A clip id it was rendered from (null = original). */
   face_tracked?: boolean
   variant_of_clip_id?: number | null
+  /** Batch 12: per-clip campaign attachment — the clip's own title +
+   * hashtags (derived from its own transcript), its post caption
+   * (required verbatim or auto-derived), where the caption came
+   * from, the exact OST text actually burned, and which required
+   * items this clip applied. Null on clips rendered before this
+   * batch. */
+  title_suggestion?: string | null
+  hashtags?: string[] | null
+  post_caption?: string | null
+  caption_source?: 'required' | 'auto' | null
+  ost_burned_text?: string | null
+  required_items_applied?: string[] | null
   created_at: string
+}
+
+export interface CampaignChecklistItem {
+  key: 'caption' | 'hashtags' | 'ost'
+  label: string
+  /** The exact required text (or the required hashtag list). */
+  required: string | string[]
+  passed: boolean
+  note: string
+}
+
+export interface CampaignChecklistData {
+  items: CampaignChecklistItem[]
+  all_passed: boolean
+  failed_count: number
+  checked_at: string
+}
+
+export interface ManualCheck {
+  id: string
+  text: string
+  checked: boolean
 }
 
 export interface Job {
@@ -370,6 +418,11 @@ export interface Job {
   hashtags?: string[] | null
   /** Batch 9: the music bed's original file name (null = no bed). */
   music_bed_name?: string | null
+  /** Batch 12: campaign compliance checklist (null when the job has
+   * no required campaign items) and the manual brief checks the
+   * user ticks by hand. */
+  campaign_checklist?: CampaignChecklistData | null
+  campaign_manual_checks?: ManualCheck[] | null
   /** Batch 11: queue position + estimated wait (null on ready /
    * failed / cancelled jobs — there is nothing to wait for). */
   queue?: import('../components/QueueInfo').QueueInfoData | null
@@ -460,6 +513,17 @@ export interface CreateJobInput {
   progressBar: boolean
   jobType: 'myself' | 'campaign'
   campaignRequirements?: string
+  /** Batch 12 structured campaign fields (2026-11-25). Each text
+   * field carries its own Required/Optional flag (default Required
+   * when typed); the OST hint is used only when the OST is
+   * Optional. */
+  campaignCaption?: string
+  campaignCaptionRequired?: boolean
+  campaignHashtags?: string
+  campaignHashtagsRequired?: boolean
+  campaignOst?: string
+  campaignOstRequired?: boolean
+  ostHint?: string
   /** Free-text notes for Muse (campaign brief, extra instructions). */
   notes?: string
   layout: ClipLayout
@@ -577,6 +641,24 @@ function appendSettingsForm(form: FormData, input: CreateJobInput): void {
   form.append('job_type', input.jobType)
   if (input.jobType === 'campaign' && input.campaignRequirements) {
     form.append('campaign_requirements', input.campaignRequirements)
+    form.append('campaign_brief', input.campaignRequirements)
+  }
+  if (input.jobType === 'campaign') {
+    if (input.campaignCaption?.trim()) {
+      form.append('campaign_caption', input.campaignCaption.trim().slice(0, 2200))
+      form.append('campaign_caption_required', String(input.campaignCaptionRequired ?? true))
+    }
+    if (input.campaignHashtags?.trim()) {
+      form.append('campaign_hashtags', input.campaignHashtags.trim().slice(0, 1000))
+      form.append('campaign_hashtags_required', String(input.campaignHashtagsRequired ?? true))
+    }
+    if (input.campaignOst?.trim()) {
+      form.append('campaign_ost', input.campaignOst.trim().slice(0, 60))
+      form.append('campaign_ost_required', String(input.campaignOstRequired ?? true))
+    }
+    if (input.ostHint?.trim()) {
+      form.append('ost_hint', input.ostHint.trim().slice(0, 200))
+    }
   }
   if (input.notes) {
     form.append('notes', input.notes)
@@ -650,6 +732,30 @@ export async function createJob(input: CreateJobInput): Promise<JobResult> {
           job_type: input.jobType,
           campaign_requirements:
             input.jobType === 'campaign' ? (input.campaignRequirements ?? null) : null,
+          campaign_brief:
+            input.jobType === 'campaign' ? (input.campaignRequirements ?? null) : null,
+          campaign_caption:
+            input.jobType === 'campaign' && input.campaignCaption?.trim()
+              ? input.campaignCaption.trim().slice(0, 2200)
+              : null,
+          campaign_caption_required:
+            input.jobType === 'campaign' ? (input.campaignCaptionRequired ?? true) : false,
+          campaign_hashtags:
+            input.jobType === 'campaign' && input.campaignHashtags?.trim()
+              ? input.campaignHashtags.trim().slice(0, 1000)
+              : null,
+          campaign_hashtags_required:
+            input.jobType === 'campaign' ? (input.campaignHashtagsRequired ?? true) : false,
+          campaign_ost:
+            input.jobType === 'campaign' && input.campaignOst?.trim()
+              ? input.campaignOst.trim().slice(0, 60)
+              : null,
+          campaign_ost_required:
+            input.jobType === 'campaign' ? (input.campaignOstRequired ?? true) : false,
+          ost_hint:
+            input.jobType === 'campaign' && input.ostHint?.trim()
+              ? input.ostHint.trim().slice(0, 200)
+              : null,
           notes: input.notes ?? null,
           layout: input.layout,
           content_type: input.contentType,
@@ -941,6 +1047,53 @@ export async function cancelJob(id: number): Promise<JobResult> {
 
 export async function retryJob(id: number): Promise<JobResult> {
   return postJobAction(id, 'retry')
+}
+
+/**
+ * Batch 12: tick the manual campaign brief checks
+ * (PATCH /api/v1/jobs/{id}/campaign-checks). Only brief lines the
+ * server knows can be ticked — an unknown id is ignored there.
+ */
+export async function updateCampaignChecks(
+  id: number,
+  manualChecks: ManualCheck[],
+): Promise<JobResult> {
+  if (!getToken()) {
+    return { ok: false, error: 'Sign in to do that.' }
+  }
+  const { signal, cancel } = timeoutSignal(15000)
+  try {
+    const res = await fetch(`${API_URL}/jobs/${id}/campaign-checks`, {
+      method: 'PATCH',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        manual_checks: manualChecks.map((c) => ({ id: c.id, checked: c.checked })),
+      }),
+      signal,
+    })
+    const body: unknown = await res.json().catch(() => null)
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: serverMessage(body, `Could not save the manual checks (HTTP ${res.status})`),
+        status: res.status,
+      }
+    }
+    const job = (body as { job?: Job }).job
+    if (!job || typeof job.id !== 'number') {
+      return { ok: false, error: 'The server did not return the updated job.' }
+    }
+    return { ok: true, job }
+  } catch (err) {
+    return {
+      ok: false,
+      error: isUnreachable(err)
+        ? 'Could not reach the server — check your connection and try again.'
+        : `Could not save the manual checks (${err instanceof Error ? err.message : 'unknown error'})`,
+    }
+  } finally {
+    cancel()
+  }
 }
 
 async function postJobAction(id: number, action: 'cancel' | 'retry'): Promise<JobResult> {

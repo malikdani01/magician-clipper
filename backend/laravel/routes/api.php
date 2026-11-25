@@ -94,6 +94,8 @@ Route::prefix('v1')->group(function () {
         Route::get('/jobs/{job}', [JobController::class, 'show']);
         Route::post('/jobs/{job}/cancel', [JobController::class, 'cancel']);
         Route::post('/jobs/{job}/retry', [JobController::class, 'retry']);
+        // Batch 12: tick the manual campaign brief checks.
+        Route::patch('/jobs/{job}/campaign-checks', [JobController::class, 'updateCampaignChecks']);
 
         // --- Job presets (saved job settings) ---
         Route::get('/presets', [JobPresetController::class, 'index']);

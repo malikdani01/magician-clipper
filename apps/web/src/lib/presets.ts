@@ -67,6 +67,17 @@ export interface PresetSettings {
   progress_bar: boolean
   job_type: 'myself' | 'campaign'
   campaign_requirements: string | null
+  /** Batch 12 structured campaign requirements (2026-11-25) — the
+   * full brief plus three fields that each carry their own
+   * Required/Optional flag, plus the OST hint. */
+  campaign_brief?: string | null
+  campaign_caption?: string | null
+  campaign_caption_required?: boolean
+  campaign_hashtags?: string | null
+  campaign_hashtags_required?: boolean
+  campaign_ost?: string | null
+  campaign_ost_required?: boolean
+  ost_hint?: string | null
   notes: string | null
   layout: ClipLayout
   content_type: string

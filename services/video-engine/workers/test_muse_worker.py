@@ -4333,5 +4333,186 @@ class OstLanguageBatch9Tests(unittest.TestCase):
         self.assertEqual(out[0]["text"], "hola mundo")
 
 
+class CampaignBatch12Tests(unittest.TestCase):
+    """Batch 12 (2026-11-25): campaign requirements — structured
+    Required/Optional fields, required items applied verbatim, the
+    OST hint steering the headline scorer, and per-clip title +
+    hashtag derivation from each clip's own spoken words."""
+
+    def _clip(self):
+        return {"start": 10.0, "end": 32.0}
+
+    def _segs(self):
+        return [
+            _segment(10.0, 20.0, "we climb to the highest point of the tower"),
+            _segment(22.0, 32.0, "why is this view insane guys tell me"),
+        ]
+
+    # --- Required OST -------------------------------------------------
+
+    def test_required_ost_verbatim_wins_over_brief_and_transcript(self):
+        settings = {
+            "campaign_ost": "NEW LAPTOP DROP",
+            "campaign_ost_required": True,
+            "campaign_requirements": "On-screen text: FROM THE BRIEF",
+            "notes": "",
+        }
+        self.assertEqual(
+            muse_worker.derive_on_screen_text(self._clip(), self._segs(), settings),
+            "NEW LAPTOP DROP")
+
+    def test_required_ost_capped_at_60_chars(self):
+        settings = {"campaign_ost": "X" * 80, "campaign_ost_required": True}
+        headline = muse_worker.derive_on_screen_text(
+            self._clip(), self._segs(), settings)
+        self.assertIsNotNone(headline)
+        self.assertLessEqual(len(headline), 60)
+
+    def test_optional_ost_is_not_binding(self):
+        # Optional OST text is a hint, not a burn-in: the transcript
+        # headline wins (the brief carries no explicit line here).
+        settings = {"campaign_ost": "NEW LAPTOP DROP",
+                    "campaign_ost_required": False,
+                    "campaign_requirements": "", "notes": ""}
+        headline = muse_worker.derive_on_screen_text(
+            self._clip(), self._segs(), settings)
+        self.assertNotEqual(headline, "NEW LAPTOP DROP")
+        self.assertEqual(headline, "CLIMB TO THE HIGHEST POINT")
+
+    def test_required_ost_helper_returns_none_when_optional(self):
+        self.assertIsNone(muse_worker._required_campaign_ost(
+            {"campaign_ost": "TEXT", "campaign_ost_required": False}))
+        self.assertIsNone(muse_worker._required_campaign_ost({}))
+        self.assertEqual(muse_worker._required_campaign_ost(
+            {"campaign_ost": "TEXT", "campaign_ost_required": True}), "TEXT")
+
+    # --- OST hint ------------------------------------------------------
+
+    def test_hint_type_classification(self):
+        self.assertEqual(muse_worker._hint_type("question style"), "question")
+        self.assertEqual(muse_worker._hint_type("Make it a question?"), "question")
+        self.assertEqual(muse_worker._hint_type("statement"), "statement")
+        self.assertEqual(muse_worker._hint_type("shout it!"), "exclamation")
+        self.assertIsNone(muse_worker._hint_type("casual vibe"))
+        self.assertIsNone(muse_worker._hint_type(None))
+
+    def test_hint_question_steers_headline_choice(self):
+        # Without a hint the scorer picks the declarative phrase; a
+        # "question style" hint flips the pick to the question
+        # phrase (its leading stopwords are trimmed by the Batch 9
+        # edge rule, so the headline reads "VIEW INSANE GUYS").
+        self.assertEqual(
+            muse_worker.derive_on_screen_text(self._clip(), self._segs(), {}),
+            "CLIMB TO THE HIGHEST POINT")
+        self.assertEqual(
+            muse_worker.derive_on_screen_text(
+                self._clip(), self._segs(), {"ost_hint": "question style"}),
+            "VIEW INSANE GUYS")
+        self.assertEqual(
+            muse_worker.derive_on_screen_text(
+                self._clip(), self._segs(), {"ost_hint": "statement"}),
+            "CLIMB TO THE HIGHEST POINT")
+
+    def test_optional_ost_text_is_used_as_hint(self):
+        self.assertEqual(
+            muse_worker.derive_on_screen_text(
+                self._clip(), self._segs(),
+                {"campaign_ost": "question style",
+                 "campaign_ost_required": False}),
+            "VIEW INSANE GUYS")
+
+    # --- Hashtag parsing ------------------------------------------------
+
+    def test_parse_required_hashtags(self):
+        self.assertEqual(
+            muse_worker.parse_required_hashtags("#laptop workflow, #Tech #LAPTOP"),
+            ["#laptop", "#workflow", "#Tech"])
+        self.assertEqual(muse_worker.parse_required_hashtags(None), [])
+        self.assertEqual(muse_worker.parse_required_hashtags("   "), [])
+
+    # --- Caption + hashtag application ----------------------------------
+
+    def test_apply_required_caption_verbatim(self):
+        settings = {
+            "campaign_caption": "The laptop that changed my workflow.",
+            "campaign_caption_required": True,
+            "campaign_hashtags": "#laptop #workflow",
+            "campaign_hashtags_required": True,
+        }
+        out = muse_worker.apply_campaign_caption(
+            settings, "Some Derived Title", ["#review", "#tech"])
+        self.assertEqual(out["post_caption"],
+                         "The laptop that changed my workflow.")
+        self.assertEqual(out["caption_source"], "required")
+        self.assertEqual(out["hashtags"],
+                         ["#laptop", "#workflow", "#review", "#tech"])
+        self.assertEqual(out["required_items_applied"], ["caption", "hashtags"])
+
+    def test_apply_required_hashtags_first_then_fill_to_eight(self):
+        settings = {
+            "campaign_hashtags": "#laptop #workflow",
+            "campaign_hashtags_required": True,
+        }
+        auto = ["#a", "#b", "#c", "#d", "#e", "#f", "#g", "#h"]
+        out = muse_worker.apply_campaign_caption(settings, "Title", auto)
+        self.assertEqual(out["hashtags"],
+                         ["#laptop", "#workflow", "#a", "#b", "#c", "#d", "#e", "#f"])
+        self.assertEqual(len(out["hashtags"]), 8)
+
+    def test_apply_required_hashtags_never_duplicated_by_auto(self):
+        settings = {
+            "campaign_hashtags": "#Laptop",
+            "campaign_hashtags_required": True,
+        }
+        out = muse_worker.apply_campaign_caption(
+            settings, "Title", ["#laptop", "#review"])
+        self.assertEqual(out["hashtags"], ["#Laptop", "#review"])
+
+    def test_apply_auto_when_nothing_required(self):
+        out = muse_worker.apply_campaign_caption(
+            {}, "Why This Laptop Wins", ["#laptop", "#battery"])
+        self.assertEqual(out["post_caption"], "Why This Laptop Wins")
+        self.assertEqual(out["caption_source"], "auto")
+        self.assertEqual(out["hashtags"], ["#laptop", "#battery"])
+        self.assertEqual(out["required_items_applied"], [])
+
+    def test_apply_silent_clip_has_no_caption(self):
+        out = muse_worker.apply_campaign_caption({}, None, [])
+        self.assertIsNone(out["post_caption"])
+        self.assertEqual(out["caption_source"], "auto")
+        self.assertEqual(out["hashtags"], [])
+
+    # --- Per-clip derivation --------------------------------------------
+
+    def test_per_clip_derivation_uses_own_window(self):
+        segs = [
+            _segment(10.0, 20.0, "we climb to the highest point of the tower"),
+            _segment(40.0, 50.0, "the laptop battery lasts all day long"),
+        ]
+        title1, tags1 = muse_worker.derive_clip_title_hashtags(segs, 10.0, 20.0)
+        title2, tags2 = muse_worker.derive_clip_title_hashtags(segs, 40.0, 50.0)
+        self.assertEqual(title1, "Climb To The Highest Point")
+        self.assertEqual(title2, "Laptop Battery Lasts All Day")
+        self.assertNotEqual(title1, title2)
+        self.assertIn("#tower", tags1)
+        self.assertIn("#laptop", tags2)
+        self.assertNotIn("#laptop", tags1)
+
+    def test_per_clip_silent_window_returns_none(self):
+        self.assertEqual(
+            muse_worker.derive_clip_title_hashtags([], 10.0, 20.0), (None, []))
+        self.assertEqual(
+            muse_worker.derive_clip_title_hashtags(
+                self._segs(), 20.0, 20.0), (None, []))
+
+    def test_job_level_derivation_unchanged_by_refactor(self):
+        # The _top_hashtags refactor must not change the job-level
+        # suggestion: same title, same tags as before.
+        title, tags = muse_worker.derive_title_hashtags(self._segs(), 32.0)
+        self.assertEqual(title, "Climb To The Highest Point")
+        self.assertIn("#tower", tags)
+        self.assertLessEqual(len(tags), 8)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import {
   AlertTriangle,
   ArrowLeft,
+  CheckCircle2,
   Copy,
   Download,
   Film,
@@ -11,6 +12,7 @@ import {
   Play,
   RotateCcw,
   X,
+  XCircle,
 } from 'lucide-react'
 import { EmptyState } from '../components/EmptyState'
 import { BulkRerenderBar } from '../components/BulkRerenderBar'
@@ -54,9 +56,11 @@ import {
   type HeadlineStyle,
   type Job,
   type JobClip,
+  type ManualCheck,
   type OstAnimation,
   type OstLanguage,
   type Sfx,
+  updateCampaignChecks,
 } from '../lib/jobs'
 import { useAuth } from '../state/auth'
 import { usePlatform } from '../lib/platform'
@@ -203,8 +207,28 @@ function settingRows(job: Job): Array<[string, string]> {
     ['Content type', s.content_type],
     ['Quality', s.quality === 'draft' ? 'Draft preview' : s.quality === 'high' ? 'High quality' : 'Standard'],
   ]
-  if (s.job_type === 'campaign' && s.campaign_requirements) {
-    rows.push(['Campaign requirements', s.campaign_requirements])
+  if (s.job_type === 'campaign') {
+    const brief = s.campaign_brief ?? s.campaign_requirements
+    if (brief) rows.push(['Campaign brief', brief])
+    if (s.campaign_caption) {
+      rows.push([
+        s.campaign_caption_required === false ? 'Post caption (Optional)' : 'Post caption (Required)',
+        s.campaign_caption,
+      ])
+    }
+    if (s.campaign_hashtags) {
+      rows.push([
+        s.campaign_hashtags_required === false ? 'Hashtags (Optional)' : 'Hashtags (Required)',
+        s.campaign_hashtags,
+      ])
+    }
+    if (s.campaign_ost) {
+      rows.push([
+        s.campaign_ost_required === false ? 'On-screen text (Optional)' : 'On-screen text (Required)',
+        s.campaign_ost,
+      ])
+    }
+    if (s.ost_hint) rows.push(['OST hint', s.ost_hint])
   }
   if (s.notes) {
     rows.push(['Notes for Muse', s.notes])
@@ -618,6 +642,259 @@ function SuggestionsCard({ job }: { job: Job }) {
   )
 }
 
+/**
+ * Batch 12: one clip's attached post caption — the title, caption
+ * and hashtags to post with the clip, with Copy buttons. Labelled
+ * "Campaign required" when the caption came from the campaign's
+ * Required field, "Auto-generated" when the worker derived it from
+ * the clip's own transcript. Renders nothing when the clip has no
+ * caption data at all (clips rendered before this batch, or silent
+ * clips with no required caption).
+ */
+function PostCaptionCard({ clip }: { clip: JobClip }) {
+  const title = clip.title_suggestion ?? clip.title
+  const hashtags = Array.isArray(clip.hashtags) ? clip.hashtags : []
+  const caption = clip.post_caption ?? ''
+  if (!clip.title_suggestion && caption === '' && hashtags.length === 0) return null
+  const required = clip.caption_source === 'required'
+  const allText = [title, caption, hashtags.join(' ')]
+    .filter((p) => p !== '')
+    .join('\n')
+  return (
+    <div className="w-full rounded-xl border border-ink-border bg-ink-panel p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-white">Post caption</h3>
+        <span
+          className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${
+            required
+              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+              : 'border-ink-border bg-ink-panel2 text-[var(--color-text-muted)]'
+          }`}
+        >
+          {required ? 'Campaign required' : 'Auto-generated'}
+        </span>
+      </div>
+      <p className="mt-3 min-w-0 break-words text-sm font-medium text-white">{title}</p>
+      {caption !== '' ? (
+        <div className="mt-2 flex items-start justify-between gap-3">
+          <p className="min-w-0 flex-1 break-words text-sm text-white/90">{caption}</p>
+          <CopyButton text={caption} label="Copy caption" />
+        </div>
+      ) : null}
+      {hashtags.length > 0 ? (
+        <div className="mt-2 flex items-start justify-between gap-3">
+          <p className="min-w-0 flex-1 break-words text-sm text-brand-light">
+            {hashtags.join(' ')}
+          </p>
+          <CopyButton text={hashtags.join(' ')} label="Copy hashtags" />
+        </div>
+      ) : null}
+      {clip.ost_burned_text ? (
+        <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+          On-screen text burned: <span className="font-medium text-white">{clip.ost_burned_text}</span>
+        </p>
+      ) : null}
+      <div className="mt-3 flex justify-end">
+        <CopyButton text={allText} label="Copy all" />
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Batch 12: the campaign section — the compliance banner, the
+ * server-computed checklist, the manual brief checks, and the
+ * job-level caption actions. Only campaign jobs render it. The
+ * checklist appears once the job completes; the manual checks are
+ * tickable from job creation (they are the visual / subjective
+ * rules the worker cannot verify — the honest limit is stated in
+ * the copy below, not hidden).
+ */
+function CampaignSection({
+  job,
+  onJobUpdated,
+}: {
+  job: Job
+  onJobUpdated: (job: Job) => void
+}) {
+  const s = job.settings
+  const [checks, setChecks] = useState<ManualCheck[]>(job.campaign_manual_checks ?? [])
+  const [savingId, setSavingId] = useState<string | null>(null)
+  const [checkError, setCheckError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setChecks(job.campaign_manual_checks ?? [])
+  }, [job.campaign_manual_checks])
+
+  if (!s || s.job_type !== 'campaign') return null
+  const checklist = job.campaign_checklist ?? null
+  const failedAuto = checklist && !checklist.all_passed ? checklist.failed_count : 0
+  const pendingManual = checks.filter((c) => !c.checked).length
+  const failedTotal = failedAuto + pendingManual
+  const readyOriginals = job.clips.filter(
+    (c) => c.variant_of_clip_id == null && c.status === 'ready',
+  )
+  const hasCaptionData = readyOriginals.some(
+    (c) =>
+      (c.post_caption ?? '') !== '' ||
+      (Array.isArray(c.hashtags) && c.hashtags.length > 0) ||
+      c.title_suggestion != null,
+  )
+  const captionsText = readyOriginals
+    .map((c) =>
+      [c.title_suggestion ?? c.title, c.post_caption ?? '', (c.hashtags ?? []).join(' ')]
+        .filter((p) => p !== '')
+        .join('\n'),
+    )
+    .join('\n\n')
+  const downloadCaptions = () => {
+    const blob = new Blob([`Job #${job.id} — Post captions\n\n${captionsText}\n`], {
+      type: 'text/plain',
+    })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `job-${job.id}-captions.txt`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+  const toggleCheck = async (id: string) => {
+    const next = checks.map((c) => (c.id === id ? { ...c, checked: !c.checked } : c))
+    setChecks(next)
+    setSavingId(id)
+    setCheckError(null)
+    const result = await updateCampaignChecks(job.id, next)
+    setSavingId(null)
+    if (!result.ok) {
+      setChecks(checks)
+      setCheckError(result.error)
+      return
+    }
+    onJobUpdated(result.job)
+  }
+
+  return (
+    <div className="space-y-4">
+      {job.status === 'ready' && failedTotal > 0 ? (
+        <div
+          role="alert"
+          className="rounded-2xl border border-amber-500/50 bg-amber-500/10 p-4"
+        >
+          <p className="flex items-center gap-2 text-sm font-semibold text-amber-300">
+            <AlertTriangle className="h-4 w-4" />
+            {failedAuto > 0
+              ? `${failedAuto} required cheez miss ho rahi hai — submit karne se pehle check karein`
+              : `${pendingManual} manual check${pendingManual === 1 ? '' : 's'} baaki hai — submit karne se pehle tick karein`}
+          </p>
+          <p className="mt-1 text-xs text-amber-200/80">
+            {failedAuto > 0 && pendingManual > 0
+              ? `The checklist below names exactly what is missing. Plus ${pendingManual} manual check${pendingManual === 1 ? '' : 's'} still need${pendingManual === 1 ? 's' : ''} your eyes.`
+              : failedAuto > 0
+                ? 'The checklist below names exactly what is missing.'
+                : 'The auto-checks all pass — the remaining items need your eyes, not the worker.'}
+          </p>
+        </div>
+      ) : null}
+
+      <section className="rounded-2xl border border-ink-border bg-ink-panel p-6">
+        <h2 className="text-lg font-semibold text-white">Campaign checklist</h2>
+        <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+          Auto-checks verify TEXT items only — the required caption, hashtags and on-screen text,
+          compared against what the worker actually applied. Visual / subjective rules (jaise
+          &lsquo;laptop dikhana hai&rsquo;, &lsquo;Stokes Twins hone chahiye&rsquo;) the worker detect
+          nahi kar sakta — unhe neeche manually tick karein.
+        </p>
+        {checklist ? (
+          <ul className="mt-4 space-y-3">
+            {checklist.items.map((item) => (
+              <li key={item.key} className="flex items-start gap-3 rounded-xl bg-ink-panel2 p-3">
+                {item.passed ? (
+                  <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-400" />
+                ) : (
+                  <XCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-400" />
+                )}
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium text-white">
+                    {item.label}{' '}
+                    <span className={item.passed ? 'text-emerald-300' : 'text-red-300'}>
+                      {item.passed ? '✓ Pass' : '✗ Fail'}
+                    </span>
+                  </p>
+                  <p className="mt-0.5 break-words text-xs text-[var(--color-text-muted)]">
+                    Required:{' '}
+                    <span className="font-medium text-white">
+                      {Array.isArray(item.required) ? item.required.join(' ') : item.required}
+                    </span>
+                  </p>
+                  <p className="mt-0.5 break-words text-xs text-[var(--color-text-muted)]">
+                    {item.note}
+                  </p>
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mt-4 text-sm text-[var(--color-text-muted)]">
+            {job.status === 'ready'
+              ? 'No required campaign items on this job — nothing to check.'
+              : 'The checklist appears here once the job completes.'}
+          </p>
+        )}
+        {checks.length > 0 ? (
+          <div className="mt-5">
+            <h3 className="text-sm font-semibold text-white">Manual checks — from the brief</h3>
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+              Tick each line once you have checked it by eye on the clips.
+            </p>
+            <ul className="mt-3 space-y-2">
+              {checks.map((check) => (
+                <li key={check.id} className="flex items-start gap-3 rounded-xl bg-ink-panel2 p-3">
+                  <input
+                    type="checkbox"
+                    checked={check.checked}
+                    disabled={savingId === check.id}
+                    onChange={() => void toggleCheck(check.id)}
+                    aria-label={`Manual check: ${check.text}`}
+                    className="mt-0.5 h-4 w-4 shrink-0 accent-fuchsia-500"
+                  />
+                  <span
+                    className={`min-w-0 flex-1 break-words text-sm ${
+                      check.checked ? 'text-[var(--color-text-muted)] line-through' : 'text-white'
+                    }`}
+                  >
+                    {check.text}
+                  </span>
+                  {savingId === check.id ? (
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin text-brand-light" />
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+            {checkError ? (
+              <p role="alert" className="mt-2 text-xs text-red-300">
+                {checkError}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+        {job.status === 'ready' && hasCaptionData ? (
+          <div className="mt-5 flex flex-wrap gap-2 border-t border-ink-border/60 pt-4">
+            <CopyButton text={captionsText} label="Copy all captions" />
+            <button
+              type="button"
+              onClick={downloadCaptions}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg border border-ink-border px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-ink-panel2"
+            >
+              <Download className="h-3.5 w-3.5" />
+              Download captions (.txt)
+            </button>
+          </div>
+        ) : null}
+      </section>
+    </div>
+  )
+}
+
 export function JobDetailPage() {
   const { id } = useParams<{ id: string }>()
   const jobId = Number(id)
@@ -1008,6 +1285,9 @@ export function JobDetailPage() {
             </dl>
           </section>
 
+          {/* Batch 12: campaign checklist + banner + manual checks. */}
+          <CampaignSection job={job} onJobUpdated={setJob} />
+
           {/* Batch 4: title + hashtag suggestions from this job's own
               transcript (or the honest "no speech" line). */}
           <SuggestionsCard job={job} />
@@ -1183,6 +1463,8 @@ export function JobDetailPage() {
                         <ClipThumbnailPicker clip={clip} onChanged={() => void fetchJob()} />
                       </div>
                     )}
+                    {/* Batch 12: per-clip attached post caption. */}
+                    <PostCaptionCard clip={clip} />
                   </li>
                     )
                   })}

@@ -8,6 +8,7 @@ use App\Models\Plan;
 use App\Models\ProcessingJob;
 use App\Models\Project;
 use App\Models\User;
+use App\Support\CampaignChecklist;
 use App\Support\JobSettingsRules;
 use App\Support\MediaStorage;
 use App\Support\PlatformGate;
@@ -100,7 +101,9 @@ class JobController extends Controller
                   'face_tracking', 'silence_removal', 'filler_removal',
                   'beat_sync', 'logo_overlay', 'caption_safe_zone',
                   'ost_persistent', 'end_card', 'keyword_popups',
-                  'progress_bar'] as $boolField) {
+                  'progress_bar', 'campaign_caption_required',
+                  'campaign_hashtags_required',
+                  'campaign_ost_required'] as $boolField) {
             if ($request->has($boolField) && is_string($request->input($boolField))) {
                 $request->merge([
                     $boolField => filter_var($request->input($boolField), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE)
@@ -276,6 +279,12 @@ class JobController extends Controller
             // user's cloud bucket). Link jobs have no file; 'local'
             // is the harmless default there.
             'disk' => $diskName ?? MediaStorage::DISK_LOCAL,
+            // Batch 12: the manual brief checks start unchecked from
+            // job creation, so they are tickable while the job runs —
+            // not only after it completes.
+            'campaign_manual_checks' => CampaignChecklist::manualChecksFromBrief(
+                $settings['campaign_brief'] ?? null
+            ),
         ]);
 
         // Batch 9: the music bed is stored after the job exists so
@@ -428,6 +437,11 @@ class JobController extends Controller
                 'source_url' => null,
                 'source_path' => $relativePath,
                 'disk' => $diskName,
+                // Batch 12: manual brief checks start unchecked from
+                // job creation (see store()).
+                'campaign_manual_checks' => CampaignChecklist::manualChecksFromBrief(
+                    $settings['campaign_brief'] ?? null
+                ),
             ]);
             $jobs[] = $job->fresh()->toUserArray();
             // Batch 9: the shared music bed is copied under each
@@ -451,11 +465,15 @@ class JobController extends Controller
      */
     private function checkSharedRules(array $validated): ?\Illuminate\Http\JsonResponse
     {
+        // Batch 12: a campaign job needs its brief — sent as
+        // campaign_brief by the wizard, or as campaign_requirements
+        // by older clients. Either one satisfies the rule.
         if (($validated['job_type'] ?? 'myself') === 'campaign'
+            && empty($validated['campaign_brief'])
             && empty($validated['campaign_requirements'])) {
             return response()->json([
                 'error' => 'validation_error',
-                'message' => 'campaign_requirements is required when job_type is campaign.',
+                'message' => 'campaign_brief is required when job_type is campaign.',
             ], 422);
         }
 
@@ -478,6 +496,17 @@ class JobController extends Controller
      */
     private function buildSettings(array $validated, string $sourceType, ?string $sourceUrl, ?string $sourcePath, User $user): array
     {
+        // Batch 12: a required on-screen text implies on-screen text
+        // is ON — asking for text on screen while the toggle is off
+        // is a contradiction, and the requirement wins (logged in
+        // the worker too). The wizard also checks the toggle when the
+        // user types a required OST.
+        $brief = $validated['campaign_brief']
+            ?? $validated['campaign_requirements']
+            ?? null;
+        $requiredOst = ! empty($validated['campaign_ost'])
+            && ($validated['campaign_ost_required'] ?? false);
+
         return [
             'platform' => $validated['platform'],
             'aspect_ratio' => $validated['aspect_ratio'],
@@ -492,7 +521,7 @@ class JobController extends Controller
             'captions_language' => $validated['captions_language'] ?? 'auto',
             'caption_style' => $validated['caption_style'] ?? 'punchy',
             'selection_mode' => $validated['selection_mode'] ?? 'interesting_only',
-            'on_screen_text' => $validated['on_screen_text'] ?? false,
+            'on_screen_text' => $requiredOst ? true : ($validated['on_screen_text'] ?? false),
             // Batch 1 enhancements: ON unless the job explicitly turns
             // one off (the frontend sends all four; old API clients
             // that omit them get the new behaviour, as does the worker).
@@ -552,7 +581,31 @@ class JobController extends Controller
             // treats a missing key as OFF).
             'logo_overlay' => $validated['logo_overlay'] ?? false,
             'job_type' => $validated['job_type'] ?? 'myself',
-            'campaign_requirements' => $validated['campaign_requirements'] ?? null,
+            // Batch 12: the full brief lives under both keys — the
+            // new campaign_brief and the old campaign_requirements
+            // (older worker versions and old clients read the old
+            // one). The structured fields follow, each with its own
+            // Required/Optional flag (default Required when typed —
+            // the wizard sends the flag explicitly; an API client
+            // that omits it gets Required for a non-empty field).
+            'campaign_brief' => $brief,
+            'campaign_requirements' => $brief,
+            'campaign_caption' => $validated['campaign_caption'] ?? null,
+            'campaign_caption_required' => isset($validated['campaign_caption'])
+                && trim((string) $validated['campaign_caption']) !== ''
+                ? ($validated['campaign_caption_required'] ?? true)
+                : false,
+            'campaign_hashtags' => $validated['campaign_hashtags'] ?? null,
+            'campaign_hashtags_required' => isset($validated['campaign_hashtags'])
+                && trim((string) $validated['campaign_hashtags']) !== ''
+                ? ($validated['campaign_hashtags_required'] ?? true)
+                : false,
+            'campaign_ost' => $validated['campaign_ost'] ?? null,
+            'campaign_ost_required' => isset($validated['campaign_ost'])
+                && trim((string) $validated['campaign_ost']) !== ''
+                ? ($validated['campaign_ost_required'] ?? true)
+                : false,
+            'ost_hint' => $validated['ost_hint'] ?? null,
             'notes' => $validated['notes'] ?? null,
             'layout' => $validated['layout'] ?? 'center_crop',
             'content_type' => $validated['content_type'] ?? 'general',
@@ -743,6 +796,45 @@ class JobController extends Controller
 
         // No re-dispatch needed: the Muse worker polls Queued jobs and
         // picks this one up on its next pass.
+
+        return response()->json(['job' => $job->fresh()->toUserArray()]);
+    }
+
+    /**
+     * PATCH /api/v1/jobs/{job}/campaign-checks — tick the manual
+     * brief checks (Batch 12). The brief lines the user flagged as
+     * things to verify by eye are the ones the system CANNOT verify
+     * itself (visual / subjective rules); the user ticks each one
+     * before submitting. Only lines from the job's own brief are
+     * accepted — a check id that is not a brief line is ignored, so
+     * a client can never invent a checked item.
+     */
+    public function updateCampaignChecks(Request $request, ProcessingJob $job)
+    {
+        $this->authorize('update', $job->project);
+
+        $validated = $request->validate([
+            'manual_checks' => ['required', 'array'],
+            'manual_checks.*.id' => ['required', 'string'],
+            'manual_checks.*.checked' => ['required', 'boolean'],
+        ]);
+
+        $brief = $job->settings['campaign_brief']
+            ?? $job->settings['campaign_requirements']
+            ?? null;
+        $fresh = CampaignChecklist::manualChecksFromBrief($brief);
+        $byId = [];
+        foreach ($fresh as $check) {
+            $byId[$check['id']] = $check;
+        }
+        foreach ($validated['manual_checks'] as $sent) {
+            if (isset($byId[$sent['id']])) {
+                $byId[$sent['id']]['checked'] = (bool) $sent['checked'];
+            }
+        }
+
+        $job->campaign_manual_checks = array_values($byId);
+        $job->save();
 
         return response()->json(['job' => $job->fresh()->toUserArray()]);
     }

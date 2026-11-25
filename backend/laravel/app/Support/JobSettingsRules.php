@@ -150,6 +150,22 @@ class JobSettingsRules
             'logo_overlay' => ['sometimes', 'boolean'],
             'job_type' => ['sometimes', 'string', Rule::in(['myself', 'campaign'])],
             'campaign_requirements' => ['sometimes', 'nullable', 'string', 'max:5000'],
+            // Batch 12 (2026-11-25): structured campaign
+            // requirements — the full brief plus three fields that
+            // each carry their own Required/Optional selector. The
+            // worker applies Required items verbatim (caption,
+            // hashtags first, OST burned) and never translates them;
+            // Optional items are hints / auto-derived. The brief is
+            // the same text campaign_requirements has always carried
+            // (kept in sync in buildSettings for old clients).
+            'campaign_brief' => ['sometimes', 'nullable', 'string', 'max:5000'],
+            'campaign_caption' => ['sometimes', 'nullable', 'string', 'max:2200'],
+            'campaign_caption_required' => ['sometimes', 'boolean'],
+            'campaign_hashtags' => ['sometimes', 'nullable', 'string', 'max:1000'],
+            'campaign_hashtags_required' => ['sometimes', 'boolean'],
+            'campaign_ost' => ['sometimes', 'nullable', 'string', 'max:60'],
+            'campaign_ost_required' => ['sometimes', 'boolean'],
+            'ost_hint' => ['sometimes', 'nullable', 'string', 'max:200'],
             'notes' => ['sometimes', 'nullable', 'string', 'max:5000'],
             // Batch 9 (2026-11-25): five more 9:16 layouts — gradient_fill,
             // stacked, letterbox, face_closeup, framed. The worker falls

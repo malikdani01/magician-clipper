@@ -10,6 +10,7 @@ use App\Models\Notification;
 use App\Models\ProcessingJob;
 use App\Models\Project;
 use App\Models\UserSetting;
+use App\Support\CampaignChecklist;
 use App\Support\MediaStorage;
 use App\Support\PlanService;
 use Illuminate\Http\Request;
@@ -454,6 +455,21 @@ class MuseJobController extends Controller
         // transition twice. This runs only on a real transition — the
         // same-status early return above never reaches here.
         if ($public === 'ready') {
+            // Batch 12: the campaign checklist is computed by the
+            // SERVER on completion, from the stored per-clip facts
+            // the worker reported — never claimed by the worker
+            // itself. Manual brief checks are initialised from the
+            // brief lines (unchecked) when the job has none yet.
+            $job->campaign_checklist = CampaignChecklist::compute($job->fresh());
+            if ($job->campaign_manual_checks === null) {
+                $brief = $job->settings['campaign_brief']
+                    ?? $job->settings['campaign_requirements']
+                    ?? null;
+                $job->campaign_manual_checks = CampaignChecklist::manualChecksFromBrief($brief);
+            }
+            $job->save();
+        }
+        if ($public === 'ready') {
             $clipCount = $job->clips()->count();
             Notification::firstOrCreate(
                 [
@@ -561,6 +577,20 @@ class MuseJobController extends Controller
             // {"hook": 92, "retention": 78}. Decoded + shape-checked
             // below; malformed input is a 422, never a stored guess.
             'score_breakdown' => ['sometimes', 'nullable', 'string'],
+            // Batch 12: per-clip campaign attachment, sent by the
+            // worker as multipart fields (hashtags + applied items as
+            // JSON-encoded strings, same wire contract as
+            // score_breakdown). The worker derived the title +
+            // hashtags from THIS clip's own transcript; the caption
+            // is the required text verbatim or the auto-derived
+            // title; ost_burned_text is the exact headline the
+            // render burned (null when none was burned).
+            'title_suggestion' => ['sometimes', 'nullable', 'string', 'max:120'],
+            'hashtags' => ['sometimes', 'nullable', 'string'],
+            'post_caption' => ['sometimes', 'nullable', 'string', 'max:2200'],
+            'caption_source' => ['sometimes', 'nullable', 'string', Rule::in(['required', 'auto'])],
+            'ost_burned_text' => ['sometimes', 'nullable', 'string', 'max:60'],
+            'required_items_applied' => ['sometimes', 'nullable', 'string'],
         ]);
 
         $variantOf = null;
@@ -593,6 +623,53 @@ class MuseJobController extends Controller
                 ], 422);
             }
             $scoreBreakdown = $decoded;
+        }
+
+        // Batch 12: decode the JSON-encoded hashtag + applied-items
+        // lists with the same shape-checking as score_breakdown —
+        // malformed input is a 422, never a stored guess.
+        $clipHashtags = null;
+        if ($request->filled('hashtags')) {
+            $decoded = json_decode($request->input('hashtags'), true);
+            $valid = is_array($decoded) && json_last_error() === JSON_ERROR_NONE;
+            if ($valid) {
+                foreach ($decoded as $tag) {
+                    if (! is_string($tag) || $tag === '' || mb_strlen($tag) > 30) {
+                        $valid = false;
+                        break;
+                    }
+                }
+                if (count($decoded) > 10) {
+                    $valid = false;
+                }
+            }
+            if (! $valid) {
+                return response()->json([
+                    'error' => 'validation_error',
+                    'message' => 'hashtags must be a JSON array of at most 10 tag strings.',
+                ], 422);
+            }
+            $clipHashtags = $decoded;
+        }
+        $appliedItems = null;
+        if ($request->filled('required_items_applied')) {
+            $decoded = json_decode($request->input('required_items_applied'), true);
+            $valid = is_array($decoded) && json_last_error() === JSON_ERROR_NONE;
+            if ($valid) {
+                foreach ($decoded as $item) {
+                    if (! is_string($item) || ! in_array($item, ['caption', 'hashtags', 'ost'], true)) {
+                        $valid = false;
+                        break;
+                    }
+                }
+            }
+            if (! $valid) {
+                return response()->json([
+                    'error' => 'validation_error',
+                    'message' => 'required_items_applied must be a JSON array of caption/hashtags/ost.',
+                ], 422);
+            }
+            $appliedItems = $decoded;
         }
 
         $file = $request->file('file');
@@ -683,6 +760,13 @@ class MuseJobController extends Controller
             // worker does not send it) + the Variant B link.
             'face_tracked' => $validated['face_tracked'] ?? false,
             'variant_of_clip_id' => $variantOf?->id,
+            // Batch 12: per-clip campaign attachment.
+            'title_suggestion' => $validated['title_suggestion'] ?? null,
+            'hashtags' => $clipHashtags,
+            'post_caption' => $validated['post_caption'] ?? null,
+            'caption_source' => $validated['caption_source'] ?? null,
+            'ost_burned_text' => $validated['ost_burned_text'] ?? null,
+            'required_items_applied' => $appliedItems,
         ]);
 
         // Batch 11: one rendered clip against the job owner's
@@ -1075,10 +1159,18 @@ class MuseJobController extends Controller
             'file_size_bytes' => $disk->size($relativePath),
             // The window is identical to the original, so its score,
             // reason and transcript carry over; only the style differs.
+            // Batch 12: the campaign attachment carries over too —
+            // same window, same spoken words, same burned headline.
             'score' => $clip->score,
             'score_breakdown' => $clip->score_breakdown,
             'reason' => $clip->reason,
             'transcript_excerpt' => $clip->transcript_excerpt,
+            'title_suggestion' => $clip->title_suggestion,
+            'hashtags' => $clip->hashtags,
+            'post_caption' => $clip->post_caption,
+            'caption_source' => $clip->caption_source,
+            'ost_burned_text' => $clip->ost_burned_text,
+            'required_items_applied' => $clip->required_items_applied,
             'caption_style' => $rerender->caption_style,
             'face_tracked' => (bool) ($validated['face_tracked'] ?? false),
             'variant_of_clip_id' => $clip->id,

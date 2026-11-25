@@ -53,6 +53,17 @@ class Clip extends Model
         'score_breakdown',
         'reason',
         'transcript_excerpt',
+        // Batch 12: per-clip campaign attachment — the clip's own
+        // title + hashtags (derived from its own transcript), its
+        // post caption (required verbatim or auto-derived), where the
+        // caption came from, the exact OST text actually burned, and
+        // which required items this clip applied.
+        'title_suggestion',
+        'hashtags',
+        'post_caption',
+        'caption_source',
+        'ost_burned_text',
+        'required_items_applied',
     ];
 
     protected function casts(): array
@@ -68,6 +79,9 @@ class Clip extends Model
             'is_favourite' => 'boolean',
             'face_tracked' => 'boolean',
             'variant_of_clip_id' => 'integer',
+            // Batch 12: per-clip campaign attachment.
+            'hashtags' => 'array',
+            'required_items_applied' => 'array',
         ];
     }
 

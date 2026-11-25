@@ -2687,16 +2687,35 @@ def _cap_headline(text: str, limit: int = 60) -> str:
     return cut.strip() or text[:limit]
 
 
+def _required_campaign_ost(settings: dict) -> str | None:
+    """The structured required on-screen text, or None.
+
+    Batch 12: the wizard's Campaign requirements section carries an
+    explicit on-screen-text field with its own Required/Optional
+    selector. When the field is set AND marked Required, its text is
+    burned verbatim (never translated, never re-scored) and it wins
+    over every other source. When Optional (or empty) it is a hint
+    for the headline scorer, not a binding text.
+    """
+    text = (settings.get("campaign_ost") or "").strip()
+    if text and settings.get("campaign_ost_required"):
+        return _cap_headline(text)
+    return None
+
+
 def _campaign_on_screen_text(settings: dict) -> str | None:
     """Explicit on-screen text from the job brief, verbatim.
 
-    Campaign jobs carry the brief in ``campaign_requirements``; any job
-    may carry extra instructions in ``notes``. An explicit line wins
+    Order: (a) the structured required OST field (Batch 12);
+    (b) an explicit line in the campaign brief / notes
     ("on-screen text: ...", "OST: ...", "headline: ..."), else the
-    first double-quoted string. Capped at 60 chars; None when the brief
-    carries no explicit on-screen text — the transcript headline is
-    tried next, never invented text.
+    first double-quoted string. Capped at 60 chars; None when the
+    brief carries no explicit on-screen text — the transcript
+    headline is tried next, never invented text.
     """
+    required = _required_campaign_ost(settings)
+    if required:
+        return required
     for source in (settings.get("campaign_requirements") or "",
                    settings.get("notes") or ""):
         if not source:
@@ -2736,7 +2755,55 @@ def _trim_headline_edges(parts: list[dict]) -> list[dict]:
     return kept
 
 
-def _transcript_headline(clip: dict, segments: list[dict]) -> str | None:
+# Batch 12: OST hint types — when the on-screen text is Optional,
+# the user may describe the KIND of headline they want ("question
+# style"). The scorer then prefers phrases of that type. A question
+# starts on a question word; an exclamation carries an emphasis word;
+# a statement starts on anything else.
+_QUESTION_STARTERS = {
+    "what", "why", "how", "when", "where", "who", "which", "whose",
+    "whom", "can", "could", "should", "would", "will", "do", "does",
+    "did", "is", "are", "was", "were", "have", "has", "had",
+}
+
+
+def _hint_type(hint: str | None) -> str | None:
+    """Classify an OST hint ("question style", "make it a question!",
+    "statement") into question / exclamation / statement, or None
+    when the hint names no type. Never raises on odd input."""
+    if not hint:
+        return None
+    h = hint.lower()
+    if "?" in h or "question" in h:
+        return "question"
+    if "!" in h or "exclamat" in h or "shout" in h:
+        return "exclamation"
+    if "statement" in h or "declar" in h:
+        return "statement"
+    return None
+
+
+def _phrase_matches_hint(phrase: list[dict], hint_kind: str | None) -> bool:
+    """True when a phrase is of the hinted type. The phrase's FIRST
+    word decides a question / statement (question words are
+    stopwords, so the first CONTENT word would never be one — "why
+    is this view insane" starts on "why", not on "view"). An
+    exclamation carries an emphasis word anywhere in the phrase."""
+    if hint_kind is None or not phrase:
+        return False
+    first = phrase[0]["word"].strip(_PUNCT).lower()
+    if hint_kind == "question":
+        return first in _QUESTION_STARTERS
+    if hint_kind == "statement":
+        return first not in _QUESTION_STARTERS
+    if hint_kind == "exclamation":
+        return any(w["word"].strip(_PUNCT).lower() in EMPHASIS_WORDS
+                   for w in phrase)
+    return False
+
+
+def _transcript_headline(clip: dict, segments: list[dict],
+                         hint: str | None = None) -> str | None:
     """Headline from the clip's own transcript (max 6 words / 60 chars).
 
     Batch 2: each phrase in the window is SCORED, not just the one
@@ -2779,6 +2846,10 @@ def _transcript_headline(clip: dict, segments: list[dict]) -> str | None:
         log.debug("Headline: window has no content words — no headline")
         return None
 
+    # Batch 12: the OST hint's type (question / exclamation /
+    # statement), or None when no hint was given.
+    hint_kind = _hint_type(hint)
+
     def phrase_score(phrase: list[dict]) -> float:
         if not phrase:
             return -1.0
@@ -2810,10 +2881,14 @@ def _transcript_headline(clip: dict, segments: list[dict]) -> str | None:
         fragment_penalty = 2.0 if content_frac < 0.5 else 0.0
         # One word repeated is not a headline ("go go go go").
         repeat_penalty = 1.0 if content and len(distinct) <= 1 and len(content) >= 3 else 0.0
+        # Batch 12: an OST hint ("question style") boosts phrases of
+        # the hinted type — a preference, never a fabrication: a
+        # non-matching phrase can still win when it scores far higher.
+        hint_bonus = 1.5 if _phrase_matches_hint(phrase, hint_kind) else 0.0
         return (emphasis + min(best_count, 2) * 0.5 + density * 0.3
                 + min(len(distinct), 4) * 0.2 - filler_frac * 2.0
                 - trailing_stop - fragment_penalty
-                - repeat_penalty)
+                - repeat_penalty + hint_bonus)
 
     scored = sorted(range(len(phrases)),
                     key=lambda i: (-phrase_score(phrases[i]), i))
@@ -2842,15 +2917,22 @@ def derive_on_screen_text(clip: dict, segments: list[dict],
                           settings: dict) -> str | None:
     """The on-screen headline for one clip, or None.
 
-    Order: (a) explicit campaign text from the job brief, verbatim;
-    (b) a headline from the clip's own transcript; (c) nothing when
-    the window has no transcript — a silent/visual clip gets no
+    Order: (a) the structured required OST, verbatim; (b) an
+    explicit campaign line from the brief, verbatim; (c) a headline
+    from the clip's own transcript — with the OST hint steering the
+    scorer when the OST is Optional (the hint is the `ost_hint`
+    input, or the Optional OST text itself); (d) nothing when the
+    window has no transcript — a silent/visual clip gets no
     invented text, and the worker logs that honestly.
     """
     campaign = _campaign_on_screen_text(settings)
     if campaign:
         return campaign
-    return _transcript_headline(clip, segments)
+    hint = settings.get("ost_hint") or None
+    if hint is None and (settings.get("campaign_ost") or "").strip():
+        # An Optional OST text is not binding — it is the hint.
+        hint = settings.get("campaign_ost")
+    return _transcript_headline(clip, segments, hint=hint)
 
 
 def _title_case_headline(text: str) -> str:
@@ -2864,6 +2946,35 @@ def _title_case_headline(text: str) -> str:
         else:
             out.append(word.capitalize())
     return " ".join(out)
+
+
+def _top_hashtags(words: list[dict], limit: int = 8) -> list[str]:
+    """Top content words by frequency as #tags (lowercase,
+    #prefixed, de-duplicated, stopwords and fillers removed, 3–20
+    chars, at most ``limit``). The one hashtag rule shared by the
+    job-level and per-clip derivations, so the two can never drift
+    apart. ``words`` are the 0-based word dicts ``_clip_words``
+    returns. ``_clip_words`` strips the whitespace Whisper puts on
+    every word (" Come") — raw segment words would fail the isalnum
+    check and yield zero hashtags (Job #44 proved it: 0 tags).
+    """
+    counts: dict[str, int] = {}
+    first_seen: dict[str, int] = {}
+    order = 0
+    for word in words:
+        clean = word["word"].strip(_PUNCT).lower()
+        if (not clean or len(clean) < 3 or len(clean) > 20
+                or not clean.isalnum()
+                or clean in _ON_SCREEN_STOPWORDS
+                or clean in FILLER_WORDS):
+            continue
+        if clean not in counts:
+            counts[clean] = 0
+            first_seen[clean] = order
+            order += 1
+        counts[clean] += 1
+    ranked = sorted(counts, key=lambda w: (-counts[w], first_seen[w]))
+    return [f"#{w}" for w in ranked[:limit]]
 
 
 def derive_title_hashtags(segments: list[dict],
@@ -2890,24 +3001,89 @@ def derive_title_hashtags(segments: list[dict],
     # _clip_words strips the whitespace Whisper puts on every word
     # (" Come") — the raw segment words would fail the isalnum check
     # below and yield zero hashtags (Job #44 proved it: 0 tags).
-    counts: dict[str, int] = {}
-    first_seen: dict[str, int] = {}
-    order = 0
-    for word in _clip_words(segments, 0.0, source_duration):
-        clean = word["word"].strip(_PUNCT).lower()
-        if (not clean or len(clean) < 3 or len(clean) > 20
-                or not clean.isalnum()
-                or clean in _ON_SCREEN_STOPWORDS
-                or clean in FILLER_WORDS):
+    return title, _top_hashtags(_clip_words(segments, 0.0, source_duration))
+
+
+def derive_clip_title_hashtags(segments: list[dict], start: float,
+                               end: float) -> tuple[str | None, list[str]]:
+    """Title + hashtags for ONE clip, from that clip's OWN spoken
+    words — the same derivation as the job-level suggestion, run over
+    the clip's window only. No second Whisper pass: the clip's words
+    are the window's words (the same transcript the captions use),
+    so re-transcribing the clip file would only re-derive the same
+    words at the cost of a Whisper run per clip. Returns (None, [])
+    for a silent window.
+    """
+    duration = end - start
+    if not segments or duration <= 0:
+        return None, []
+    title_raw = _transcript_headline({"start": start, "end": end}, segments)
+    title = _title_case_headline(title_raw).rstrip(_PUNCT).strip() \
+        if title_raw else None
+    return title, _top_hashtags(_clip_words(segments, start, end))
+
+
+def parse_required_hashtags(raw: str | None) -> list[str]:
+    """Parse the campaign hashtags field into an ordered list:
+    "#a #b, c" -> ["#a", "#b", "#c"]. A '#' is added when missing;
+    the tag's own characters are kept exactly as typed (verbatim);
+    duplicates collapse case-insensitively, keeping the first.
+    Mirrors the backend's CampaignChecklist::parseHashtags."""
+    if not raw or not raw.strip():
+        return []
+    tags: list[str] = []
+    seen: set[str] = set()
+    for piece in re.split(r"[\s,]+", raw.strip()):
+        piece = piece.strip()
+        if not piece:
             continue
-        if clean not in counts:
-            counts[clean] = 0
-            first_seen[clean] = order
-            order += 1
-        counts[clean] += 1
-    ranked = sorted(counts, key=lambda w: (-counts[w], first_seen[w]))
-    hashtags = [f"#{w}" for w in ranked[:8]]
-    return title, hashtags
+        tag = piece if piece.startswith("#") else "#" + piece
+        if tag.lower() in seen:
+            continue
+        seen.add(tag.lower())
+        tags.append(tag)
+    return tags
+
+
+def apply_campaign_caption(settings: dict, title: str | None,
+                           auto_hashtags: list[str]) -> dict:
+    """A clip's post caption + hashtag set under the campaign rules.
+
+    Required post caption -> verbatim, source "required". Otherwise
+    the clip's own derived title is the caption, source "auto"
+    (None when the clip has no title to derive — a silent clip).
+    Required hashtags come first, in the given order; auto-derived
+    tags fill the set to 8 total (never duplicating a required tag,
+    case-insensitively). Required items are NEVER translated — they
+    are the user's own words, and the caller never passes them
+    through any translation. Returns the post caption, its source,
+    the final hashtag list, and which required items applied.
+    """
+    caption = (settings.get("campaign_caption") or "").strip()
+    caption_required = bool(settings.get("campaign_caption_required"))
+    if caption and caption_required:
+        post_caption, source = caption, "required"
+        applied = ["caption"]
+    else:
+        post_caption, source = title, "auto"
+        applied = []
+    required_tags = (
+        parse_required_hashtags(settings.get("campaign_hashtags"))
+        if settings.get("campaign_hashtags_required") else [])
+    tags = list(required_tags)
+    if required_tags:
+        applied.append("hashtags")
+    seen = {t.lower() for t in tags}
+    for tag in auto_hashtags:
+        if len(tags) >= 8:
+            break
+        if tag.lower() not in seen:
+            tags.append(tag)
+            seen.add(tag.lower())
+    return {"post_caption": post_caption,
+            "caption_source": source,
+            "hashtags": tags,
+            "required_items_applied": applied}
 
 
 def derive_keyword_popups(segments: list[dict], start: float, end: float,
@@ -5278,10 +5454,16 @@ def render_clip(source: Path, clip: dict, settings: dict,
             # (campaign verbatim first, else the transcript headline)
             # into the job's headline language. The end-card text,
             # lower-third tag and keyword pop-ups are never translated.
+            # Batch 12: a REQUIRED on-screen text is the user's own
+            # words — it is burned verbatim and never translated.
             stats["ost_language"] = (
                 settings.get("ost_language") or "source").lower()
-            headline, stats["ost_translation"] = _translate_headline(
-                headline, settings)
+            required_ost = _required_campaign_ost(settings)
+            if required_ost is not None and headline == required_ost:
+                stats["ost_translation"] = "none"
+            else:
+                headline, stats["ost_translation"] = _translate_headline(
+                    headline, settings)
             log.info("Clip %.1f-%.1fs on-screen headline: %r (style %s, "
                      "ost_language %s, translation %s)",
                      start, end, headline, headline_style,
@@ -5319,6 +5501,13 @@ def render_clip(source: Path, clip: dict, settings: dict,
             stats["keyword_popups"] = len(popups)
             stats["keyword_popups_on"] = keyword_popups_on
             stats["lower_third"] = lower_third_text is not None
+
+    # Batch 12: the exact headline actually burned (None when no
+    # headline was burned — silent clip, or the ASS write failed).
+    # The backend's compliance checklist compares this against the
+    # required OST, so it is recorded from what happened, never from
+    # the settings alone.
+    stats["ost_burned_text"] = headline if headline_path else None
 
     sw, sh = source_info["width"], source_info["height"]
 
@@ -6796,6 +6985,36 @@ def process_job(api: JobApi, job: dict) -> None:
             # no field rather than an empty object.
             if clip.get("score_breakdown"):
                 clip_fields["score_breakdown"] = clip["score_breakdown"]
+            # Batch 12: per-clip campaign attachment — the title +
+            # hashtags from THIS clip's own transcript, the post
+            # caption (required verbatim, else the clip's own title),
+            # and the exact OST text the render actually burned.
+            # A field is sent only when it has a value — an absent
+            # field means "none", never the string "None".
+            clip_title, auto_tags = derive_clip_title_hashtags(
+                segments, clip["start"], clip["end"])
+            campaign = apply_campaign_caption(settings, clip_title, auto_tags)
+            clip_stats = clip.get("_batch1_stats") or {}
+            burned = clip_stats.get("ost_burned_text")
+            applied = list(campaign["required_items_applied"])
+            required_ost = _required_campaign_ost(settings)
+            if required_ost is not None and burned == required_ost:
+                applied.append("ost")
+            if clip_title:
+                clip_fields["title_suggestion"] = clip_title
+            if campaign["hashtags"]:
+                clip_fields["hashtags"] = json.dumps(campaign["hashtags"])
+            if campaign["post_caption"]:
+                clip_fields["post_caption"] = campaign["post_caption"]
+            clip_fields["caption_source"] = campaign["caption_source"]
+            if burned:
+                clip_fields["ost_burned_text"] = burned
+            if applied:
+                clip_fields["required_items_applied"] = json.dumps(applied)
+            log.info("Job %s clip %d campaign: title=%r caption_source=%s "
+                     "hashtags=%s ost_burned=%r applied=%s",
+                     job_id, i, clip_title, campaign["caption_source"],
+                     campaign["hashtags"], burned, applied)
             api.upload_clip(job_id, out_path, clip_fields, thumbnail=thumb,
                             candidates=cands)
             log.info("Uploaded clip %d/%d for job %s.", n, len(rendered), job_id)

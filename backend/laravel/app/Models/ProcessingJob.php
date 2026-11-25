@@ -147,6 +147,11 @@ class ProcessingJob extends Model
         'disk',
         'started_at',
         'finished_at',
+        // Batch 12: campaign compliance — the server-computed
+        // checklist (on completion) and the user's manual brief
+        // checks (ticked by hand on the job page).
+        'campaign_checklist',
+        'campaign_manual_checks',
     ];
 
     protected function casts(): array
@@ -157,6 +162,8 @@ class ProcessingJob extends Model
             'hashtags' => 'array',
             'intro_applied' => 'boolean',
             'outro_applied' => 'boolean',
+            'campaign_checklist' => 'array',
+            'campaign_manual_checks' => 'array',
             'started_at' => 'datetime',
             'finished_at' => 'datetime',
         ];
@@ -276,6 +283,18 @@ class ProcessingJob extends Model
                 'variant_of_clip_id' => $clip->variant_of_clip_id,
                 'caption_style' => $clip->caption_style ?? $jobStyle,
                 'download_url' => url("/api/v1/clips/{$clip->id}/download"),
+                // Batch 12: per-clip campaign attachment — the clip's
+                // own title + hashtags, its post caption (required
+                // verbatim or auto-derived), where the caption came
+                // from, the exact OST text actually burned, and which
+                // required items this clip applied. Null on clips
+                // rendered before this batch.
+                'title_suggestion' => $clip->title_suggestion,
+                'hashtags' => $clip->hashtags,
+                'post_caption' => $clip->post_caption,
+                'caption_source' => $clip->caption_source,
+                'ost_burned_text' => $clip->ost_burned_text,
+                'required_items_applied' => $clip->required_items_applied,
                 'created_at' => $clip->created_at,
             ];
         })->all();
@@ -305,6 +324,11 @@ class ProcessingJob extends Model
             // had no speech to derive them from).
             'title_suggestion' => $this->title_suggestion,
             'hashtags' => $this->hashtags,
+            // Batch 12: campaign compliance checklist (null when the
+            // job has no required campaign items) and the manual
+            // brief checks the user ticks by hand.
+            'campaign_checklist' => $this->campaign_checklist,
+            'campaign_manual_checks' => $this->campaign_manual_checks,
             'started_at' => $this->started_at,
             'finished_at' => $this->finished_at,
             'created_at' => $this->created_at,
