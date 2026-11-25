@@ -1059,7 +1059,7 @@ export function JobDetailPage() {
                         {viral.value != null ? 'Viral score' : viral.label}
                       </span>
                     </div>
-                    <div className="min-w-0 flex-1">
+                    <div className="min-w-[15rem] flex-1">
                       <p className="truncate font-semibold text-white">
                         {clip.title}
                         {clip.variant_of_clip_id != null ? (

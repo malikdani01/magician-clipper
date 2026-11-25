@@ -130,7 +130,7 @@ export function ViralChecklist({ clip, job }: { clip: JobClip; job: Job }) {
               {item.state === 'pass' ? '✓' : item.state === 'fail' ? '✗' : '—'}
             </span>
             <span className="text-[var(--color-text-muted)]">{item.label}:</span>
-            <span className="font-medium text-white">{item.value}</span>
+            <span className="min-w-0 break-words font-medium text-white">{item.value}</span>
           </li>
         ))}
       </ul>
