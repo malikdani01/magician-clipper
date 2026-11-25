@@ -129,6 +129,10 @@ class ProcessingJob extends Model
         'note',
         'intro_applied',
         'outro_applied',
+        // Batch 4: title + hashtag suggestions from the job's own
+        // transcript (null on silent jobs / jobs made before them).
+        'title_suggestion',
+        'hashtags',
         'engine_job_id',
         'settings',
         'source_type',
@@ -143,6 +147,7 @@ class ProcessingJob extends Model
         return [
             'progress' => 'integer',
             'settings' => 'array',
+            'hashtags' => 'array',
             'intro_applied' => 'boolean',
             'outro_applied' => 'boolean',
             'started_at' => 'datetime',
@@ -253,6 +258,10 @@ class ProcessingJob extends Model
                 'reason' => $clip->reason,
                 'transcript_excerpt' => $clip->transcript_excerpt,
                 'thumbnail_path' => $clip->thumbnail_path,
+                // Batch 4: thumbnail-picker candidates (null on older
+                // clips) and the favourite flag.
+                'thumbnail_candidates' => $clip->thumbnail_candidates,
+                'is_favourite' => (bool) $clip->is_favourite,
                 'caption_style' => $clip->caption_style ?? $jobStyle,
                 'download_url' => url("/api/v1/clips/{$clip->id}/download"),
                 'created_at' => $clip->created_at,
@@ -275,6 +284,10 @@ class ProcessingJob extends Model
             'note' => $this->note,
             'intro_applied' => (bool) $this->intro_applied,
             'outro_applied' => (bool) $this->outro_applied,
+            // Batch 4: title + hashtag suggestions (null when the job
+            // had no speech to derive them from).
+            'title_suggestion' => $this->title_suggestion,
+            'hashtags' => $this->hashtags,
             'started_at' => $this->started_at,
             'finished_at' => $this->finished_at,
             'created_at' => $this->created_at,

@@ -37,6 +37,8 @@ export interface PresetSettings {
   caption_translation: 'none' | 'ur' | 'hi' | 'en'
   /** Batch 3 export ratios (2026-11-25); default ['9:16']. */
   export_ratios: string[]
+  /** Batch 4 logo overlay (2026-11-25); default OFF. */
+  logo_overlay: boolean
   job_type: 'myself' | 'campaign'
   campaign_requirements: string | null
   notes: string | null

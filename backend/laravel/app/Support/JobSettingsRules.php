@@ -54,6 +54,9 @@ class JobSettingsRules
             'caption_translation' => ['sometimes', 'string', Rule::in(['none', 'ur', 'hi', 'en'])],
             'export_ratios' => ['sometimes', 'array', 'max:3'],
             'export_ratios.*' => ['string', Rule::in(['9:16', '1:1', '16:9'])],
+            // Batch 4 (2026-11-25): logo overlay (default OFF — a
+            // watermark must never surprise the user).
+            'logo_overlay' => ['sometimes', 'boolean'],
             'job_type' => ['sometimes', 'string', Rule::in(['myself', 'campaign'])],
             'campaign_requirements' => ['sometimes', 'nullable', 'string', 'max:5000'],
             'notes' => ['sometimes', 'nullable', 'string', 'max:5000'],

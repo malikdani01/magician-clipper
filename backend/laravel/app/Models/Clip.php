@@ -34,6 +34,11 @@ class Clip extends Model
         'status',
         'output_path',
         'thumbnail_path',
+        // Batch 4: up to 3 worker-extracted frames for the thumbnail
+        // picker (null on clips rendered before the picker existed),
+        // and the per-clip favourite flag.
+        'thumbnail_candidates',
+        'is_favourite',
         'caption_style',
         'file_size_bytes',
         'score',
@@ -51,6 +56,8 @@ class Clip extends Model
             'file_size_bytes' => 'integer',
             'score' => 'float',
             'score_breakdown' => 'array',
+            'thumbnail_candidates' => 'array',
+            'is_favourite' => 'boolean',
         ];
     }
 

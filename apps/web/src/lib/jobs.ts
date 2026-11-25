@@ -124,6 +124,9 @@ export interface JobSettings {
   /** Batch 3 export ratios (2026-11-25); absent means the job's own
    * aspect_ratio only. */
   export_ratios?: string[]
+  /** Batch 4 logo overlay (2026-11-25); absent means OFF — the
+   * worker treats a missing key as OFF. */
+  logo_overlay?: boolean
   job_type: 'myself' | 'campaign'
   campaign_requirements: string | null
   /** Free-text notes for Muse (campaign brief, extra instructions). */
@@ -153,6 +156,11 @@ export interface JobClip {
   download_url: string
   /** First-frame JPEG path (null for clips rendered before thumbnails). */
   thumbnail_path: string | null
+  /** Batch 4: up to 3 worker-extracted frames for the thumbnail
+   * picker (null on clips rendered before the picker existed). */
+  thumbnail_candidates: string[] | null
+  /** Batch 4: favourite flag (false by default). */
+  is_favourite: boolean
   /** Caption style burned into this clip (null when rendered before styles were stored). */
   caption_style: string | null
   created_at: string
@@ -170,6 +178,11 @@ export interface Job {
   /** True when the worker added the brand intro / outro to this job's clips. Absent on jobs rendered before the flags existed. */
   intro_applied?: boolean
   outro_applied?: boolean
+  /** Batch 4: title + hashtag suggestions derived from the job's own
+   * transcript. Null on silent jobs (no speech to derive from) and
+   * on jobs rendered before suggestions existed. */
+  title_suggestion?: string | null
+  hashtags?: string[] | null
   settings: JobSettings | null
   source_type: 'upload' | 'link'
   source_url: string | null
@@ -220,6 +233,9 @@ export interface CreateJobInput {
   captionTranslation: CaptionTranslation
   /** Batch 3 export ratios (default ['9:16'] — 9:16 is always on). */
   exportRatios: string[]
+  /** Batch 4 logo overlay (default OFF) — watermark the Brand Kit
+   * logo onto every clip, bottom-right. */
+  logoOverlay: boolean
   jobType: 'myself' | 'campaign'
   campaignRequirements?: string
   /** Free-text notes for Muse (campaign brief, extra instructions). */
@@ -282,6 +298,53 @@ function isUnreachable(err: unknown): boolean {
  * POST /api/v1/jobs. File source → multipart; link source → JSON.
  * 120s timeout: a 2 GiB upload can take a while on a slow link.
  */
+/**
+ * Append the shared settings fields to a job-creation FormData.
+ * Used by createJob (single file) and createBulkJobs (up to 5 files)
+ * so the two can never drift apart. The caller appends the file(s)
+ * itself first.
+ */
+function appendSettingsForm(form: FormData, input: CreateJobInput): void {
+  form.append('platform', input.platform)
+  form.append('aspect_ratio', input.aspectRatio)
+  form.append('clip_count', String(input.clipCount))
+  form.append('duration_mode', input.durationMode)
+  form.append('duration_seconds', String(input.durationSeconds))
+  if (input.durationMinSeconds != null) {
+    form.append('duration_min_seconds', String(input.durationMinSeconds))
+  }
+  if (input.durationMaxSeconds != null) {
+    form.append('duration_max_seconds', String(input.durationMaxSeconds))
+  }
+  form.append('captions_enabled', String(input.captionsEnabled))
+  form.append('captions_language', input.captionsLanguage)
+  form.append('caption_style', input.captionStyle)
+  form.append('selection_mode', input.selectionMode ?? 'interesting_only')
+  form.append('on_screen_text', String(input.onScreenText))
+  form.append('auto_zoom', String(input.autoZoom))
+  form.append('face_tracking', String(input.faceTracking))
+  form.append('silence_removal', String(input.silenceRemoval))
+  form.append('filler_removal', String(input.fillerRemoval))
+  form.append('headline_style', input.headlineStyle)
+  form.append('caption_position', input.captionPosition)
+  form.append('beat_sync', String(input.beatSync))
+  form.append('caption_translation', input.captionTranslation)
+  for (const ratio of input.exportRatios) {
+    form.append('export_ratios[]', ratio)
+  }
+  form.append('logo_overlay', String(input.logoOverlay))
+  form.append('job_type', input.jobType)
+  if (input.jobType === 'campaign' && input.campaignRequirements) {
+    form.append('campaign_requirements', input.campaignRequirements)
+  }
+  if (input.notes) {
+    form.append('notes', input.notes)
+  }
+  form.append('layout', input.layout)
+  form.append('content_type', input.contentType)
+  form.append('quality', input.quality)
+}
+
 export async function createJob(input: CreateJobInput): Promise<JobResult> {
   if (!getToken()) {
     return { ok: false, error: 'Sign in to create a job.' }
@@ -292,43 +355,7 @@ export async function createJob(input: CreateJobInput): Promise<JobResult> {
     if (input.file) {
       const form = new FormData()
       form.append('file', input.file)
-      form.append('platform', input.platform)
-      form.append('aspect_ratio', input.aspectRatio)
-      form.append('clip_count', String(input.clipCount))
-      form.append('duration_mode', input.durationMode)
-      form.append('duration_seconds', String(input.durationSeconds))
-      if (input.durationMinSeconds != null) {
-        form.append('duration_min_seconds', String(input.durationMinSeconds))
-      }
-      if (input.durationMaxSeconds != null) {
-        form.append('duration_max_seconds', String(input.durationMaxSeconds))
-      }
-      form.append('captions_enabled', String(input.captionsEnabled))
-      form.append('captions_language', input.captionsLanguage)
-      form.append('caption_style', input.captionStyle)
-      form.append('selection_mode', input.selectionMode ?? 'interesting_only')
-      form.append('on_screen_text', String(input.onScreenText))
-      form.append('auto_zoom', String(input.autoZoom))
-      form.append('face_tracking', String(input.faceTracking))
-      form.append('silence_removal', String(input.silenceRemoval))
-      form.append('filler_removal', String(input.fillerRemoval))
-      form.append('headline_style', input.headlineStyle)
-      form.append('caption_position', input.captionPosition)
-      form.append('beat_sync', String(input.beatSync))
-      form.append('caption_translation', input.captionTranslation)
-      for (const ratio of input.exportRatios) {
-        form.append('export_ratios[]', ratio)
-      }
-      form.append('job_type', input.jobType)
-      if (input.jobType === 'campaign' && input.campaignRequirements) {
-        form.append('campaign_requirements', input.campaignRequirements)
-      }
-      if (input.notes) {
-        form.append('notes', input.notes)
-      }
-      form.append('layout', input.layout)
-      form.append('content_type', input.contentType)
-      form.append('quality', input.quality)
+      appendSettingsForm(form, input)
       res = await fetch(`${API_URL}/jobs`, {
         method: 'POST',
         headers: authHeaders(),
@@ -362,6 +389,7 @@ export async function createJob(input: CreateJobInput): Promise<JobResult> {
           beat_sync: input.beatSync,
           caption_translation: input.captionTranslation,
           export_ratios: input.exportRatios,
+          logo_overlay: input.logoOverlay,
           job_type: input.jobType,
           campaign_requirements:
             input.jobType === 'campaign' ? (input.campaignRequirements ?? null) : null,
@@ -395,6 +423,159 @@ export async function createJob(input: CreateJobInput): Promise<JobResult> {
           ? err.message
           : 'Could not create the job.',
     }
+  } finally {
+    cancel()
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Bulk create (Batch 4)                                               */
+/* ------------------------------------------------------------------ */
+
+export type BulkJobResult =
+  | { ok: true; jobs: Job[] }
+  | { ok: false; error: string; status?: number }
+
+/**
+ * POST /api/v1/jobs with `files[]` — up to 5 source files, ONE shared
+ * settings form, one job per file. Returns the created jobs in upload
+ * order. The backend probes every file before creating any job, so a
+ * bad file fails the whole request with no jobs created.
+ */
+export async function createBulkJobs(
+  files: File[],
+  input: CreateJobInput,
+): Promise<BulkJobResult> {
+  if (!getToken()) {
+    return { ok: false, error: 'Sign in to create jobs.' }
+  }
+  if (files.length < 1 || files.length > 5) {
+    return { ok: false, error: 'Pick between 1 and 5 video files.' }
+  }
+  const { signal, cancel } = timeoutSignal(300000)
+  try {
+    const form = new FormData()
+    for (const file of files) {
+      form.append('files[]', file)
+    }
+    appendSettingsForm(form, input)
+    const res = await fetch(`${API_URL}/jobs`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+      signal,
+    })
+    const body: unknown = await res.json().catch(() => null)
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: serverMessage(body, `Could not create the jobs (HTTP ${res.status})`),
+        status: res.status,
+      }
+    }
+    const jobs = (body as { jobs?: Job[] }).jobs
+    if (!Array.isArray(jobs) || jobs.some((j) => typeof j.id !== 'number')) {
+      return { ok: false, error: 'The server created the jobs but returned an unusable response.' }
+    }
+    return { ok: true, jobs }
+  } catch (err) {
+    return {
+      ok: false,
+      error: isUnreachable(err)
+        ? 'Backend is not reachable — start it with php artisan serve (http://127.0.0.1:8000).'
+        : err instanceof Error
+          ? err.message
+          : 'Could not create the jobs.',
+    }
+  } finally {
+    cancel()
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Clip favourites + thumbnail picker (Batch 4)                        */
+/* ------------------------------------------------------------------ */
+
+export type ClipResult =
+  | { ok: true; clip: JobClip }
+  | { ok: false; error: string; status?: number }
+
+async function patchClip(
+  clipId: number,
+  path: 'favourite' | 'thumbnail',
+  payload: Record<string, unknown>,
+): Promise<ClipResult> {
+  if (!getToken()) {
+    return { ok: false, error: 'Sign in to do that.' }
+  }
+  const { signal, cancel } = timeoutSignal(15000)
+  try {
+    const res = await fetch(`${API_URL}/clips/${clipId}/${path}`, {
+      method: 'PATCH',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal,
+    })
+    const body: unknown = await res.json().catch(() => null)
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: serverMessage(body, `Could not update the clip (HTTP ${res.status})`),
+        status: res.status,
+      }
+    }
+    const clip = (body as { clip?: JobClip }).clip
+    if (!clip || typeof clip.id !== 'number') {
+      return { ok: false, error: 'The server did not return the updated clip.' }
+    }
+    return { ok: true, clip }
+  } catch (err) {
+    return {
+      ok: false,
+      error: isUnreachable(err)
+        ? 'Backend is not reachable.'
+        : err instanceof Error
+          ? err.message
+          : 'Could not update the clip.',
+    }
+  } finally {
+    cancel()
+  }
+}
+
+/** PATCH /api/v1/clips/{id}/favourite — flip the heart. */
+export async function toggleClipFavourite(clipId: number): Promise<ClipResult> {
+  return patchClip(clipId, 'favourite', {})
+}
+
+/**
+ * PATCH /api/v1/clips/{id}/thumbnail — set one of the candidate frames
+ * (0-based index into thumbnail_candidates) as the clip's thumbnail.
+ */
+export async function setClipThumbnail(clipId: number, candidateIndex: number): Promise<ClipResult> {
+  return patchClip(clipId, 'thumbnail', { candidate_index: candidateIndex })
+}
+
+/**
+ * Fetch one thumbnail-picker candidate frame
+ * (GET /api/v1/clips/{id}/candidates/{index}) with the bearer token
+ * and return an object URL for an <img>, or null when it is missing.
+ * The caller owns the object URL.
+ */
+export async function fetchClipCandidate(clipId: number, index: number): Promise<string | null> {
+  if (!getToken()) return null
+  const { signal, cancel } = timeoutSignal(15000)
+  try {
+    const res = await fetch(`${API_URL}/clips/${clipId}/candidates/${index}`, {
+      headers: authHeaders(),
+      signal,
+    })
+    if (!res.ok) return null
+    const blob = await res.blob()
+    if (!blob.type.startsWith('image/')) return null
+    return URL.createObjectURL(blob)
+  } catch {
+    return null
   } finally {
     cancel()
   }

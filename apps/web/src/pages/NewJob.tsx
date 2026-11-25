@@ -22,6 +22,7 @@ import {
 import {
   CAPTION_POSITION_LABELS,
   CAPTION_TRANSLATION_LABELS,
+  createBulkJobs,
   createJob,
   EXPORT_RATIO_OPTIONS,
   getJob,
@@ -252,6 +253,15 @@ export function NewJobPage() {
   const [beatSync, setBeatSync] = useState(true)
   const [captionTranslation, setCaptionTranslation] = useState<CaptionTranslation>('none')
   const [exportRatios, setExportRatios] = useState<string[]>(['9:16'])
+  // Batch 4 logo overlay — default OFF, so a watermark never surprises
+  // the user. When ON and a logo is uploaded in Brand Kit, the worker
+  // overlays it bottom-right on every clip of this job.
+  const [logoOverlay, setLogoOverlay] = useState(false)
+  // Batch 4 bulk jobs — up to 5 files, one job per file with the same
+  // settings. Off by default; the wizard stays single-file only.
+  const [bulkMode, setBulkMode] = useState(false)
+  const [bulkFiles, setBulkFiles] = useState<File[]>([])
+  const [createdJobs, setCreatedJobs] = useState<{ id: number; name: string }[] | null>(null)
   const [jobType, setJobType] = useState<'myself' | 'campaign'>('myself')
   const [campaignRequirements, setCampaignRequirements] = useState('')
   // Notes for Muse: free-text brief for THIS job (campaign details,
@@ -319,8 +329,56 @@ export function NewJobPage() {
     if (inputRef.current) inputRef.current.value = ''
   }
 
+  /**
+   * Batch 4 bulk: accept several files at once (drop or browse). Each
+   * must be a video; the list caps at 5 and de-duplicates by name +
+   * size. In single-file mode this just delegates to handleFile.
+   */
+  const handleFiles = (list: FileList | File[] | null | undefined) => {
+    if (!list) return
+    const picked = Array.from(list)
+    if (picked.length === 0) return
+    if (!bulkMode) {
+      handleFile(picked[0])
+      return
+    }
+    const bad = picked.find((f) => !isVideoFile(f))
+    if (bad) {
+      setFormError(`"${bad.name}" is not a video file. Please choose MP4, MOV, MKV or WEBM files.`)
+      return
+    }
+    setFormError(null)
+    setBulkFiles((current) => {
+      const merged = [...current]
+      for (const f of picked) {
+        const duplicate = merged.some((m) => m.name === f.name && m.size === f.size)
+        if (!duplicate) merged.push(f)
+      }
+      if (merged.length > 5) {
+        setFormError('Bulk jobs take at most 5 files — only the first 5 were kept.')
+        return merged.slice(0, 5)
+      }
+      return merged
+    })
+    if (inputRef.current) inputRef.current.value = ''
+  }
+
   const clearFile = () => {
     setFile(null)
+    if (inputRef.current) inputRef.current.value = ''
+  }
+
+  const clearBulkFile = (name: string, size: number) => {
+    setBulkFiles((current) => current.filter((f) => !(f.name === name && f.size === size)))
+    if (inputRef.current) inputRef.current.value = ''
+  }
+
+  /** Switching between single and bulk clears the chosen file(s). */
+  const setBulk = (on: boolean) => {
+    setBulkMode(on)
+    setFile(null)
+    setBulkFiles([])
+    setCreatedJobs(null)
     if (inputRef.current) inputRef.current.value = ''
   }
 
@@ -403,6 +461,8 @@ export function NewJobPage() {
         setExportRatios(ratios.includes('9:16') ? ratios : ['9:16', ...ratios])
       }
     }
+    // Batch 4 (2026-11-25): logo overlay.
+    if (typeof s.logo_overlay === 'boolean') setLogoOverlay(s.logo_overlay)
     if (s.job_type === 'myself' || s.job_type === 'campaign') setJobType(s.job_type)
     if (typeof s.campaign_requirements === 'string') setCampaignRequirements(s.campaign_requirements)
     if (typeof s.notes === 'string') setNotes(s.notes)
@@ -445,6 +505,7 @@ export function NewJobPage() {
     beat_sync: beatSync,
     caption_translation: captionTranslation,
     export_ratios: exportRatios,
+    logo_overlay: logoOverlay,
     job_type: jobType,
     campaign_requirements: campaignRequirements.trim() ? campaignRequirements : null,
     notes: notes.trim() ? notes : null,
@@ -495,7 +556,10 @@ export function NewJobPage() {
 
   /** Client-side validation; the backend re-validates everything. */
   const validate = (): string | null => {
-    if (sourceTab === 'upload' && !file) return 'Choose a video file to upload.'
+    if (sourceTab === 'upload' && bulkMode && bulkFiles.length === 0) {
+      return 'Choose at least one video file to upload (up to 5).'
+    }
+    if (sourceTab === 'upload' && !bulkMode && !file) return 'Choose a video file to upload.'
     if (sourceTab === 'link') {
       const url = link.trim()
       if (!url) return 'Paste a video link.'
@@ -543,8 +607,8 @@ export function NewJobPage() {
     // enforces (min / max). The min/max pair is sent as well.
     const durationSeconds =
       durationMode === 'exact' ? exactSeconds : durationMode === 'minimum' ? minSeconds : maxSeconds
-    const result = await createJob({
-      file: sourceTab === 'upload' ? file : null,
+    const input = {
+      file: sourceTab === 'upload' && !bulkMode ? file : null,
       sourceUrl: sourceTab === 'link' ? link.trim() : undefined,
       platform,
       aspectRatio,
@@ -567,6 +631,7 @@ export function NewJobPage() {
       beatSync,
       captionTranslation,
       exportRatios,
+      logoOverlay,
       jobType,
       campaignRequirements: campaignRequirements.trim(),
       notes: notes.trim(),
@@ -574,7 +639,22 @@ export function NewJobPage() {
       layout: aspectRatio === '9:16' ? layout : 'center_crop',
       contentType,
       quality,
-    })
+    }
+    // Batch 4 bulk: one job per file with the same settings. The jobs
+    // come back in upload order, so each pairs with its file by index.
+    if (sourceTab === 'upload' && bulkMode) {
+      const bulkResult = await createBulkJobs(bulkFiles, input)
+      setSubmitting(false)
+      if (!bulkResult.ok) {
+        setSubmitError(bulkResult.error)
+        return
+      }
+      setCreatedJobs(
+        bulkResult.jobs.map((job, i) => ({ id: job.id, name: bulkFiles[i]?.name ?? `Job ${job.id}` })),
+      )
+      return
+    }
+    const result = await createJob(input)
     setSubmitting(false)
     if (!result.ok) {
       setSubmitError(result.error)
@@ -774,6 +854,45 @@ export function NewJobPage() {
         ) : null}
       </section>
 
+      {/* Batch 4 bulk result — links to every job just created. */}
+      {createdJobs ? (
+        <section
+          role="status"
+          className="mb-4 rounded-2xl border border-emerald-500/40 bg-emerald-500/10 p-6"
+        >
+          <h2 className="flex items-center gap-2 text-lg font-semibold text-emerald-300">
+            <Check className="h-5 w-5" /> Created {createdJobs.length} job{createdJobs.length === 1 ? '' : 's'}
+          </h2>
+          <ul className="mt-3 space-y-2">
+            {createdJobs.map((j) => (
+              <li key={j.id}>
+                <Link
+                  to={`/jobs/${j.id}`}
+                  className="text-sm font-medium text-white underline decoration-emerald-400/60 underline-offset-2 hover:text-emerald-200"
+                >
+                  Job #{j.id} — {j.name}
+                </Link>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-3 text-sm text-emerald-200/80">
+            Each job processes on its own — open a job to watch its clips
+            appear.
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              setCreatedJobs(null)
+              setBulkFiles([])
+              if (inputRef.current) inputRef.current.value = ''
+            }}
+            className="mt-4 rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2 text-sm font-medium text-white hover:border-brand/60"
+          >
+            Create more jobs
+          </button>
+        </section>
+      ) : null}
+
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
         <div className="space-y-4 xl:col-span-2">
           {/* Source */}
@@ -793,7 +912,40 @@ export function NewJobPage() {
             </div>
 
             {sourceTab === 'upload' ? (
-              !file ? (
+              <>
+                {/* Batch 4 bulk: one job per file (up to 5) with the
+                    same settings. Switching clears the chosen file(s). */}
+                <div className="mt-4 flex items-center gap-3">
+                  <Toggle checked={bulkMode} onChange={setBulk} label="Bulk jobs on or off" />
+                  <span className="text-sm text-[var(--color-text-muted)]">
+                    Bulk jobs — up to 5 files, one job per file, same
+                    settings
+                  </span>
+                </div>
+                {bulkMode && bulkFiles.length > 0 ? (
+                  <ul className="mt-4 space-y-2">
+                    {bulkFiles.map((f) => (
+                      <li key={`${f.name}-${f.size}`} className="flex items-center gap-3 rounded-xl bg-ink-panel2 p-4">
+                        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-brand/15 text-brand-light">
+                          <FileVideo className="h-5 w-5" />
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate font-medium text-white">{f.name}</p>
+                          <p className="text-sm text-[var(--color-text-muted)]">{formatBytes(f.size)}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => clearBulkFile(f.name, f.size)}
+                          aria-label={`Remove ${f.name}`}
+                          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-ink-border text-[var(--color-text-muted)] hover:text-white"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                {(bulkMode ? bulkFiles.length < 5 : !file) ? (
                 <div
                   role="button"
                   tabIndex={0}
@@ -810,7 +962,7 @@ export function NewJobPage() {
                   onDrop={(e) => {
                     e.preventDefault()
                     setDragOver(false)
-                    handleFile(e.dataTransfer.files?.[0])
+                    handleFiles(e.dataTransfer.files)
                   }}
                   className={`mt-4 flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-12 text-center transition-colors ${
                     dragOver ? 'border-brand bg-brand/10' : 'border-ink-border bg-ink-panel2 hover:border-brand/60'
@@ -820,28 +972,35 @@ export function NewJobPage() {
                     <CloudUpload className="h-7 w-7" />
                   </span>
                   <p className="mt-3 text-base font-semibold text-white">
-                    Drag &amp; drop your video here or click to browse
+                    Drag &amp; drop your video{bulkMode ? 's' : ''} here or click to browse
                   </p>
                   <p className="mt-1 text-sm text-[var(--color-text-muted)]">
-                    MP4, MOV, MKV, WEBM — up to 2 GB. The file is checked with
-                    ffprobe on the server before the job is queued.
+                    {bulkMode
+                      ? 'MP4, MOV, MKV, WEBM — up to 2 GB each, max 5 files. Each file becomes its own job.'
+                      : 'MP4, MOV, MKV, WEBM — up to 2 GB. The file is checked with ffprobe on the server before the job is queued.'}
                   </p>
                   <input
                     ref={inputRef}
                     type="file"
                     accept="video/*,.mkv"
+                    multiple={bulkMode}
                     className="hidden"
-                    onChange={(e) => handleFile(e.target.files?.[0])}
+                    onChange={(e) => handleFiles(e.target.files)}
                   />
                 </div>
-              ) : (
+                ) : bulkMode ? (
+                  <p className="mt-4 text-sm text-[var(--color-text-muted)]">
+                    5 files chosen — the maximum for one bulk submit. Remove
+                    one to add another.
+                  </p>
+                ) : (
                 <div className="mt-4 flex items-center gap-3 rounded-xl bg-ink-panel2 p-4">
                   <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-brand/15 text-brand-light">
                     <FileVideo className="h-5 w-5" />
                   </span>
                   <div className="min-w-0 flex-1">
-                    <p className="truncate font-medium text-white">{file.name}</p>
-                    <p className="text-sm text-[var(--color-text-muted)]">{formatBytes(file.size)}</p>
+                    <p className="truncate font-medium text-white">{file?.name ?? ''}</p>
+                    <p className="text-sm text-[var(--color-text-muted)]">{file ? formatBytes(file.size) : ''}</p>
                   </div>
                   <button
                     type="button"
@@ -852,7 +1011,8 @@ export function NewJobPage() {
                     <X className="h-4 w-4" />
                   </button>
                 </div>
-              )
+                )}
+              </>
             ) : (
               <div className="mt-4">
                 <label className="block">
@@ -1171,6 +1331,28 @@ export function NewJobPage() {
                 </span>
               </div>
 
+              {/* Batch 4 logo overlay — default OFF. When ON and a logo
+                  is uploaded in Brand Kit, the worker overlays it
+                  bottom-right on every clip of this job. */}
+              <div>
+                <span className="text-sm font-medium text-white">Logo overlay</span>
+                <div className="mt-2 flex items-center gap-3">
+                  <Toggle
+                    checked={logoOverlay}
+                    onChange={setLogoOverlay}
+                    label="Logo overlay on or off"
+                  />
+                  <span className="text-sm text-[var(--color-text-muted)]">
+                    {logoOverlay ? 'Logo overlay on' : 'Logo overlay off'} — watermark your Brand Kit
+                    logo on every clip (bottom-right)
+                  </span>
+                </div>
+                <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                  Upload the logo in Brand Kit first. If no logo is uploaded,
+                  the job renders without one and says so.
+                </span>
+              </div>
+
               {/* Batch 1 clip enhancements — all default ON. */}
               <div>
                 <span className="text-sm font-medium text-white">Clip enhancements</span>
@@ -1352,7 +1534,11 @@ export function NewJobPage() {
                 ) : (
                   <ArrowRight className="h-4 w-4" />
                 )}
-                {submitting ? 'Creating job…' : 'Analyze Video →'}
+                {submitting
+                  ? 'Creating job…'
+                  : sourceTab === 'upload' && bulkMode
+                    ? `Create ${bulkFiles.length} job${bulkFiles.length === 1 ? '' : 's'} →`
+                    : 'Analyze Video →'}
               </button>
             </div>
           </section>
@@ -1378,6 +1564,7 @@ export function NewJobPage() {
                 ['Beat sync', beatSync ? 'On' : 'Off'],
                 ['Translate captions', CAPTION_TRANSLATION_LABELS[captionTranslation]],
                 ['Export ratios', exportRatios.join(', ')],
+                ['Logo overlay', logoOverlay ? 'On' : 'Off'],
                 ['Auto zoom', autoZoom ? 'On' : 'Off'],
                 ['Face tracking', faceTracking ? 'On' : 'Off'],
                 ['Silence removal', silenceRemoval ? 'On' : 'Off'],

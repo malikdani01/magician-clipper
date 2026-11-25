@@ -11,10 +11,15 @@ class BrandAsset extends Model
 
     public const KIND_INTRO = 'intro';
     public const KIND_OUTRO = 'outro';
+    /** Batch 4 (2026-11-25): the Brand Kit logo — an image, not a
+     * video. One per user, like intro/outro; the worker overlays it
+     * on clips when the job's logo_overlay setting is on. */
+    public const KIND_LOGO = 'logo';
 
     public const KINDS = [
         self::KIND_INTRO,
         self::KIND_OUTRO,
+        self::KIND_LOGO,
     ];
 
     /** Maximum asset length: brand stingers are short by design. */

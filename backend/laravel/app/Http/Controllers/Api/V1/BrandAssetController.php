@@ -13,7 +13,7 @@ use Illuminate\Validation\Rule;
 class BrandAssetController extends Controller
 {
     /**
-     * GET /api/v1/brand-kit/assets — my brand assets (intro/outro),
+     * GET /api/v1/brand-kit/assets — my brand assets (intro/outro/logo),
      * newest first. Never another user's.
      */
     public function index(Request $request)
@@ -24,19 +24,30 @@ class BrandAssetController extends Controller
     }
 
     /**
-     * POST /api/v1/brand-kit/assets — upload an intro or outro video.
+     * POST /api/v1/brand-kit/assets — upload an intro/outro video or a
+     * logo image.
      *
      * One asset per (user, kind): uploading again replaces the
-     * previous one and deletes its file. The file must be a real
+     * previous one and deletes its file. A video must be a real
      * video per ffprobe, with duration > 0 and at most 15 seconds —
      * a longer file or a non-video is a 422, never a stored asset.
+     * A logo must be a real image (PNG/JPG/WebP, at most 5 MB);
+     * getimagesize proves the bytes really are an image.
      */
     public function store(Request $request)
     {
-        $validated = $request->validate([
+        // Kind first: the file rules depend on it.
+        $request->validate([
             'kind' => ['required', 'string', Rule::in(BrandAsset::KINDS)],
-            'file' => ['required', 'file', 'mimes:mp4,mov,webm', 'max:51200'],
         ]);
+        $kind = $request->input('kind');
+
+        $validated = $request->validate([
+            'file' => $kind === BrandAsset::KIND_LOGO
+                ? ['required', 'file', 'mimes:png,jpg,jpeg,webp', 'max:5120']
+                : ['required', 'file', 'mimes:mp4,mov,webm', 'max:51200'],
+        ]);
+        $validated['kind'] = $kind;
 
         $user = $request->user();
         $file = $request->file('file');
@@ -46,34 +57,56 @@ class BrandAssetController extends Controller
         Storage::disk('local')->putFileAs("brand-assets/{$user->id}", $file, $filename);
         $absolutePath = Storage::disk('local')->path($relativePath);
 
-        // The file must be a real, playable video — and a short one.
-        if (VideoProbe::ffprobePath() === null) {
-            Storage::disk('local')->delete($relativePath);
+        // Batch 4: a logo is an image, not a video — it has no
+        // duration (the column is a non-nullable float, so 0.0).
+        // getimagesize reads the real header, so a renamed text
+        // file is rejected here, not at render time.
+        if ($kind === BrandAsset::KIND_LOGO) {
+            // getimagesize warns (and Laravel turns the warning into
+            // an exception) on unreadable bytes — suppress it and
+            // treat the result as the verdict.
+            if (@getimagesize($absolutePath) === false) {
+                Storage::disk('local')->delete($relativePath);
 
-            return response()->json([
-                'error' => 'server_error',
-                'message' => 'Video validation is unavailable on this server (ffprobe is not installed).',
-            ], 500);
-        }
+                return response()->json([
+                    'error' => 'validation_error',
+                    'message' => 'The uploaded file is not a valid image (PNG, JPG or WebP).',
+                ], 422);
+            }
 
-        $probe = VideoProbe::probe($absolutePath);
-        if ($probe === null) {
-            Storage::disk('local')->delete($relativePath);
+            $durationSeconds = 0.0;
+        } else {
+            // The file must be a real, playable video — and a short one.
+            if (VideoProbe::ffprobePath() === null) {
+                Storage::disk('local')->delete($relativePath);
 
-            return response()->json([
-                'error' => 'validation_error',
-                'message' => 'The uploaded file is not a playable video (FFprobe could not read it).',
-            ], 422);
-        }
+                return response()->json([
+                    'error' => 'server_error',
+                    'message' => 'Video validation is unavailable on this server (ffprobe is not installed).',
+                ], 500);
+            }
 
-        if ($probe['duration'] > BrandAsset::MAX_DURATION_SECONDS) {
-            Storage::disk('local')->delete($relativePath);
+            $probe = VideoProbe::probe($absolutePath);
+            if ($probe === null) {
+                Storage::disk('local')->delete($relativePath);
 
-            return response()->json([
-                'error' => 'validation_error',
-                'message' => 'Brand assets must be at most 15 seconds long (uploaded video is '
-                    .number_format($probe['duration'], 1).' seconds).',
-            ], 422);
+                return response()->json([
+                    'error' => 'validation_error',
+                    'message' => 'The uploaded file is not a playable video (FFprobe could not read it).',
+                ], 422);
+            }
+
+            if ($probe['duration'] > BrandAsset::MAX_DURATION_SECONDS) {
+                Storage::disk('local')->delete($relativePath);
+
+                return response()->json([
+                    'error' => 'validation_error',
+                    'message' => 'Brand assets must be at most 15 seconds long (uploaded video is '
+                        .number_format($probe['duration'], 1).' seconds).',
+                ], 422);
+            }
+
+            $durationSeconds = $probe['duration'];
         }
 
         // Upsert per (user, kind): replacing deletes the old file so
@@ -85,7 +118,7 @@ class BrandAssetController extends Controller
         $attributes = [
             'path' => $relativePath,
             'original_name' => $file->getClientOriginalName(),
-            'duration_seconds' => $probe['duration'],
+            'duration_seconds' => $durationSeconds,
             'file_size_bytes' => Storage::disk('local')->size($relativePath),
         ];
 
@@ -105,6 +138,42 @@ class BrandAssetController extends Controller
         ]));
 
         return response()->json(['asset' => $asset->fresh()], 201);
+    }
+
+    /**
+     * GET /api/v1/brand-kit/assets/{asset}/download — stream one of my
+     * brand assets (the logo preview in Brand Kit uses this).
+     * Another user's asset is a 404, never a leak; a missing file
+     * (wiped by a server restart) is a 404 saying so.
+     */
+    public function download(Request $request, BrandAsset $asset)
+    {
+        if ($asset->user_id !== $request->user()->id) {
+            return response()->json([
+                'error' => 'not_found',
+                'message' => 'No such brand asset.',
+            ], 404);
+        }
+
+        if (! $asset->path || ! Storage::disk('local')->exists($asset->path)) {
+            return response()->json([
+                'error' => 'not_found',
+                'message' => 'This brand asset file was removed when the server restarted. Upload it again.',
+            ], 404);
+        }
+
+        $mime = $asset->kind === BrandAsset::KIND_LOGO
+            ? (match (strtolower(pathinfo($asset->path, PATHINFO_EXTENSION))) {
+                'png' => 'image/png',
+                'jpg', 'jpeg' => 'image/jpeg',
+                'webp' => 'image/webp',
+                default => 'application/octet-stream',
+            })
+            : 'video/mp4';
+
+        return Storage::disk('local')->response($asset->path, null, [
+            'Content-Type' => $mime,
+        ]);
     }
 
     /**

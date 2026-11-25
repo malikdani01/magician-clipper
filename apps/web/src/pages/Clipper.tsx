@@ -435,6 +435,8 @@ export function ClipperPage() {
         patch.exportRatios = ratios.includes('9:16') ? ratios : ['9:16', ...ratios]
       }
     }
+    // Batch 4 (2026-11-25): logo overlay.
+    if (typeof s.logo_overlay === 'boolean') patch.logoOverlay = s.logo_overlay
     if (CONTENT_TYPES.some((c) => c.id === s.content_type)) {
       patch.contentType = s.content_type as ClipSpec['contentType']
     }
@@ -512,6 +514,7 @@ export function ClipperPage() {
       beatSync: spec.beatSync ?? true,
       captionTranslation: spec.captionTranslation ?? 'none',
       exportRatios: spec.exportRatios ?? ['9:16'],
+      logoOverlay: spec.logoOverlay ?? false,
       jobType: 'myself',
       notes: keywordsAvoid.trim()
         ? `Keywords to avoid: ${keywordsAvoid.trim()}`
@@ -1634,6 +1637,28 @@ export function ClipperPage() {
                 <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
                   The same clips render in each ratio — each gets its own
                   download. 1:1 and 16:9 use a centre crop.
+                </span>
+              </div>
+
+              {/* Batch 4 logo overlay — default OFF. When ON and a logo
+                  is uploaded in Brand Kit, the worker overlays it
+                  bottom-right on every clip of this job. */}
+              <div>
+                <span className="text-sm font-medium text-white">Logo overlay</span>
+                <div className="mt-2 flex items-center gap-3">
+                  <Toggle
+                    checked={spec.logoOverlay ?? false}
+                    onChange={(v) => updateSpec({ logoOverlay: v })}
+                    label="Logo overlay on or off"
+                  />
+                  <span className="text-sm text-[var(--color-text-muted)]">
+                    Logo overlay — watermark your Brand Kit logo on every
+                    clip (bottom-right)
+                  </span>
+                </div>
+                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
+                  Upload the logo in Brand Kit first. If no logo is
+                  uploaded, the job renders without one and says so.
                 </span>
               </div>
 

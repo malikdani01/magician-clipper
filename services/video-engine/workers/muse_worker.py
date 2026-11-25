@@ -437,7 +437,9 @@ class JobApi:
                    stage: str | None = None, progress: int | None = None,
                    note: str | None = None,
                    intro_applied: bool | None = None,
-                   outro_applied: bool | None = None) -> dict:
+                   outro_applied: bool | None = None,
+                   title_suggestion: str | None = None,
+                   hashtags: list[str] | None = None) -> dict:
         payload: dict = {"status": status}
         # The worker's own ffmpeg/ffprobe versions ride along with
         # every status update — the hosted site has no engine URL to
@@ -458,6 +460,13 @@ class JobApi:
             payload["intro_applied"] = intro_applied
         if outro_applied is not None:
             payload["outro_applied"] = outro_applied
+        # Batch 4: title + hashtag suggestions, derived from the job's
+        # own transcript. Sent only when the worker derived them (a
+        # silent job sends neither, and the job page says so honestly).
+        if title_suggestion is not None:
+            payload["title_suggestion"] = title_suggestion[:120]
+        if hashtags:
+            payload["hashtags"] = list(hashtags)[:10]
         resp = self._request("PATCH", f"/muse/jobs/{job_id}/status", json=payload)
         if resp.status_code not in (200, 202):
             raise RuntimeError(
@@ -467,7 +476,8 @@ class JobApi:
         data = resp.json()
         return data.get("job", data)
 
-    def upload_clip(self, job_id, clip_path: Path, fields: dict, thumbnail: Path | None = None) -> dict:
+    def upload_clip(self, job_id, clip_path: Path, fields: dict, thumbnail: Path | None = None,
+                    candidates: list[Path] | None = None) -> dict:
         files: dict = {}
         handles = []
         try:
@@ -478,6 +488,16 @@ class JobApi:
                 th = open(thumbnail, "rb")
                 handles.append(th)
                 files["thumbnail"] = (thumbnail.name, th, "image/jpeg")
+            # Batch 4: thumbnail-picker candidates (up to 3 frames).
+            # Each rides as its own file field; a missing file is
+            # skipped, never fatal — the backend stores what it got.
+            for n, cand in enumerate(candidates or [], 1):
+                if n > 3:
+                    break
+                if cand is not None and Path(cand).exists():
+                    fh_c = open(cand, "rb")
+                    handles.append(fh_c)
+                    files[f"candidate_{n}"] = (Path(cand).name, fh_c, "image/jpeg")
             # Multipart form fields are strings. The wire contract for
             # `score_breakdown` is a JSON-encoded object (string keys,
             # integer values 0-100) — str() on a dict would send a
@@ -539,7 +559,8 @@ class JobApi:
 
     def upload_replacement_clip(self, clip_id, clip_path: Path, rerender_id,
                                 thumbnail: Path | None = None,
-                                duration_seconds: float | None = None) -> dict:
+                                duration_seconds: float | None = None,
+                                candidates: list[Path] | None = None) -> dict:
         files: dict = {}
         handles = []
         try:
@@ -550,6 +571,15 @@ class JobApi:
                 th = open(thumbnail, "rb")
                 handles.append(th)
                 files["thumbnail"] = (thumbnail.name, th, "image/jpeg")
+            # Batch 4: the re-rendered clip gets fresh thumbnail-picker
+            # candidates (its frames changed with the new style).
+            for n, cand in enumerate(candidates or [], 1):
+                if n > 3:
+                    break
+                if cand is not None and Path(cand).exists():
+                    fh_c = open(cand, "rb")
+                    handles.append(fh_c)
+                    files[f"candidate_{n}"] = (Path(cand).name, fh_c, "image/jpeg")
             data = {"rerender_id": str(rerender_id)}
             if duration_seconds is not None:
                 data["duration_seconds"] = str(duration_seconds)
@@ -2098,6 +2128,63 @@ def derive_on_screen_text(clip: dict, segments: list[dict],
     if campaign:
         return campaign
     return _transcript_headline(clip, segments)
+
+
+def _title_case_headline(text: str) -> str:
+    """Turn an ALL-CAPS headline into Title Case for a suggested
+    title. Words with digits ("2D", "PS5") are left alone — title()
+    would mangle them into "2d"/"Ps5"."""
+    out: list[str] = []
+    for word in text.split():
+        if any(c.isdigit() for c in word):
+            out.append(word)
+        else:
+            out.append(word.capitalize())
+    return " ".join(out)
+
+
+def derive_title_hashtags(segments: list[dict],
+                          source_duration: float) -> tuple[str | None, list[str]]:
+    """Suggested title + hashtags for a whole job, derived from the
+    job's OWN transcript — never canned text.
+
+    The title is the best headline phrase across the full source
+    (the same phrase scoring `_transcript_headline` uses), in Title
+    Case. Hashtags are the top content words by frequency (lowercase,
+    #prefixed, de-duplicated, stopwords and fillers removed, 3–20
+    chars, at most 8). Returns (None, []) when the source has no
+    transcript words at all — a silent source gets no invented
+    suggestions, and the job page says so.
+    """
+    if not segments or source_duration <= 0:
+        return None, []
+    title_raw = _transcript_headline(
+        {"start": 0.0, "end": source_duration}, segments)
+    # A title is not a sentence: drop trailing punctuation (the
+    # headline phrase usually ends with one).
+    title = _title_case_headline(title_raw).rstrip(_PUNCT).strip() \
+        if title_raw else None
+    # _clip_words strips the whitespace Whisper puts on every word
+    # (" Come") — the raw segment words would fail the isalnum check
+    # below and yield zero hashtags (Job #44 proved it: 0 tags).
+    counts: dict[str, int] = {}
+    first_seen: dict[str, int] = {}
+    order = 0
+    for word in _clip_words(segments, 0.0, source_duration):
+        clean = word["word"].strip(_PUNCT).lower()
+        if (not clean or len(clean) < 3 or len(clean) > 20
+                or not clean.isalnum()
+                or clean in _ON_SCREEN_STOPWORDS
+                or clean in FILLER_WORDS):
+            continue
+        if clean not in counts:
+            counts[clean] = 0
+            first_seen[clean] = order
+            order += 1
+        counts[clean] += 1
+    ranked = sorted(counts, key=lambda w: (-counts[w], first_seen[w]))
+    hashtags = [f"#{w}" for w in ranked[:8]]
+    return title, hashtags
 
 
 def write_headline_ass(text: str, duration: float, ass_path: Path,
@@ -3930,6 +4017,25 @@ def extract_thumbnail(clip_path: Path, thumb_path: Path, at_seconds: float = 1.0
     return None
 
 
+def extract_thumbnail_candidates(clip_path: Path, job_dir: Path, prefix: str,
+                                 duration: float) -> list[Path]:
+    """Three candidate frames for the thumbnail picker (Batch 4): at
+    10%, 50% and 90% of the FINAL clip's duration (after any brand
+    intro/outro, so a long intro cannot fill all three frames). A
+    frame that fails to extract is skipped, never fatal — the picker
+    shows however many survived (0–3).
+    """
+    if duration <= 0:
+        return []
+    candidates: list[Path] = []
+    for i, frac in enumerate((0.10, 0.50, 0.90), 1):
+        path = job_dir / f"{prefix}_cand{i}.jpg"
+        got = extract_thumbnail(clip_path, path, at_seconds=round(duration * frac, 3))
+        if got is not None:
+            candidates.append(got)
+    return candidates
+
+
 # ---------------------------------------------------------------------------
 # Brand assets (intro / outro)
 # ---------------------------------------------------------------------------
@@ -3954,11 +4060,15 @@ def download_brand_assets(api: "JobApi", brand_assets: dict | None,
     ffprobe; anything that fails to download or is not a playable video
     is logged and skipped. Returns {"intro": Path, "outro": Path} for
     the assets that survived. Download failures NEVER fail the job.
+
+    Batch 4: the "logo" kind is an IMAGE, not a video — it is
+    validated with `_probe_image_info` (a readable image, no duration
+    needed) and returned under the "logo" key for `apply_logo_overlay`.
     """
     assets: dict[str, Path] = {}
     if not isinstance(brand_assets, dict):
         return assets
-    for kind in ("intro", "outro"):
+    for kind in ("intro", "outro", "logo"):
         asset = brand_assets.get(kind)
         if not isinstance(asset, dict):
             continue
@@ -3967,14 +4077,23 @@ def download_brand_assets(api: "JobApi", brand_assets: dict | None,
             continue
         asset_id = asset.get("id")
         suffix = f"_{asset_id}" if asset_id is not None else ""
-        dest = job_dir / f"brand_{kind}{suffix}.mp4"
+        if kind == "logo":
+            dest = job_dir / f"brand_logo{suffix}.png"
+        else:
+            dest = job_dir / f"brand_{kind}{suffix}.mp4"
         try:
             api.download_brand_asset(url, dest)
         except Exception as exc:  # noqa: BLE001 - a bad asset must not fail the job
             log.warning("Brand %s asset download failed; continuing "
                         "without it: %s", kind, exc)
             continue
-        if _probe_video_info(dest) is None:
+        if kind == "logo":
+            if _probe_image_info(dest) is None:
+                log.warning("Brand logo asset is not a readable image; "
+                            "ignoring it: %s", dest.name)
+                dest.unlink(missing_ok=True)
+                continue
+        elif _probe_video_info(dest) is None:
             log.warning("Brand %s asset is not a playable video; "
                         "ignoring it: %s", kind, dest.name)
             dest.unlink(missing_ok=True)
@@ -4101,6 +4220,92 @@ def apply_brand_assets(clip_path: Path, intro_path: Path | None = None,
              "outro" if has_outro else "-",
              out_path.name, out_info["duration"])
     return out_path, has_intro, has_outro
+
+
+def _probe_image_info(path: Path) -> dict | None:
+    """ffprobe summary for one IMAGE file (PNG/JPG/WebP), or None when
+    it is not a readable image. Unlike `probe_summary`, an image has
+    no duration — requiring one would reject every logo — so only a
+    video stream with a real width/height is required. Never raises.
+    """
+    try:
+        info = ffprobe_json(path)
+    except Exception:
+        return None
+    streams = info.get("streams", [])
+    image = next((s for s in streams if s.get("codec_type") == "video"), None)
+    if image is None:
+        return None
+    width, height = int(image.get("width") or 0), int(image.get("height") or 0)
+    if width <= 0 or height <= 0:
+        return None
+    return {"width": width, "height": height}
+
+
+def apply_logo_overlay(clip_path: Path, logo_path: Path,
+                       out_path: Path | None = None) -> tuple[Path, bool]:
+    """Overlay the Brand Kit logo on a rendered clip (Batch 4).
+
+    The logo sits bottom-right, scaled to ~12% of the clip width with
+    a small margin, at 85% opacity — applied to the FINAL clip (after
+    any brand intro/outro concat), so it covers the whole clip. The
+    video is re-encoded libx264 veryfast / CRF 18 (the render
+    settings); the audio stream is copied untouched.
+
+    Returns (final_path, applied). On ANY failure the original clip
+    is returned untouched with applied=False — a bad logo never fails
+    the job, and the job note only claims the overlay when it really
+    happened.
+    """
+    clip_path, logo_path = Path(clip_path), Path(logo_path)
+    clip_info = _probe_video_info(clip_path)
+    logo_info = _probe_image_info(logo_path)
+    if clip_info is None or logo_info is None:
+        log.warning("Logo overlay skipped: %s.",
+                    "clip is not a playable video" if clip_info is None
+                    else "logo is not a readable image")
+        return clip_path, False
+    width, height = clip_info["width"], clip_info["height"]
+    logo_w = max(48, int(width * 0.12))
+    margin = max(12, int(width * 0.022))
+    if out_path is None:
+        out_path = clip_path.with_name(clip_path.stem + "_logo.mp4")
+    else:
+        out_path = Path(out_path)
+    # scale the logo to 12% of the clip width (height follows the
+    # aspect ratio), fade it to 85% opacity, and pin it bottom-right.
+    filt = (f"[1:v]scale={logo_w}:-1,format=rgba,"
+            f"colorchannelmixer=aa=0.85[logo];"
+            f"[0:v][logo]overlay=W-w-{margin}:H-h-{margin}:format=yuv420[vout]")
+    cmd = [FFMPEG, "-y", "-v", "error",
+           "-i", str(clip_path), "-i", str(logo_path),
+           "-filter_complex", filt,
+           "-map", "[vout]", "-map", "0:a?",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+           "-c:a", "copy", "-movflags", "+faststart", str(out_path)]
+    try:
+        proc = run(cmd, timeout=1800)
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or "").strip()[:300])
+        out_info = _probe_video_info(out_path)
+        if out_info is None:
+            raise RuntimeError("logo-overlay output failed ffprobe validation")
+        if (out_info["width"], out_info["height"]) != (width, height):
+            raise RuntimeError(
+                f"logo-overlay resolution {out_info['width']}x{out_info['height']} "
+                f"!= clip canvas {width}x{height}")
+        if abs(out_info["duration"] - clip_info["duration"]) > 0.5:
+            raise RuntimeError(
+                f"logo-overlay duration {out_info['duration']:.2f}s != "
+                f"clip duration {clip_info['duration']:.2f}s")
+    except Exception as exc:  # noqa: BLE001 - a bad logo never fails the job
+        log.warning("Logo overlay failed for %s (%s); using the plain clip.",
+                    clip_path.name, exc)
+        out_path.unlink(missing_ok=True)
+        return clip_path, False
+    log.info("Logo overlay: %s -> %s (logo %dpx wide, bottom-right).",
+             clip_path.name, out_path.name, logo_w)
+    return out_path, True
 
 
 # ---------------------------------------------------------------------------
@@ -4284,6 +4489,15 @@ def process_rerender(api: JobApi, rerender: dict) -> None:
                 info = probe_summary(final_path)
                 out_path = final_path
                 rerender_intro_ok = _intro_ok
+        # Batch 4: the re-rendered clip keeps the job's logo overlay
+        # (same rule as a fresh render — OFF unless the job asked for
+        # it, and a failure keeps the plain re-render).
+        if settings.get("logo_overlay") and brand.get("logo"):
+            final_path, _logo_ok = apply_logo_overlay(
+                out_path, brand["logo"], job_dir / "clip_logo.mp4")
+            if final_path != out_path:
+                info = probe_summary(final_path)
+                out_path = final_path
         # Thumbnail: see process_job — skip past a stitched-on intro.
         thumb_at = 1.0
         if rerender_intro_ok and "intro" in brand:
@@ -4292,9 +4506,13 @@ def process_rerender(api: JobApi, rerender: dict) -> None:
                 thumb_at = intro_info["duration"] + 1.0
         thumb = extract_thumbnail(out_path, job_dir / "thumb.jpg",
                                   at_seconds=thumb_at)
+        # Batch 4: fresh thumbnail-picker candidates for the new file.
+        cands = extract_thumbnail_candidates(out_path, job_dir,
+                                             "rerender_cand", info["duration"])
         api.upload_replacement_clip(clip_id, out_path, rerender_id,
                                     thumbnail=thumb,
-                                    duration_seconds=info["duration"])
+                                    duration_seconds=info["duration"],
+                                    candidates=cands)
         log.info("Re-render %s ready: clip %s now uses style '%s' (%.2fs).",
                  rerender_id, clip_id, style, info["duration"])
     except Exception as exc:
@@ -4352,6 +4570,7 @@ def process_job(api: JobApi, job: dict) -> None:
         brand = download_brand_assets(api, job.get("brand_assets"), job_dir)
         used_brand_assets = bool(brand)
         intro_applied = outro_applied = False
+        logo_applied = False
         if used_brand_assets:
             log.info("Job %s brand assets: %s", job_id, sorted(brand))
 
@@ -4360,6 +4579,10 @@ def process_job(api: JobApi, job: dict) -> None:
         # Batch 3: translation info for the job note (None when the job
         # does not ask for a translation, or has no audio to translate).
         translation_info: dict | None = None
+        # Batch 4: title + hashtag suggestions (None/[] when the job
+        # has no audio to derive them from).
+        title_suggestion: str | None = None
+        hashtag_list: list[str] = []
         if source_info["has_audio"]:
             extract_audio(source, wav_path)
             # The extracted WAV must span the video timeline (gap-filled
@@ -4389,6 +4612,14 @@ def process_job(api: JobApi, job: dict) -> None:
                 log.info("Job %s translation to %s: %s (%d translated, %d fell back).",
                          job_id, target_lang, translation_info["status"],
                          translation_info["translated"], translation_info["failed"])
+            # Batch 4: title + hashtag suggestions from the FINAL
+            # (possibly translated) transcript — the same words the
+            # captions and headline use. A silent job gets none.
+            title_suggestion, hashtag_list = derive_title_hashtags(
+                segments, source_info["duration"])
+            if title_suggestion:
+                log.info("Job %s title suggestion: %r (%d hashtag(s)).",
+                         job_id, title_suggestion, len(hashtag_list))
         else:
             segments, energy = [], []
             log.info("Source has no audio track; skipping transcription.")
@@ -4531,6 +4762,23 @@ def process_job(api: JobApi, job: dict) -> None:
                             log.warning("Job %s: clip %d (%s) branding failed (%s); "
                                         "uploading the plain clip.",
                                         job_id, i, ratio, brand_exc)
+                    # Batch 4: logo overlay (default OFF) — after the
+                    # brand concat so it sits on the whole final clip,
+                    # and before the thumbnail so the thumbnail shows it.
+                    # Any failure keeps the plain clip; never fatal.
+                    if settings.get("logo_overlay") and brand.get("logo"):
+                        try:
+                            logo_out = job_dir / f"clip_{i:02d}_{slug}_logo.mp4"
+                            final_path, logo_ok = apply_logo_overlay(
+                                out_path, brand["logo"], logo_out)
+                            if logo_ok:
+                                info = probe_summary(final_path)
+                                out_path = final_path
+                                logo_applied = True
+                        except Exception as logo_exc:  # noqa: BLE001 - logo never fails the clip
+                            log.warning("Job %s: clip %d (%s) logo overlay failed (%s); "
+                                        "uploading without the logo.",
+                                        job_id, i, ratio, logo_exc)
                     # Thumbnail: a branded clip opens with its intro, so a
                     # frame at 1.0s would show the intro card, not the clip.
                     # Take the frame just after the intro instead.
@@ -4541,6 +4789,10 @@ def process_job(api: JobApi, job: dict) -> None:
                             thumb_at = intro_info["duration"] + 1.0
                     thumb = extract_thumbnail(out_path, job_dir / f"thumb_{i:02d}_{slug}.jpg",
                                               at_seconds=thumb_at)
+                    # Batch 4: thumbnail-picker candidates from the
+                    # FINAL clip (after branding + logo overlay).
+                    cands = extract_thumbnail_candidates(
+                        out_path, job_dir, f"cand_{i:02d}_{slug}", info["duration"])
                 except Exception as clip_exc:  # noqa: BLE001 - one bad clip must not kill the job
                     # Per-clip failure isolation: log the failure, drop the
                     # partial file, and keep rendering the rest. Only when
@@ -4557,7 +4809,7 @@ def process_job(api: JobApi, job: dict) -> None:
                 log.info("Clip %d/%d (%s) validated: %.2fs %dx%d %d bytes.",
                          render_n, total_renders, ratio, info["duration"], info["width"],
                          info["height"], info["size_bytes"])
-                rendered.append((out_path, clip_r, info, thumb, ratio, i))
+                rendered.append((out_path, clip_r, info, thumb, ratio, i, cands))
                 api.set_status(job_id, "Processing", stage="rendering",
                                progress=60 + int(25 * render_n / total_renders))
         if clips and not rendered:
@@ -4565,7 +4817,7 @@ def process_job(api: JobApi, job: dict) -> None:
                 "Every clip failed to render: " + "; ".join(failed[:3]))
 
         api.set_status(job_id, "Processing", stage="uploading_clips", progress=90)
-        for n, (out_path, clip, info, thumb, ratio, i) in enumerate(rendered, 1):
+        for n, (out_path, clip, info, thumb, ratio, i, cands) in enumerate(rendered, 1):
             clip_fields = {
                 # In a multi-ratio job the title carries the ratio so the
                 # variants are distinguishable in the Library; a
@@ -4585,7 +4837,8 @@ def process_job(api: JobApi, job: dict) -> None:
             # no field rather than an empty object.
             if clip.get("score_breakdown"):
                 clip_fields["score_breakdown"] = clip["score_breakdown"]
-            api.upload_clip(job_id, out_path, clip_fields, thumbnail=thumb)
+            api.upload_clip(job_id, out_path, clip_fields, thumbnail=thumb,
+                            candidates=cands)
             log.info("Uploaded clip %d/%d for job %s.", n, len(rendered), job_id)
 
         # Batch 3 job-note lines: beat sync, translation, multi-ratio.
@@ -4628,6 +4881,10 @@ def process_job(api: JobApi, job: dict) -> None:
                 extra_notes.append(
                     f"Clip count capped at {windows_requested} windows per "
                     f"ratio (50-clip total limit).")
+        # Batch 4: the logo line is claimed only when the overlay
+        # actually landed on at least one clip.
+        if logo_applied:
+            extra_notes.append("Logo overlay applied.")
 
         # Brand flags ride only when the job actually used brand assets,
         # so a job without intro/outro is byte-identical to before.
@@ -4638,11 +4895,13 @@ def process_job(api: JobApi, job: dict) -> None:
         # Enhancement stats come from the primary ratio's renders only —
         # the other ratios repeat the same cuts, and counting them twice
         # would double-report the trimmed seconds.
-        primary_rendered = [c for _, c, _, _, r, _ in rendered if r == ratios[0]]
+        primary_rendered = [c for _, c, _, _, r, _, _ in rendered if r == ratios[0]]
         api.set_status(job_id, "Ready", stage="ready", progress=100,
                        note=_ready_note(clips, windows_requested, failed,
                                         rendered=primary_rendered,
                                         extra=extra_notes or None),
+                       title_suggestion=title_suggestion,
+                       hashtags=hashtag_list or None,
                        **ready_kwargs)
         log.info("Job %s is Ready (%d clip(s)).", job_id, len(rendered))
     except JobCancelled:

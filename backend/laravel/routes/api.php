@@ -5,6 +5,7 @@ use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\BrandAssetController;
 use App\Http\Controllers\Api\V1\ClipController;
 use App\Http\Controllers\Api\V1\ExportController;
+use App\Http\Controllers\Api\V1\InsightsController;
 use App\Http\Controllers\Api\V1\JobController;
 use App\Http\Controllers\Api\V1\JobPresetController;
 use App\Http\Controllers\Api\V1\MediaController;
@@ -92,6 +93,14 @@ Route::prefix('v1')->group(function () {
         Route::post('/clips/{clip}/render', [ClipController::class, 'render'])
             ->middleware('throttle:6,1');
         Route::get('/clips/{clip}/rerenders', [ClipController::class, 'rerenders']);
+        // Batch 4: favourite toggle, thumbnail picker, candidate frames.
+        Route::patch('/clips/{clip}/favourite', [ClipController::class, 'toggleFavourite']);
+        Route::patch('/clips/{clip}/thumbnail', [ClipController::class, 'setThumbnail']);
+        Route::get('/clips/{clip}/candidates/{index}', [ClipController::class, 'candidate']);
+
+        // Batch 4: "What works best" — real aggregation of the user's
+        // own Ready jobs (never fabricated; <3 jobs → omitted).
+        Route::get('/insights/settings', [InsightsController::class, 'settings']);
 
         // --- Exports ---
         Route::post('/projects/{project}/export', [ExportController::class, 'store'])
@@ -100,10 +109,11 @@ Route::prefix('v1')->group(function () {
         Route::get('/exports/{export}', [ExportController::class, 'show']);
         Route::get('/exports/{export}/download', [ExportController::class, 'download']);
 
-        // --- Brand kit (intro/outro assets) ---
+        // --- Brand kit (intro/outro/logo assets) ---
         Route::get('/brand-kit/assets', [BrandAssetController::class, 'index']);
         Route::post('/brand-kit/assets', [BrandAssetController::class, 'store'])
             ->middleware('throttle:6,1');
+        Route::get('/brand-kit/assets/{asset}/download', [BrandAssetController::class, 'download']);
         Route::delete('/brand-kit/assets/{asset}', [BrandAssetController::class, 'destroy']);
 
         // --- Settings ---

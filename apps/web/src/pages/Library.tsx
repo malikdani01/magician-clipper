@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { Clapperboard, Download, FileVideo, Image, Music, Play, Search, Video } from 'lucide-react'
 import { EmptyState } from '../components/EmptyState'
 import { PageHeader } from '../components/PageHeader'
+import { ClipFavouriteButton, ClipThumbnailPicker } from '../components/ClipActions'
 import { ClipPlayerModal } from '../components/ClipPlayerModal'
 import { ClipThumbnail } from '../components/ClipThumbnail'
 import { ScoreBreakdown } from '../components/ScoreBreakdown'
@@ -47,22 +48,23 @@ export function LibraryPage() {
   // Library upgrade: sort, Ready-only filter, multi-select + ZIP.
   const [sort, setSort] = useState<ClipSort>('newest')
   const [readyOnly, setReadyOnly] = useState(true)
+  // Batch 4: "Favourites only" filter (default off).
+  const [favouritesOnly, setFavouritesOnly] = useState(false)
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set())
   const [zipBusy, setZipBusy] = useState(false)
   const [zipMessage, setZipMessage] = useState<string | null>(null)
 
   // All jobs (with their clips) for the Clips / Thumbnails tabs. The
   // Ready-only toggle filters them client-side; without it, clips
-  // from still-running or failed jobs show too.
+  // from still-running or failed jobs show too. Extracted so the
+  // favourite heart can refresh the list after a toggle.
+  const loadJobs = async () => {
+    const { jobs } = await listJobs({ status: 'all', perPage: 50 })
+    setJobs(jobs)
+  }
   useEffect(() => {
-    let cancelled = false
-    void (async () => {
-      const { jobs } = await listJobs({ status: 'all', perPage: 50 })
-      if (!cancelled) setJobs(jobs)
-    })()
-    return () => {
-      cancelled = true
-    }
+    void loadJobs()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Project title per Laravel project id — for searching clips by
@@ -95,6 +97,8 @@ export function LibraryPage() {
     const q = query.trim().toLowerCase()
     let rows = clips
     if (readyOnly) rows = rows.filter((c) => c.jobStatus === 'ready')
+    // Batch 4: "Favourites only" — the heart on each clip card.
+    if (favouritesOnly) rows = rows.filter((c) => c.is_favourite)
     if (q !== '') {
       rows = rows.filter(
         (c) =>
@@ -114,7 +118,7 @@ export function LibraryPage() {
       )
     }
     return sorted
-  }, [clips, query, readyOnly, sort])
+  }, [clips, query, readyOnly, favouritesOnly, sort])
 
   async function doDownload(clip: JobClip) {
     setDownloadingId(clip.id)
@@ -256,9 +260,18 @@ export function LibraryPage() {
             />
             Ready clips only
           </label>
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-white">
+            <input
+              type="checkbox"
+              checked={favouritesOnly}
+              onChange={(e) => setFavouritesOnly(e.target.checked)}
+              className="h-4 w-4 accent-[#7c3aed]"
+            />
+            Favourites only
+          </label>
           <span className="text-xs text-[var(--color-text-muted)]">
             {filteredClips.length} clip{filteredClips.length === 1 ? '' : 's'}
-            {searching || !readyOnly || sort !== 'newest'
+            {searching || !readyOnly || favouritesOnly || sort !== 'newest'
               ? ' (filtered)'
               : ''}
           </span>
@@ -453,7 +466,7 @@ export function LibraryPage() {
                     {clip.jobStatus !== 'ready' ? ` · ${clip.jobStatus}` : ''}
                   </p>
                   <ScoreBreakdown breakdown={clip.score_breakdown} />
-                  <div className="mt-3 flex items-center gap-2">
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
                     <button
                       type="button"
                       onClick={() => void doDownload(clip)}
@@ -488,6 +501,10 @@ export function LibraryPage() {
                     >
                       Open job
                     </Link>
+                    <ClipFavouriteButton clip={clip} onChanged={() => void loadJobs()} />
+                  </div>
+                  <div className="mt-3 border-t border-ink-border/60 pt-3">
+                    <ClipThumbnailPicker clip={clip} onChanged={() => void loadJobs()} />
                   </div>
                 </div>
               </article>

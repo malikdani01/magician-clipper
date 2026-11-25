@@ -6,7 +6,9 @@ import {
   translateLegacyCaptionPreset,
 } from '../lib/captionStyles'
 import {
+  BRAND_LOGO_MAX_BYTES,
   deleteBrandAsset,
+  fetchBrandAssetFile,
   listBrandAssets,
   uploadBrandAsset,
   type BrandAsset,
@@ -225,6 +227,175 @@ function IntroOutroAssets() {
     </div>
   )
 }
+/**
+ * Logo asset (Batch 4) — a real upload to the backend (POST
+ * /api/v1/brand-kit/assets, PNG/JPG/WebP ≤5 MB). One logo per user;
+ * uploading again replaces it. When a job's "Logo overlay" setting is
+ * on, the worker overlays this logo bottom-right on every clip of
+ * that job. The preview below is the file the server stored (fetched
+ * with the bearer token), never a local-only blob.
+ */
+function LogoAsset() {
+  const [asset, setAsset] = useState<BrandAsset | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [uploading, setUploading] = useState(false)
+  const [uploadError, setUploadError] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    listBrandAssets()
+      .then((rows) => {
+        if (cancelled) return
+        const logo = rows.find((a) => a.kind === 'logo') ?? null
+        setAsset(logo)
+        if (logo) {
+          void fetchBrandAssetFile(logo.id).then((url) => {
+            if (!cancelled && url) setPreviewUrl(url)
+          })
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLoadError('Could not load your logo.')
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(
+    () => () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl)
+    },
+    [previewUrl],
+  )
+
+  const handleUpload = async (file: File | undefined) => {
+    if (!file) return
+    setUploading(true)
+    setUploadError(null)
+    const result = await uploadBrandAsset('logo', file)
+    setUploading(false)
+    if (!result.ok) {
+      setUploadError(result.error)
+      return
+    }
+    if (previewUrl) URL.revokeObjectURL(previewUrl)
+    setPreviewUrl(null)
+    setAsset(result.asset)
+    const url = await fetchBrandAssetFile(result.asset.id)
+    if (url) setPreviewUrl(url)
+  }
+
+  const handleRemove = async () => {
+    if (!asset) return
+    if (!window.confirm(`Remove the logo “${asset.original_name}”? Jobs with logo overlay on will render without it.`)) return
+    setDeleting(true)
+    setUploadError(null)
+    const result = await deleteBrandAsset(asset.id)
+    setDeleting(false)
+    if (!result.ok) {
+      setUploadError(result.error)
+      return
+    }
+    if (previewUrl) URL.revokeObjectURL(previewUrl)
+    setPreviewUrl(null)
+    setAsset(null)
+  }
+
+  if (loading) {
+    return (
+      <p className="mt-2 flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
+        <Loader2 className="h-4 w-4 animate-spin text-brand-light" />
+        Loading logo…
+      </p>
+    )
+  }
+
+  return (
+    <div>
+      <div className="mt-2 flex items-center gap-4">
+        <button
+          type="button"
+          onClick={() => inputRef.current?.click()}
+          disabled={uploading}
+          className="flex items-center gap-2 rounded-xl border border-dashed border-ink-border bg-ink-panel2 px-4 py-3 text-sm font-medium text-white hover:border-brand/60 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {uploading ? (
+            <Loader2 className="h-4 w-4 animate-spin text-brand-light" />
+          ) : (
+            <ImagePlus className="h-4 w-4 text-brand-light" />
+          )}
+          {uploading ? 'Uploading…' : asset ? 'Change logo' : 'Upload logo'}
+        </button>
+        {previewUrl ? (
+          <img src={previewUrl} alt="Brand logo preview" className="h-12 w-12 rounded-lg object-contain bg-white/5" />
+        ) : asset ? (
+          <span className="text-xs text-[var(--color-text-muted)]">
+            {asset.original_name} — preview unavailable (file removed on a server restart; upload it again).
+          </span>
+        ) : (
+          <span className="text-xs text-[var(--color-text-muted)]">
+            No logo yet — upload a PNG, JPG or WebP (max 5 MB).
+          </span>
+        )}
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          className="hidden"
+          onChange={(e) => {
+            void handleUpload(e.target.files?.[0])
+            e.target.value = ''
+          }}
+        />
+      </div>
+      {asset ? (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg bg-ink-panel px-3 py-2.5">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium text-white">{asset.original_name}</p>
+            <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">
+              {formatBytes(asset.file_size_bytes)} · PNG/JPG/WebP, max {formatBytes(BRAND_LOGO_MAX_BYTES)}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleRemove()}
+            disabled={deleting}
+            className="flex shrink-0 items-center gap-1.5 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-300 hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {deleting ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Trash2 className="h-3.5 w-3.5" />
+            )}
+            Remove
+          </button>
+        </div>
+      ) : null}
+      {loadError ? (
+        <p role="alert" className="mt-3 text-sm text-red-300">
+          {loadError}
+        </p>
+      ) : null}
+      {uploadError ? (
+        <p role="alert" className="mt-3 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          {uploadError}
+        </p>
+      ) : null}
+      <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+        The logo is watermarked bottom-right on clips of jobs with “Logo
+        overlay” on. Uploading a new logo replaces this one.
+      </p>
+    </div>
+  )
+}
 export function BrandKitPage() {
   const [initial] = useState(loadSaved)
   const [brandName, setBrandName] = useState(initial.brandName)
@@ -232,16 +403,7 @@ export function BrandKitPage() {
   const [accent, setAccent] = useState(initial.accent)
   const [font, setFont] = useState(initial.font)
   const [defaultCaptionPreset, setDefaultCaptionPreset] = useState(initial.defaultCaptionPreset)
-  const [logoUrl, setLogoUrl] = useState<string | null>(null)
   const [savedNote, setSavedNote] = useState<string | null>(null)
-  const logoInputRef = useRef<HTMLInputElement>(null)
-
-  const handleLogo = (f: File | undefined) => {
-    if (!f) return
-    if (!f.type.startsWith('image/')) return
-    if (logoUrl) URL.revokeObjectURL(logoUrl)
-    setLogoUrl(URL.createObjectURL(f))
-  }
 
   const handleSave = () => {
     const payload: BrandKitSaved = {
@@ -270,8 +432,6 @@ export function BrandKitPage() {
     setAccent(DEFAULTS.accent)
     setFont(DEFAULTS.font)
     setDefaultCaptionPreset(DEFAULTS.defaultCaptionPreset)
-    if (logoUrl) URL.revokeObjectURL(logoUrl)
-    setLogoUrl(null)
     setSavedNote('Brand kit reset to defaults.')
   }
 
@@ -373,34 +533,7 @@ export function BrandKitPage() {
 
             <div>
               <span className="text-sm font-medium text-white">Logo</span>
-              <div className="mt-2 flex items-center gap-4">
-                <button
-                  type="button"
-                  onClick={() => logoInputRef.current?.click()}
-                  className="flex items-center gap-2 rounded-xl border border-dashed border-ink-border bg-ink-panel2 px-4 py-3 text-sm font-medium text-white hover:border-brand/60"
-                >
-                  <ImagePlus className="h-4 w-4 text-brand-light" />
-                  {logoUrl ? 'Change logo' : 'Upload logo'}
-                </button>
-                {logoUrl ? (
-                  <img src={logoUrl} alt="Brand logo preview" className="h-12 w-12 rounded-lg object-contain bg-white/5" />
-                ) : (
-                  <span className="text-xs text-[var(--color-text-muted)]">
-                    No logo yet — previewed in your browser only, not saved.
-                  </span>
-                )}
-                <input
-                  ref={logoInputRef}
-                  type="file"
-                  accept="image/*"
-                  className="hidden"
-                  onChange={(e) => handleLogo(e.target.files?.[0])}
-                />
-              </div>
-              <p className="mt-2 text-xs text-[var(--color-text-muted)]">
-                Logo preview only — logo file is not saved (backend upload arrives with
-                Laravel media).
-              </p>
+              <LogoAsset />
             </div>
           </div>
 
@@ -440,9 +573,6 @@ export function BrandKitPage() {
             className="mt-4 flex h-48 flex-col items-center justify-center rounded-xl px-4 text-center"
             style={{ background: `linear-gradient(135deg, ${primary}, ${accent})` }}
           >
-            {logoUrl ? (
-              <img src={logoUrl} alt="" className="mb-3 h-12 w-12 rounded-lg object-contain bg-black/20" />
-            ) : null}
             <p className="text-lg font-bold text-white" style={{ fontFamily: font }}>
               {brandName || 'Your Brand'}
             </p>

@@ -1,18 +1,20 @@
 /**
- * Brand Kit intro/outro assets API client — GET/POST/DELETE
+ * Brand Kit intro/outro/logo assets API client — GET/POST/DELETE
  * /api/v1/brand-kit/assets.
  *
  * An asset is a short brand video (intro or outro) the worker adds to
- * the start / end of clips rendered by NEW jobs. All calls hit the real
- * Laravel backend; errors surface the backend's exact message.
- * Upload limits are enforced by the backend (mp4/mov/webm, ≤50 MB,
- * ≤15 s); this client pre-checks the file size so an oversized file
- * fails fast with an honest message instead of a long upload.
+ * the start / end of clips rendered by NEW jobs, or a logo image (Batch
+ * 4) the worker overlays on clips when the job's logo_overlay setting
+ * is on. All calls hit the real Laravel backend; errors surface the
+ * backend's exact message. Upload limits are enforced by the backend
+ * (videos mp4/mov/webm, ≤50 MB, ≤15 s; logo PNG/JPG/WebP, ≤5 MB);
+ * this client pre-checks the file size so an oversized file fails fast
+ * with an honest message instead of a long upload.
  */
 
 import { API_URL, getToken } from './api'
 
-export type BrandAssetKind = 'intro' | 'outro'
+export type BrandAssetKind = 'intro' | 'outro' | 'logo'
 
 export interface BrandAsset {
   id: number
@@ -28,6 +30,11 @@ export type BrandAssetResult =
   | { ok: false; error: string; status?: number }
 
 export const BRAND_ASSET_MAX_BYTES = 50 * 1024 * 1024
+
+/** Batch 4: a logo is an image, at most 5 MB. */
+export const BRAND_LOGO_MAX_BYTES = 5 * 1024 * 1024
+
+export const BRAND_LOGO_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp']
 
 function authHeaders(): Record<string, string> {
   const headers: Record<string, string> = { Accept: 'application/json' }
@@ -58,7 +65,13 @@ function parseAsset(body: unknown): BrandAsset | null {
   const b = body as Record<string, unknown>
   const candidate = (b.asset ?? b) as Record<string, unknown>
   if (typeof candidate.id !== 'number') return null
-  if (candidate.kind !== 'intro' && candidate.kind !== 'outro') return null
+  if (
+    candidate.kind !== 'intro' &&
+    candidate.kind !== 'outro' &&
+    candidate.kind !== 'logo'
+  ) {
+    return null
+  }
   if (typeof candidate.original_name !== 'string') return null
   return {
     id: candidate.id,
@@ -82,7 +95,7 @@ function parseAssetList(body: unknown): BrandAsset[] {
     .filter((a): a is BrandAsset => a !== null)
 }
 
-/** GET /api/v1/brand-kit/assets — the signed-in user's intro/outro assets. */
+/** GET /api/v1/brand-kit/assets — the signed-in user's intro/outro/logo assets. */
 export async function listBrandAssets(): Promise<BrandAsset[]> {
   if (!getToken()) return []
   try {
@@ -96,16 +109,24 @@ export async function listBrandAssets(): Promise<BrandAsset[]> {
 }
 
 /**
- * POST /api/v1/brand-kit/assets — multipart fields `kind` (intro|outro)
- * + `file` (mp4/mov/webm, ≤50 MB, ≤15 s). Uploading a kind that already
- * has an asset replaces it on the server.
+ * POST /api/v1/brand-kit/assets — multipart fields `kind` (intro|outro
+ * |logo) + `file`. Videos: mp4/mov/webm, ≤50 MB, ≤15 s. Logo (Batch 4):
+ * PNG/JPG/WebP, ≤5 MB. Uploading a kind that already has an asset
+ * replaces it on the server.
  */
 export async function uploadBrandAsset(
   kind: BrandAssetKind,
   file: File,
 ): Promise<BrandAssetResult> {
   if (!getToken()) return { ok: false, error: 'Sign in to upload brand assets.' }
-  if (file.size > BRAND_ASSET_MAX_BYTES) {
+  if (kind === 'logo') {
+    if (file.size > BRAND_LOGO_MAX_BYTES) {
+      return { ok: false, error: 'Logo is larger than 5 MB.' }
+    }
+    if (file.type && !BRAND_LOGO_MIME_TYPES.includes(file.type)) {
+      return { ok: false, error: 'Logo must be a PNG, JPG or WebP image.' }
+    }
+  } else if (file.size > BRAND_ASSET_MAX_BYTES) {
     return { ok: false, error: 'File is larger than 50 MB.' }
   }
   try {
@@ -132,6 +153,26 @@ export async function uploadBrandAsset(
     return { ok: true, asset }
   } catch {
     return { ok: false, error: 'Backend is not reachable.' }
+  }
+}
+
+/**
+ * Fetch one brand asset file (GET /api/v1/brand-kit/assets/{id}/download)
+ * with the bearer token and return an object URL for an <img>/<video>,
+ * or null when it is missing. The caller owns the object URL. Used by
+ * Brand Kit to preview the uploaded logo.
+ */
+export async function fetchBrandAssetFile(id: number): Promise<string | null> {
+  if (!getToken()) return null
+  try {
+    const res = await fetch(`${API_URL}/brand-kit/assets/${id}/download`, {
+      headers: authHeaders(),
+    })
+    if (!res.ok) return null
+    const blob = await res.blob()
+    return URL.createObjectURL(blob)
+  } catch {
+    return null
   }
 }
 

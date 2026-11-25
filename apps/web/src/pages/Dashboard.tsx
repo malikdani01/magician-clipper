@@ -21,6 +21,9 @@ import { formatBytes } from '../lib/format'
 import { formatDuration } from '../lib/format'
 import { API_URL, engineHealth, getToken, laravelHealth, type EngineHealth, type LaravelHealth } from '../lib/api'
 import { listJobs, type Job, type JobClip } from '../lib/jobs'
+import { fetchSettingsInsights, type SettingsInsights } from '../lib/insights'
+import { getCaptionStyle } from '../lib/captionStyles'
+import { LAYOUT_LABELS } from '../lib/jobs'
 import { viralScore } from '../lib/viralScore'
 import { useAuth } from '../state/auth'
 import { useProjects } from '../state/projects'
@@ -83,6 +86,9 @@ export function DashboardPage() {
   const [stats, setStats] = useState<UserStats | null>(null)
   // Top clips + recent activity — frontend-only, from real job data.
   const [recentJobs, setRecentJobs] = useState<Job[]>([])
+  // Batch 4: "What works best" — real aggregation of the user's own
+  // Ready jobs (only values with ≥3 jobs qualify).
+  const [insights, setInsights] = useState<SettingsInsights | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -94,6 +100,9 @@ export function DashboardPage() {
     })
     listJobs({ status: 'all', perPage: 20 }).then(({ jobs }) => {
       if (!cancelled) setRecentJobs(jobs)
+    })
+    fetchSettingsInsights().then((rows) => {
+      if (!cancelled) setInsights(rows)
     })
     const token = getToken()
     if (token) {
@@ -501,6 +510,71 @@ export function DashboardPage() {
             )}
           </div>
         </div>
+      </div>
+
+      {/* Batch 4: "What works best" — the top caption style, layout and
+          duration mode by average viral score across the user's own
+          Ready jobs. Only values with at least 3 finished jobs qualify;
+          anything less is honestly "not enough data yet". */}
+      <div className="mt-4 rounded-2xl border border-ink-border bg-ink-panel p-6">
+        <h2 className="text-lg font-semibold text-white">What works best</h2>
+        <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+          Average viral score from your own finished jobs — only settings
+          used in at least 3 jobs are shown.
+        </p>
+        {insights === null ? (
+          <p className="mt-4 text-sm text-[var(--color-text-muted)]">Loading…</p>
+        ) : insights.caption_style.length === 0 &&
+          insights.layout.length === 0 &&
+          insights.duration_mode.length === 0 ? (
+          <p className="mt-4 text-sm text-[var(--color-text-muted)]">
+            Not enough finished jobs yet — finish at least 3 jobs with the
+            same caption style, layout or duration and the best-performing
+            settings will show up here.
+          </p>
+        ) : (
+          <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
+            {[
+              {
+                label: 'Caption style',
+                rows: insights.caption_style,
+                name: (v: string) => getCaptionStyle(v).name,
+              },
+              {
+                label: 'Layout',
+                rows: insights.layout,
+                name: (v: string) =>
+                  LAYOUT_LABELS[v as keyof typeof LAYOUT_LABELS] ?? v,
+              },
+              {
+                label: 'Duration',
+                rows: insights.duration_mode,
+                name: (v: string) =>
+                  v === 'exact' ? 'Exact' : v === 'minimum' ? 'Minimum' : v === 'maximum' ? 'Maximum' : v,
+              },
+            ].map(({ label, rows, name }) => (
+              <div key={label} className="rounded-xl bg-ink-panel2 p-4">
+                <p className="text-xs font-medium text-[var(--color-text-muted)]">{label}</p>
+                {rows.length === 0 ? (
+                  <p className="mt-2 text-sm text-[var(--color-text-muted)]">
+                    Not enough data yet — needs 3 finished jobs.
+                  </p>
+                ) : (
+                  <ul className="mt-2 space-y-2">
+                    {rows.slice(0, 3).map((r) => (
+                      <li key={r.value} className="flex items-baseline justify-between gap-2 text-sm">
+                        <span className="min-w-0 truncate font-medium text-white">{name(r.value)}</span>
+                        <span className="shrink-0 text-[var(--color-text-muted)] tabular-nums">
+                          {r.average_score} avg · {r.job_count} jobs
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )

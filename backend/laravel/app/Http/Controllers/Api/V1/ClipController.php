@@ -365,4 +365,86 @@ class ClipController extends Controller
             )->all(),
         ]);
     }
+
+    /**
+     * PATCH /api/v1/clips/{clip}/favourite — toggle the per-clip
+     * favourite flag. Ownership is enforced (ClipPolicy::update).
+     * A re-render never touches the flag (the clip row is updated
+     * in place in MuseJobController::replaceClipFile), so a favourite
+     * survives re-renders.
+     */
+    public function toggleFavourite(Request $request, Clip $clip)
+    {
+        $this->authorize('update', $clip);
+
+        $clip->is_favourite = ! $clip->is_favourite;
+        $clip->save();
+
+        return response()->json(['clip' => $clip->fresh()]);
+    }
+
+    /**
+     * PATCH /api/v1/clips/{clip}/thumbnail — pick one of the
+     * worker-extracted candidate frames as the clip's thumbnail.
+     * The candidate index is 0-based into thumbnail_candidates; an
+     * out-of-range index is a 422, a clip with no candidates a 422.
+     * Ownership is enforced (ClipPolicy::update).
+     */
+    public function setThumbnail(Request $request, Clip $clip)
+    {
+        $this->authorize('update', $clip);
+
+        $validated = $request->validate([
+            'candidate_index' => ['required', 'integer', 'min:0'],
+        ]);
+
+        $candidates = (array) ($clip->thumbnail_candidates ?? []);
+        if ($candidates === []) {
+            return response()->json([
+                'error' => 'validation_error',
+                'message' => 'No alternate frames for this clip.',
+            ], 422);
+        }
+        if (! array_key_exists($validated['candidate_index'], $candidates)) {
+            return response()->json([
+                'error' => 'validation_error',
+                'message' => 'That candidate does not exist for this clip.',
+            ], 422);
+        }
+
+        $clip->thumbnail_path = $candidates[$validated['candidate_index']];
+        $clip->save();
+
+        return response()->json(['clip' => $clip->fresh()]);
+    }
+
+    /**
+     * GET /api/v1/clips/{clip}/candidates/{index} — stream one
+     * candidate frame as an image. Ownership is enforced
+     * (ClipPolicy::view); a missing candidate or file is a 404.
+     */
+    public function candidate(Request $request, Clip $clip, int $index)
+    {
+        $this->authorize('view', $clip);
+
+        $candidates = (array) ($clip->thumbnail_candidates ?? []);
+        if (! array_key_exists($index, $candidates)) {
+            return response()->json([
+                'error' => 'not_found',
+                'message' => 'No such candidate frame.',
+            ], 404);
+        }
+
+        $path = $candidates[$index];
+        if (! is_string($path) || ! Storage::disk('local')->exists($path)) {
+            return response()->json([
+                'error' => 'not_found',
+                'message' => 'Candidate frame file not found.',
+            ], 404);
+        }
+
+        return Storage::disk('local')->response($path, null, [
+            'Content-Type' => 'image/jpeg',
+        ]);
+    }
 }

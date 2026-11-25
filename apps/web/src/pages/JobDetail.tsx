@@ -13,6 +13,7 @@ import {
   X,
 } from 'lucide-react'
 import { EmptyState } from '../components/EmptyState'
+import { ClipFavouriteButton, ClipThumbnailPicker } from '../components/ClipActions'
 import { ClipPlayerModal } from '../components/ClipPlayerModal'
 import { ClipThumbnail } from '../components/ClipThumbnail'
 import { JobStatusPill, jobSummary } from '../components/JobStatusPill'
@@ -118,6 +119,9 @@ function settingRows(job: Job): Array<[string, string]> {
         ? s.export_ratios.join(', ')
         : s.aspect_ratio,
     ],
+    // Batch 4 (2026-11-25) — absent on older jobs means OFF (the
+    // worker treats a missing key as OFF), which is what this shows.
+    ['Logo overlay', s.logo_overlay ? 'On' : 'Off'],
     ['Job type', s.job_type === 'campaign' ? 'For a campaign' : 'For myself'],
     [
       'Layout',
@@ -252,6 +256,92 @@ function ClipRerenderControl({
     </div>
   )
 }
+
+/**
+ * Copy-to-clipboard button with a brief "Copied" state. Falls back to
+ * a hidden textarea when the Clipboard API is unavailable.
+ */
+function CopyButton({ text, label }: { text: string; label: string }) {
+  const [copied, setCopied] = useState(false)
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      document.body.appendChild(ta)
+      ta.select()
+      try {
+        document.execCommand('copy')
+      } catch {
+        // Clipboard unavailable — the text is still visible to copy by hand.
+      }
+      ta.remove()
+    }
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 2000)
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => void copy()}
+      className="flex shrink-0 items-center gap-1.5 rounded-lg border border-ink-border px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-ink-panel2"
+    >
+      <Copy className="h-3.5 w-3.5" />
+      {copied ? 'Copied' : label}
+    </button>
+  )
+}
+
+/**
+ * Batch 4: the worker's title + hashtag suggestions, derived from the
+ * job's own transcript. Shown when the job has any; a Ready job whose
+ * clips have no transcript at all (silent source) honestly says so
+ * instead. A job rendered before suggestions existed shows nothing —
+ * its clips have transcripts, so "no speech" would be a lie.
+ */
+function SuggestionsCard({ job }: { job: Job }) {
+  const hasTitle = job.title_suggestion != null && job.title_suggestion !== ''
+  const hashtags = Array.isArray(job.hashtags) ? job.hashtags : []
+  if (!hasTitle && hashtags.length === 0) {
+    if (job.status !== 'ready') return null
+    const anySpeech = job.clips.some(
+      (c) => c.transcript_excerpt != null && c.transcript_excerpt !== '',
+    )
+    if (anySpeech) return null
+    return (
+      <section className="rounded-2xl border border-ink-border bg-ink-panel p-6">
+        <h2 className="text-lg font-semibold text-white">Suggested title &amp; hashtags</h2>
+        <p className="mt-2 text-sm text-[var(--color-text-muted)]">
+          No suggestions — this clip has no speech.
+        </p>
+      </section>
+    )
+  }
+  return (
+    <section className="rounded-2xl border border-ink-border bg-ink-panel p-6">
+      <h2 className="text-lg font-semibold text-white">Suggested title &amp; hashtags</h2>
+      <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+        Derived from this job&apos;s own transcript — copy and edit before posting.
+      </p>
+      {hasTitle ? (
+        <div className="mt-4 flex items-start justify-between gap-3">
+          <p className="min-w-0 flex-1 text-sm font-medium text-white">{job.title_suggestion}</p>
+          <CopyButton text={job.title_suggestion ?? ''} label="Copy title" />
+        </div>
+      ) : null}
+      {hashtags.length > 0 ? (
+        <div className="mt-3 flex items-start justify-between gap-3">
+          <p className="min-w-0 flex-1 break-words text-sm text-brand-light">
+            {hashtags.join(' ')}
+          </p>
+          <CopyButton text={hashtags.join(' ')} label="Copy hashtags" />
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
 export function JobDetailPage() {
   const { id } = useParams<{ id: string }>()
   const jobId = Number(id)
@@ -596,6 +686,10 @@ export function JobDetailPage() {
             </dl>
           </section>
 
+          {/* Batch 4: title + hashtag suggestions from this job's own
+              transcript (or the honest "no speech" line). */}
+          <SuggestionsCard job={job} />
+
           {/* Clips — best viral score first so the strongest clip is on top */}
           <section className="rounded-2xl border border-ink-border bg-ink-panel p-6">
             <h2 className="flex items-center gap-2 text-lg font-semibold text-white">
@@ -718,6 +812,10 @@ export function JobDetailPage() {
                         {audioDownloadingId === clip.id ? 'Downloading…' : 'Audio'}
                       </button>
                     ) : null}
+                    <ClipFavouriteButton clip={clip} onChanged={() => void fetchJob()} />
+                    <div className="w-full border-t border-ink-border/60 pt-3">
+                      <ClipThumbnailPicker clip={clip} onChanged={() => void fetchJob()} />
+                    </div>
                   </li>
                     )
                   })}

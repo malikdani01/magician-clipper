@@ -312,8 +312,11 @@ class FakeApi:
         Path(dest).write_bytes(Path(self.brand_files[url]).read_bytes())
         return dest
 
-    def upload_clip(self, job_id, clip_path, fields, thumbnail=None):
+    def upload_clip(self, job_id, clip_path, fields, thumbnail=None,
+                    candidates=None):
         self.uploads.append(fields)
+        self.upload_candidates = getattr(self, "upload_candidates", [])
+        self.upload_candidates.append(list(candidates or []))
         return {"id": len(self.uploads)}
 
     def delete_clips(self, job_id):
@@ -2062,6 +2065,275 @@ class Batch3Tests(unittest.TestCase):
         # A full-count job with no extras still gets no note.
         self.assertIsNone(muse_worker._ready_note(
             [{"signals": []}], 1, [], rendered=[{"_batch1_stats": {}}]))
+
+
+class Batch4Tests(unittest.TestCase):
+    """Batch 4 (2026-11-25): title + hashtag suggestions, logo overlay,
+    thumbnail-picker candidates, and the API plumbing for them."""
+
+    def _fixture_segments(self):
+        # Real words from a gardening talk — the derivation must use
+        # THESE words, never canned output.
+        return [
+            _segment(0.0, 8.0,
+                     "Growing tomatoes at home is easier than you think."),
+            _segment(8.0, 16.0,
+                     "Tomatoes need six hours of sunlight and regular watering "
+                     "every single day."),
+            _segment(16.0, 24.0,
+                     "Water your tomatoes in the morning so the leaves stay dry."),
+            _segment(24.0, 32.0,
+                     "My garden tomatoes taste better than anything from the shop."),
+        ]
+
+    # --- Title + hashtags ---
+
+    def test_derive_title_hashtags_from_fixture_transcript(self):
+        title, tags = muse_worker.derive_title_hashtags(
+            self._fixture_segments(), 120.0)
+        self.assertIsNotNone(title)
+        # The title is a phrase from the fixture itself.
+        self.assertIn("tomato", title.lower())
+        self.assertLessEqual(len(title), 60)
+        # Hashtags: lowercase, #prefixed, deduped, real content words.
+        self.assertGreaterEqual(len(tags), 1)
+        self.assertLessEqual(len(tags), 8)
+        self.assertEqual(len(tags), len(set(tags)))
+        for tag in tags:
+            self.assertTrue(tag.startswith("#"), tag)
+            self.assertEqual(tag, tag.lower())
+            self.assertLessEqual(len(tag), 21)
+        self.assertIn("#tomatoes", tags)
+        # Stopwords never become hashtags.
+        for tag in tags:
+            self.assertNotIn(tag, {"#the", "#and", "#your", "#than", "#you"})
+
+    def test_derive_title_hashtags_empty_transcript(self):
+        title, tags = muse_worker.derive_title_hashtags([], 120.0)
+        self.assertIsNone(title)
+        self.assertEqual(tags, [])
+
+    def test_derive_title_hashtags_whisper_style_words(self):
+        # Regression (Job #44): real Whisper words carry a leading
+        # space (" Come") and the raw words must still yield hashtags
+        # — the first build read them raw and returned 0 tags.
+        segments = [
+            {"start": 0.0, "end": 8.0,
+             "text": "Growing tomatoes at home is easier than you think.",
+             "words": [
+                 {"word": " Growing", "start": 0.0, "end": 0.5},
+                 {"word": " tomatoes", "start": 0.5, "end": 1.0},
+                 {"word": " at", "start": 1.0, "end": 1.2},
+                 {"word": " home", "start": 1.2, "end": 1.6},
+                 {"word": " is", "start": 1.6, "end": 1.8},
+                 {"word": " easier", "start": 1.8, "end": 2.2},
+                 {"word": " than", "start": 2.2, "end": 2.4},
+                 {"word": " you", "start": 2.4, "end": 2.6},
+                 {"word": " think.", "start": 2.6, "end": 3.0},
+                 {"word": " Tomatoes", "start": 3.0, "end": 3.5},
+                 {"word": " tomatoes", "start": 3.5, "end": 4.0},
+                 {"word": " tomatoes.", "start": 4.0, "end": 4.5},
+             ]},
+        ]
+        title, tags = muse_worker.derive_title_hashtags(segments, 120.0)
+        self.assertIsNotNone(title)
+        # A title is not a sentence — no trailing period.
+        self.assertFalse(title.endswith("."))
+        self.assertIn("#tomatoes", tags)
+        self.assertGreaterEqual(len(tags), 2)
+        for tag in tags:
+            self.assertTrue(tag.startswith("#"))
+            self.assertNotIn(" ", tag)
+
+    def test_derive_title_hashtags_silent_segments(self):
+        # Segments with no words at all (a silent source that still
+        # produced empty segments) — no suggestions, honestly.
+        title, tags = muse_worker.derive_title_hashtags(
+            [{"start": 0.0, "end": 5.0, "text": "", "words": []}], 60.0)
+        self.assertIsNone(title)
+        self.assertEqual(tags, [])
+
+    # --- Logo overlay ---
+
+    def _make_clip(self, path, duration=4, color="green", size="360x640"):
+        cmd = [muse_worker.FFMPEG, "-y", "-v", "error",
+               "-f", "lavfi", "-i",
+               f"color=c={color}:s={size}:d={duration}:r=30",
+               "-f", "lavfi", "-i", f"sine=frequency=440:duration={duration}",
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+               "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+               "-shortest", str(path)]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def _make_logo(self, path, color="red", size="120x60"):
+        # A real PNG logo made with ffmpeg — not copied from anywhere.
+        cmd = [muse_worker.FFMPEG, "-y", "-v", "error",
+               "-f", "lavfi", "-i", f"color=c={color}:s={size}:d=1:r=1",
+               "-frames:v", "1", str(path)]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def _corner_rgb(self, image_path, corner):
+        """Average RGB of one corner of an image, via ffmpeg (no PIL).
+        The logo is 12% of the 360px clip width (~43px) with a 12px
+        margin, so it occupies x 305–348, y 606–628 — the bottom-right
+        crop sits fully inside it; the top-left crop is plain clip."""
+        crop = "crop=30:15:310:610" if corner == "bottom_right" else "crop=40:40:10:10"
+        proc = subprocess.run(
+            [muse_worker.FFMPEG, "-v", "error", "-i", str(image_path),
+             "-vf", f"{crop},scale=1:1", "-f", "rawvideo",
+             "-pix_fmt", "rgb24", "-"],
+            capture_output=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(proc.stdout), 3)
+        return tuple(proc.stdout)
+
+    def test_logo_overlay_places_red_pixels_bottom_right(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            clip = tmp / "clip.mp4"
+            logo = tmp / "logo.png"
+            self._make_clip(clip)
+            self._make_logo(logo)
+            out, applied = muse_worker.apply_logo_overlay(
+                clip, logo, tmp / "logoed.mp4")
+            self.assertTrue(applied)
+            self.assertNotEqual(out, clip)
+            info = muse_worker.probe_summary(out)
+            self.assertAlmostEqual(info["duration"], 4.0, delta=0.5)
+            self.assertTrue(info["has_audio"])
+            frame = muse_worker.extract_thumbnail(out, tmp / "frame.jpg",
+                                                  at_seconds=2.0)
+            self.assertIsNotNone(frame)
+            r, g, _b = self._corner_rgb(frame, "bottom_right")
+            # The red logo sits bottom-right; the green clip is elsewhere.
+            self.assertGreater(r, 150)
+            self.assertLess(g, 100)
+            r2, g2, _b2 = self._corner_rgb(frame, "top_left")
+            self.assertGreater(g2, r2)  # untouched green clip corner
+
+    def test_logo_overlay_missing_logo_returns_original(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            clip = tmp / "clip.mp4"
+            self._make_clip(clip)
+            out, applied = muse_worker.apply_logo_overlay(
+                clip, tmp / "nope.png", tmp / "logoed.mp4")
+            self.assertFalse(applied)
+            self.assertEqual(out, clip)
+
+    def test_logo_overlay_garbage_image_returns_original(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            clip = tmp / "clip.mp4"
+            self._make_clip(clip)
+            bad = tmp / "bad.png"
+            bad.write_bytes(b"this is not an image at all")
+            out, applied = muse_worker.apply_logo_overlay(
+                clip, bad, tmp / "logoed.mp4")
+            self.assertFalse(applied)
+            self.assertEqual(out, clip)
+
+    # --- Thumbnail candidates ---
+
+    def test_thumbnail_candidates_three_distinct_frames(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            clip = tmp / "clip.mp4"
+            # testsrc frames change over time, so three frames taken at
+            # 10/50/90% of the duration must differ from each other.
+            cmd = [muse_worker.FFMPEG, "-y", "-v", "error",
+                   "-f", "lavfi", "-i",
+                   "testsrc=duration=10:size=360x640:rate=30",
+                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                   "-pix_fmt", "yuv420p", str(clip)]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            cands = muse_worker.extract_thumbnail_candidates(
+                clip, tmp, "cand", 10.0)
+            self.assertEqual(len(cands), 3)
+            for cand in cands:
+                self.assertTrue(Path(cand).exists())
+                self.assertGreater(Path(cand).stat().st_size, 0)
+            # Three different moments in the clip — three different frames.
+            hashes = {Path(c).read_bytes() for c in cands}
+            self.assertEqual(len(hashes), 3)
+
+    def test_thumbnail_candidates_missing_clip_returns_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            cands = muse_worker.extract_thumbnail_candidates(
+                tmp / "nope.mp4", tmp, "cand", 10.0)
+            self.assertEqual(cands, [])
+
+    # --- API plumbing: suggestions + candidates ---
+
+    def test_set_status_sends_suggestions(self):
+        captured = {}
+
+        class FakeResp:
+            status_code = 200
+            text = "{}"
+
+            def json(self):
+                return {"id": 1}
+
+        class FakeRequests:
+            def request(self, method, url, headers=None, **kwargs):
+                captured["json"] = kwargs.get("json")
+                return FakeResp()
+
+        api = muse_worker.JobApi("test-key")
+        api._requests = FakeRequests()
+        api.set_status(1, "Ready", title_suggestion="Tomatoes At Home",
+                       hashtags=["#tomatoes", "#garden"])
+        self.assertEqual(captured["json"]["title_suggestion"], "Tomatoes At Home")
+        self.assertEqual(captured["json"]["hashtags"],
+                         ["#tomatoes", "#garden"])
+        # Absent suggestions send nothing — older behaviour unchanged.
+        api.set_status(1, "Processing", stage="rendering")
+        self.assertNotIn("title_suggestion", captured["json"])
+        self.assertNotIn("hashtags", captured["json"])
+
+    def test_upload_clip_sends_candidates(self):
+        captured = {}
+
+        class FakeResp:
+            status_code = 201
+            text = "{}"
+
+            def json(self):
+                return {"clip": {"id": 7}}
+
+        class FakeRequests:
+            def request(self, method, url, headers=None, **kwargs):
+                captured["files"] = kwargs.get("files")
+                return FakeResp()
+
+        api = muse_worker.JobApi("test-key")
+        api._requests = FakeRequests()
+        with tempfile.TemporaryDirectory() as tmp:
+            clip_path = Path(tmp) / "clip_01.mp4"
+            clip_path.write_bytes(b"fake mp4")
+            cands = []
+            for i in range(3):
+                p = Path(tmp) / f"cand_{i}.jpg"
+                p.write_bytes(b"fake jpg")
+                cands.append(p)
+            api.upload_clip(1, clip_path, {"title": "Clip 1"},
+                            candidates=cands)
+        files = captured["files"]
+        self.assertIn("candidate_1", files)
+        self.assertIn("candidate_2", files)
+        self.assertIn("candidate_3", files)
+        # Missing files are skipped, never sent as empty fields.
+        with tempfile.TemporaryDirectory() as tmp:
+            clip_path = Path(tmp) / "clip_01.mp4"
+            clip_path.write_bytes(b"fake mp4")
+            api.upload_clip(1, clip_path, {"title": "Clip 1"},
+                            candidates=[Path(tmp) / "gone.jpg"])
+        self.assertNotIn("candidate_1", captured["files"])
 
 
 if __name__ == "__main__":

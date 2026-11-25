@@ -183,6 +183,10 @@ class MuseJobController extends Controller
         return [
             'intro' => $entry($assets->get(BrandAsset::KIND_INTRO)),
             'outro' => $entry($assets->get(BrandAsset::KIND_OUTRO)),
+            // Batch 4: the Brand Kit logo (an image, not a video).
+            // The worker overlays it when the job's logo_overlay
+            // setting is on; duration is 0 for images and unused.
+            'logo' => $entry($assets->get(BrandAsset::KIND_LOGO)),
         ];
     }
 
@@ -295,6 +299,12 @@ class MuseJobController extends Controller
             // from the flags.
             'intro_applied' => ['sometimes', 'boolean'],
             'outro_applied' => ['sometimes', 'boolean'],
+            // Batch 4: title + hashtag suggestions derived from the
+            // job's own transcript. Stored with the final Ready
+            // report; a silent job sends neither.
+            'title_suggestion' => ['sometimes', 'nullable', 'string', 'max:120'],
+            'hashtags' => ['sometimes', 'nullable', 'array', 'max:10'],
+            'hashtags.*' => ['string', 'max:30'],
         ]);
 
         $public = strtolower($validated['status']);
@@ -315,6 +325,15 @@ class MuseJobController extends Controller
                 $job->{$flag} = (bool) $validated[$flag];
                 $needsSave = true;
             }
+        }
+        // Batch 4: title + hashtag suggestions ride the same way.
+        if (array_key_exists('title_suggestion', $validated)) {
+            $job->title_suggestion = $validated['title_suggestion'];
+            $needsSave = true;
+        }
+        if (array_key_exists('hashtags', $validated)) {
+            $job->hashtags = $validated['hashtags'];
+            $needsSave = true;
         }
         if ($needsSave) {
             $job->save();
@@ -457,6 +476,12 @@ class MuseJobController extends Controller
         $validated = $request->validate([
             'file' => ['required', 'file', 'mimes:mp4', 'max:2097152'],
             'thumbnail' => ['sometimes', 'nullable', 'file', 'mimes:jpeg,jpg,png', 'max:2048'],
+            // Batch 4: up to 3 thumbnail-picker candidate frames from
+            // the worker (10/50/90% of the clip). Each is optional; a
+            // missing or invalid one is skipped, never a 422.
+            'candidate_1' => ['sometimes', 'nullable', 'file', 'mimes:jpeg,jpg,png', 'max:2048'],
+            'candidate_2' => ['sometimes', 'nullable', 'file', 'mimes:jpeg,jpg,png', 'max:2048'],
+            'candidate_3' => ['sometimes', 'nullable', 'file', 'mimes:jpeg,jpg,png', 'max:2048'],
             'title' => ['sometimes', 'nullable', 'string', 'max:255'],
             'start_seconds' => ['sometimes', 'nullable', 'numeric', 'min:0'],
             'end_seconds' => ['sometimes', 'nullable', 'numeric', 'min:0'],
@@ -536,6 +561,22 @@ class MuseJobController extends Controller
             $thumbnailPath = "clips/{$job->id}/{$thumbFilename}";
         }
 
+        // Batch 4: thumbnail-picker candidates, stored beside the
+        // clip in upload order (candidate_1 is the 10% frame, then
+        // 50%, then 90%). A candidate that fails to store is skipped
+        // rather than failing the clip.
+        $candidatePaths = [];
+        foreach (['candidate_1', 'candidate_2', 'candidate_3'] as $field) {
+            if (! $request->hasFile($field)) {
+                continue;
+            }
+            $candFilename = 'cand-'.Str::uuid()->toString().'.jpg';
+            Storage::disk('local')->putFileAs(
+                "clips/{$job->id}", $request->file($field), $candFilename
+            );
+            $candidatePaths[] = "clips/{$job->id}/{$candFilename}";
+        }
+
         $clip = Clip::create([
             'project_id' => $job->project_id,
             'job_id' => $job->id,
@@ -547,6 +588,7 @@ class MuseJobController extends Controller
             'status' => Clip::STATUS_READY,
             'output_path' => $relativePath,
             'thumbnail_path' => $thumbnailPath,
+            'thumbnail_candidates' => $candidatePaths !== [] ? $candidatePaths : null,
             'file_size_bytes' => Storage::disk('local')->size($relativePath),
             'score' => $validated['score'] ?? null,
             'score_breakdown' => $scoreBreakdown,
@@ -621,6 +663,12 @@ class MuseJobController extends Controller
             }
             if ($clip->thumbnail_path) {
                 Storage::disk('local')->delete($clip->thumbnail_path);
+            }
+            // Batch 4: candidate frames ride with the clip.
+            foreach ((array) ($clip->thumbnail_candidates ?? []) as $candidate) {
+                if (is_string($candidate)) {
+                    Storage::disk('local')->delete($candidate);
+                }
             }
             $clip->delete();
             $deleted++;
@@ -705,6 +753,11 @@ class MuseJobController extends Controller
         $validated = $request->validate([
             'file' => ['required', 'file', 'mimes:mp4', 'max:2097152'],
             'thumbnail' => ['sometimes', 'nullable', 'file', 'mimes:jpeg,jpg,png', 'max:2048'],
+            // Batch 4: fresh thumbnail-picker candidates for the
+            // re-rendered file (its frames changed with the style).
+            'candidate_1' => ['sometimes', 'nullable', 'file', 'mimes:jpeg,jpg,png', 'max:2048'],
+            'candidate_2' => ['sometimes', 'nullable', 'file', 'mimes:jpeg,jpg,png', 'max:2048'],
+            'candidate_3' => ['sometimes', 'nullable', 'file', 'mimes:jpeg,jpg,png', 'max:2048'],
             'rerender_id' => ['required', 'integer'],
             'duration_seconds' => ['sometimes', 'nullable', 'numeric', 'min:0'],
         ]);
@@ -749,12 +802,35 @@ class MuseJobController extends Controller
             $thumbnailPath = "clips/{$jobId}/{$thumbFilename}";
         }
 
+        // Batch 4: fresh candidates replace the old ones (the file
+        // changed, so the old frames no longer match it). When the
+        // worker sends none, the old candidates are kept — a missing
+        // field is not a deletion.
+        $newCandidates = null;
+        if ($request->hasFile('candidate_1')
+            || $request->hasFile('candidate_2')
+            || $request->hasFile('candidate_3')) {
+            $newCandidates = [];
+            foreach (['candidate_1', 'candidate_2', 'candidate_3'] as $field) {
+                if (! $request->hasFile($field)) {
+                    continue;
+                }
+                $candFilename = 'cand-'.Str::uuid()->toString().'.jpg';
+                Storage::disk('local')->putFileAs(
+                    "clips/{$jobId}", $request->file($field), $candFilename
+                );
+                $newCandidates[] = "clips/{$jobId}/{$candFilename}";
+            }
+        }
+
         $oldOutput = $clip->output_path;
         $oldThumbnail = $clip->thumbnail_path;
+        $oldCandidates = (array) ($clip->thumbnail_candidates ?? []);
 
         $clip->update([
             'output_path' => $relativePath,
             'thumbnail_path' => $thumbnailPath,
+            'thumbnail_candidates' => $newCandidates ?? $clip->thumbnail_candidates,
             'file_size_bytes' => Storage::disk('local')->size($relativePath),
             'duration_seconds' => (float) ($validated['duration_seconds'] ?? $probe['duration']),
             'caption_style' => $rerender->caption_style,
@@ -764,11 +840,20 @@ class MuseJobController extends Controller
 
         // Only now, with the new file safely recorded, remove the old
         // ones — a failure above leaves the original clip intact.
+        // (is_favourite is never touched here, so a re-rendered clip
+        // keeps its favourite flag.)
         if ($oldOutput && $oldOutput !== $relativePath) {
             Storage::disk('local')->delete($oldOutput);
         }
         if ($oldThumbnail && $oldThumbnail !== $thumbnailPath) {
             Storage::disk('local')->delete($oldThumbnail);
+        }
+        if ($newCandidates !== null) {
+            foreach ($oldCandidates as $candidate) {
+                if (is_string($candidate)) {
+                    Storage::disk('local')->delete($candidate);
+                }
+            }
         }
 
         return response()->json([

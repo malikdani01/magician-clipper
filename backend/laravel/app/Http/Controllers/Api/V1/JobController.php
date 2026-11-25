@@ -77,13 +77,20 @@ class JobController extends Controller
         // (JSON clients send real booleans and are unaffected.)
         foreach (['captions_enabled', 'on_screen_text', 'auto_zoom',
                   'face_tracking', 'silence_removal', 'filler_removal',
-                  'beat_sync'] as $boolField) {
+                  'beat_sync', 'logo_overlay'] as $boolField) {
             if ($request->has($boolField) && is_string($request->input($boolField))) {
                 $request->merge([
                     $boolField => filter_var($request->input($boolField), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE)
                         ?? $request->input($boolField),
                 ]);
             }
+        }
+
+        // Batch 4: bulk creation — several files, one shared settings
+        // form, one job per file. Branched before the single-file
+        // validation below (which requires exactly one source).
+        if ($request->hasFile('files')) {
+            return $this->storeBulk($request);
         }
 
         // Settings rules live in JobSettingsRules so presets validate
@@ -105,20 +112,8 @@ class JobController extends Controller
             ], 422);
         }
 
-        if (($validated['job_type'] ?? 'myself') === 'campaign'
-            && empty($validated['campaign_requirements'])) {
-            return response()->json([
-                'error' => 'validation_error',
-                'message' => 'campaign_requirements is required when job_type is campaign.',
-            ], 422);
-        }
-
-        if (isset($validated['duration_min_seconds'], $validated['duration_max_seconds'])
-            && $validated['duration_min_seconds'] >= $validated['duration_max_seconds']) {
-            return response()->json([
-                'error' => 'validation_error',
-                'message' => 'duration_min_seconds must be less than duration_max_seconds.',
-            ], 422);
+        if (($sharedError = $this->checkSharedRules($validated)) !== null) {
+            return $sharedError;
         }
 
         $user = $request->user();
@@ -202,7 +197,168 @@ class JobController extends Controller
             ]);
         }
 
-        $settings = [
+        $settings = $this->buildSettings($validated, $sourceType, $sourceUrl, $sourcePath);
+
+        $job = ProcessingJob::create([
+            'project_id' => $project->id,
+            'user_id' => $user->id,
+            'media_asset_id' => $mediaAsset?->id,
+            'state' => ProcessingJob::STATE_QUEUED,
+            'stage' => 'Queued',
+            'progress' => 0,
+            'settings' => $settings,
+            'source_type' => $sourceType,
+            'source_url' => $sourceUrl,
+            'source_path' => $sourcePath,
+        ]);
+
+        return response()->json(['job' => $job->fresh()->toUserArray()], 201);
+    }
+
+    /**
+     * Batch 4: bulk job creation — up to 5 source files with ONE
+     * shared settings form, one job per file, identical settings.
+     * Every file is probed with ffprobe BEFORE any job is created,
+     * so one bad file rejects the whole request with no jobs made.
+     * A project_id puts all jobs in that project; otherwise each
+     * file gets its own project (title = the file name). Returns
+     * ['jobs' => [...]]; the single-file response is unchanged.
+     */
+    private function storeBulk(Request $request)
+    {
+        $validated = $request->validate(array_merge([
+            'title' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'project_id' => ['sometimes', 'nullable', 'integer', 'exists:projects,id'],
+            'files' => ['required', 'array', 'min:1', 'max:5'],
+            'files.*' => ['file', 'mimes:mp4,mov,mkv,webm', 'max:2097152'],
+        ], JobSettingsRules::rules()));
+
+        if (! empty($request->input('source_url'))) {
+            return response()->json([
+                'error' => 'validation_error',
+                'message' => 'Bulk jobs take files only — a source_url cannot be shared across multiple jobs.',
+            ], 422);
+        }
+
+        if (($sharedError = $this->checkSharedRules($validated)) !== null) {
+            return $sharedError;
+        }
+
+        $user = $request->user();
+
+        $project = null;
+        if (! empty($validated['project_id'])) {
+            $project = Project::findOrFail($validated['project_id']);
+            if (! $user->isAdmin() && $project->user_id !== $user->id) {
+                return response()->json(['error' => 'forbidden', 'message' => 'You do not own this project.'], 403);
+            }
+        }
+
+        /** @var \Illuminate\Http\UploadedFile[] $files */
+        $files = $request->file('files');
+
+        // Probe EVERY file first — a single unplayable file rejects
+        // the request before any job (or file) is created.
+        $probes = [];
+        foreach ($files as $file) {
+            $probe = $this->probeVideo($file->getPathname());
+            if ($probe === null) {
+                return response()->json([
+                    'error' => 'validation_error',
+                    'message' => "The uploaded file '{$file->getClientOriginalName()}' is not a playable video (FFprobe could not read it).",
+                ], 422);
+            }
+            $probes[] = $probe;
+        }
+
+        $jobs = [];
+        foreach ($files as $index => $file) {
+            $probe = $probes[$index];
+            $extension = strtolower($file->getClientOriginalExtension());
+            $storedFilename = Str::uuid()->toString().'.'.$extension;
+            $relativePath = 'uploads/'.$storedFilename;
+            Storage::disk('local')->putFileAs('uploads', $file, $storedFilename);
+
+            $jobProject = $project ?? $user->projects()->create([
+                'title' => $validated['title'] ?? pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME),
+                'description' => null,
+                'content_type' => $validated['content_type'] ?? 'general',
+                'status' => Project::STATUS_PROCESSING,
+            ]);
+
+            $mediaAsset = MediaAsset::create([
+                'project_id' => $jobProject->id,
+                'user_id' => $user->id,
+                'original_filename' => $file->getClientOriginalName(),
+                'stored_filename' => $storedFilename,
+                'mime' => $file->getMimeType(),
+                'extension' => $extension,
+                'size_bytes' => $file->getSize(),
+                'duration_seconds' => $probe['duration'],
+                'width' => $probe['width'],
+                'height' => $probe['height'],
+                'fps' => $probe['fps'],
+                'video_codec' => $probe['video_codec'],
+                'audio_codec' => $probe['audio_codec'],
+                'storage_path' => $relativePath,
+                'status' => MediaAsset::STATUS_READY,
+            ]);
+
+            $settings = $this->buildSettings($validated, 'upload', null, $relativePath);
+
+            $job = ProcessingJob::create([
+                'project_id' => $jobProject->id,
+                'user_id' => $user->id,
+                'media_asset_id' => $mediaAsset->id,
+                'state' => ProcessingJob::STATE_QUEUED,
+                'stage' => 'Queued',
+                'progress' => 0,
+                'settings' => $settings,
+                'source_type' => 'upload',
+                'source_url' => null,
+                'source_path' => $relativePath,
+            ]);
+            $jobs[] = $job->fresh()->toUserArray();
+        }
+
+        return response()->json(['jobs' => $jobs], 201);
+    }
+
+    /**
+     * Cross-field checks shared by single + bulk creation: a
+     * campaign job needs its requirements text, and a min/max
+     * duration pair must be ordered. Returns a 422 response or null.
+     */
+    private function checkSharedRules(array $validated): ?\Illuminate\Http\JsonResponse
+    {
+        if (($validated['job_type'] ?? 'myself') === 'campaign'
+            && empty($validated['campaign_requirements'])) {
+            return response()->json([
+                'error' => 'validation_error',
+                'message' => 'campaign_requirements is required when job_type is campaign.',
+            ], 422);
+        }
+
+        if (isset($validated['duration_min_seconds'], $validated['duration_max_seconds'])
+            && $validated['duration_min_seconds'] >= $validated['duration_max_seconds']) {
+            return response()->json([
+                'error' => 'validation_error',
+                'message' => 'duration_min_seconds must be less than duration_max_seconds.',
+            ], 422);
+        }
+
+        return null;
+    }
+
+    /**
+     * Build the stored settings array from validated input. Shared
+     * by single + bulk creation so the two can never drift apart.
+     * Defaults mirror the pre-feature behaviour for every key an
+     * old client omits.
+     */
+    private function buildSettings(array $validated, string $sourceType, ?string $sourceUrl, ?string $sourcePath): array
+    {
+        return [
             'platform' => $validated['platform'],
             'aspect_ratio' => $validated['aspect_ratio'],
             // Cast: multipart (FormData) sends numbers as strings; the
@@ -239,6 +395,10 @@ class JobController extends Controller
                 $validated['export_ratios'] ?? null,
                 $validated['aspect_ratio'],
             ),
+            // Batch 4: logo overlay OFF unless explicitly on — a
+            // watermark must never surprise the user (the worker also
+            // treats a missing key as OFF).
+            'logo_overlay' => $validated['logo_overlay'] ?? false,
             'job_type' => $validated['job_type'] ?? 'myself',
             'campaign_requirements' => $validated['campaign_requirements'] ?? null,
             'notes' => $validated['notes'] ?? null,
@@ -249,21 +409,6 @@ class JobController extends Controller
             'source_url' => $sourceUrl,
             'source_path' => $sourcePath,
         ];
-
-        $job = ProcessingJob::create([
-            'project_id' => $project->id,
-            'user_id' => $user->id,
-            'media_asset_id' => $mediaAsset?->id,
-            'state' => ProcessingJob::STATE_QUEUED,
-            'stage' => 'Queued',
-            'progress' => 0,
-            'settings' => $settings,
-            'source_type' => $sourceType,
-            'source_url' => $sourceUrl,
-            'source_path' => $sourcePath,
-        ]);
-
-        return response()->json(['job' => $job->fresh()->toUserArray()], 201);
     }
 
     public function show(Request $request, ProcessingJob $job)

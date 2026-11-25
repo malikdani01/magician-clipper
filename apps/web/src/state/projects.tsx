@@ -54,6 +54,8 @@ export interface ClipSpec {
   /** Batch 3 export ratios (2026-11-25); default ['9:16'] — 9:16 is
    * always on, 1:1 and 16:9 are optional extras. */
   exportRatios: string[]
+  /** Batch 4 logo overlay (2026-11-25); default OFF. */
+  logoOverlay: boolean
   /** How clips are picked: best parts only, or any parts to fill the count. */
   selectionMode: 'interesting_only' | 'fill_any'
   contentType:
@@ -86,6 +88,7 @@ export function defaultClipSpec(): ClipSpec {
     beatSync: true,
     captionTranslation: 'none',
     exportRatios: ['9:16'],
+    logoOverlay: false,
     selectionMode: 'interesting_only',
     contentType: 'general',
     keywords: '',
