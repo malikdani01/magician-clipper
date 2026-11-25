@@ -445,6 +445,7 @@ export function LibraryPage() {
                     {clip.duration_seconds !== null
                       ? formatDuration(clip.duration_seconds)
                       : 'Duration unknown'}
+                    {clip.aspect_ratio ? ` · ${clip.aspect_ratio}` : ''}
                     {clip.file_size_bytes ? ` · ${formatBytes(clip.file_size_bytes)}` : ''}
                     {clip.score !== null ? ` · viral ${Math.round(clip.score * 100)}` : ''}
                     {` · job #${clip.jobId}`}

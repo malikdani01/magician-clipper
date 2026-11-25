@@ -46,6 +46,14 @@ class JobSettingsRules
             // headline, captions at the bottom / on the divider).
             'headline_style' => ['sometimes', 'string', Rule::in(['bold_bar', 'lower_third', 'big_centre'])],
             'caption_position' => ['sometimes', 'string', Rule::in(['bottom', 'top', 'middle'])],
+            // Batch 3 (2026-11-25): beat-synced cuts/zoom (default ON),
+            // captions auto-translate (default "none" = original
+            // language), multi-ratio export (9:16 always on; the worker
+            // also forces the job's own aspect_ratio into the list).
+            'beat_sync' => ['sometimes', 'boolean'],
+            'caption_translation' => ['sometimes', 'string', Rule::in(['none', 'ur', 'hi', 'en'])],
+            'export_ratios' => ['sometimes', 'array', 'max:3'],
+            'export_ratios.*' => ['string', Rule::in(['9:16', '1:1', '16:9'])],
             'job_type' => ['sometimes', 'string', Rule::in(['myself', 'campaign'])],
             'campaign_requirements' => ['sometimes', 'nullable', 'string', 'max:5000'],
             'notes' => ['sometimes', 'nullable', 'string', 'max:5000'],

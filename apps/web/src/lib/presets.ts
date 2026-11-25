@@ -31,6 +31,12 @@ export interface PresetSettings {
    * bold_bar / bottom. */
   headline_style: HeadlineStyle
   caption_position: CaptionPosition
+  /** Batch 3 beat sync (2026-11-25); default ON. */
+  beat_sync: boolean
+  /** Batch 3 caption translation (2026-11-25); default 'none'. */
+  caption_translation: 'none' | 'ur' | 'hi' | 'en'
+  /** Batch 3 export ratios (2026-11-25); default ['9:16']. */
+  export_ratios: string[]
   job_type: 'myself' | 'campaign'
   campaign_requirements: string | null
   notes: string | null

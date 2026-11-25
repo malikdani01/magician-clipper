@@ -159,6 +159,53 @@ class JobPresetTest extends TestCase
             ->assertJsonValidationErrors(['settings.caption_position']);
     }
 
+    /**
+     * Batch 3 (2026-11-25): beat sync + caption translation + export
+     * ratios round-trip through preset save and list; invalid values
+     * are rejected by the same shared JobSettingsRules.
+     */
+    public function test_batch3_beat_sync_translation_and_ratios_round_trip_through_preset(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/presets', [
+                'name' => 'Urdu square export',
+                'settings' => $this->validSettings([
+                    'beat_sync' => false,
+                    'caption_translation' => 'ur',
+                    'export_ratios' => ['9:16', '1:1'],
+                ]),
+            ])
+            ->assertStatus(201)
+            ->assertJsonPath('preset.settings.beat_sync', false)
+            ->assertJsonPath('preset.settings.caption_translation', 'ur')
+            ->assertJsonPath('preset.settings.export_ratios', ['9:16', '1:1']);
+
+        $this->actingAs($user, 'sanctum')
+            ->getJson('/api/v1/presets')
+            ->assertStatus(200)
+            ->assertJsonPath('presets.0.settings.beat_sync', false)
+            ->assertJsonPath('presets.0.settings.caption_translation', 'ur')
+            ->assertJsonPath('presets.0.settings.export_ratios', ['9:16', '1:1']);
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/presets', [
+                'name' => 'Bad translation',
+                'settings' => $this->validSettings(['caption_translation' => 'fr']),
+            ])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['settings.caption_translation']);
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/presets', [
+                'name' => 'Bad ratio',
+                'settings' => $this->validSettings(['export_ratios' => ['4:3']]),
+            ])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['settings.export_ratios.0']);
+    }
+
     public function test_duplicate_name_for_same_user_is_422_but_other_users_may_reuse_it(): void
     {
         $user = User::factory()->create();

@@ -21,7 +21,9 @@ import {
 } from '../lib/captionStyles'
 import {
   CAPTION_POSITION_LABELS,
+  CAPTION_TRANSLATION_LABELS,
   createJob,
+  EXPORT_RATIO_OPTIONS,
   getJob,
   HEADLINE_STYLE_DESCRIPTIONS,
   HEADLINE_STYLE_LABELS,
@@ -29,6 +31,7 @@ import {
   SELECTION_MODE_DESCRIPTIONS,
   SELECTION_MODE_LABELS,
   type CaptionPosition,
+  type CaptionTranslation,
   type ClipLayout,
   type HeadlineStyle,
   type JobSettings,
@@ -244,6 +247,11 @@ export function NewJobPage() {
   // pre-Batch-2 behaviour (bold bar, bottom).
   const [headlineStyle, setHeadlineStyle] = useState<HeadlineStyle>('bold_bar')
   const [captionPosition, setCaptionPosition] = useState<CaptionPosition>('bottom')
+  // Batch 3 beat sync + caption translation + export ratios — defaults
+  // are the pre-Batch-3 behaviour (beat sync on, no translation, 9:16 only).
+  const [beatSync, setBeatSync] = useState(true)
+  const [captionTranslation, setCaptionTranslation] = useState<CaptionTranslation>('none')
+  const [exportRatios, setExportRatios] = useState<string[]>(['9:16'])
   const [jobType, setJobType] = useState<'myself' | 'campaign'>('myself')
   const [campaignRequirements, setCampaignRequirements] = useState('')
   // Notes for Muse: free-text brief for THIS job (campaign details,
@@ -379,6 +387,22 @@ export function NewJobPage() {
     if (s.caption_position === 'bottom' || s.caption_position === 'top' || s.caption_position === 'middle') {
       setCaptionPosition(s.caption_position)
     }
+    // Batch 3 (2026-11-25): beat sync, caption translation, export ratios.
+    if (typeof s.beat_sync === 'boolean') setBeatSync(s.beat_sync)
+    if (
+      s.caption_translation === 'none' ||
+      s.caption_translation === 'ur' ||
+      s.caption_translation === 'hi' ||
+      s.caption_translation === 'en'
+    ) {
+      setCaptionTranslation(s.caption_translation)
+    }
+    if (Array.isArray(s.export_ratios)) {
+      const ratios = s.export_ratios.filter((r) => r === '9:16' || r === '1:1' || r === '16:9')
+      if (ratios.length > 0) {
+        setExportRatios(ratios.includes('9:16') ? ratios : ['9:16', ...ratios])
+      }
+    }
     if (s.job_type === 'myself' || s.job_type === 'campaign') setJobType(s.job_type)
     if (typeof s.campaign_requirements === 'string') setCampaignRequirements(s.campaign_requirements)
     if (typeof s.notes === 'string') setNotes(s.notes)
@@ -418,6 +442,9 @@ export function NewJobPage() {
     filler_removal: fillerRemoval,
     headline_style: headlineStyle,
     caption_position: captionPosition,
+    beat_sync: beatSync,
+    caption_translation: captionTranslation,
+    export_ratios: exportRatios,
     job_type: jobType,
     campaign_requirements: campaignRequirements.trim() ? campaignRequirements : null,
     notes: notes.trim() ? notes : null,
@@ -537,6 +564,9 @@ export function NewJobPage() {
       fillerRemoval,
       headlineStyle,
       captionPosition,
+      beatSync,
+      captionTranslation,
+      exportRatios,
       jobType,
       campaignRequirements: campaignRequirements.trim(),
       notes: notes.trim(),
@@ -1072,6 +1102,75 @@ export function NewJobPage() {
                 </span>
               </label>
 
+              {/* Batch 3 beat sync + caption translation + export ratios. */}
+              <div>
+                <span className="text-sm font-medium text-white">Beat sync</span>
+                <div className="mt-2 flex items-center gap-3">
+                  <Toggle
+                    checked={beatSync}
+                    onChange={setBeatSync}
+                    label="Beat sync on or off"
+                  />
+                  <span className="text-sm text-[var(--color-text-muted)]">
+                    {beatSync ? 'Beat sync on' : 'Beat sync off'} — snap cuts
+                    and zoom to the beat of the audio
+                  </span>
+                </div>
+              </div>
+
+              <label className="block">
+                <span className="text-sm font-medium text-white">Translate captions</span>
+                <select
+                  value={captionTranslation}
+                  onChange={(e) => setCaptionTranslation(e.target.value as CaptionTranslation)}
+                  className={`${selectClass} mt-2`}
+                >
+                  {(Object.keys(CAPTION_TRANSLATION_LABELS) as CaptionTranslation[]).map((t) => (
+                    <option key={t} value={t}>
+                      {CAPTION_TRANSLATION_LABELS[t]}
+                    </option>
+                  ))}
+                </select>
+                <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                  Translates the captions after transcription. If the free
+                  translation service is unavailable, captions stay in the
+                  original language and the job says so.
+                </span>
+              </label>
+
+              <div>
+                <span className="text-sm font-medium text-white">Export ratios</span>
+                <div className="mt-2 flex flex-wrap items-center gap-4">
+                  {EXPORT_RATIO_OPTIONS.map((ratio) => {
+                    const checked = exportRatios.includes(ratio)
+                    const locked = ratio === '9:16'
+                    return (
+                      <label key={ratio} className="flex items-center gap-2 text-sm text-white">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={locked}
+                          onChange={() => {
+                            setExportRatios(
+                              checked
+                                ? exportRatios.filter((r) => r !== ratio)
+                                : [...exportRatios, ratio],
+                            )
+                          }}
+                          className="h-4 w-4 accent-fuchsia-500 disabled:opacity-60"
+                        />
+                        {ratio}
+                        {locked ? ' (always on)' : ''}
+                      </label>
+                    )
+                  })}
+                </div>
+                <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                  The same clips render in each ratio — each gets its own
+                  download. 1:1 and 16:9 use a centre crop.
+                </span>
+              </div>
+
               {/* Batch 1 clip enhancements — all default ON. */}
               <div>
                 <span className="text-sm font-medium text-white">Clip enhancements</span>
@@ -1276,6 +1375,9 @@ export function NewJobPage() {
                 ['On-screen text', onScreenText ? 'On' : 'Off'],
                 ['Headline style', HEADLINE_STYLE_LABELS[headlineStyle]],
                 ['Caption position', CAPTION_POSITION_LABELS[captionPosition]],
+                ['Beat sync', beatSync ? 'On' : 'Off'],
+                ['Translate captions', CAPTION_TRANSLATION_LABELS[captionTranslation]],
+                ['Export ratios', exportRatios.join(', ')],
                 ['Auto zoom', autoZoom ? 'On' : 'Off'],
                 ['Face tracking', faceTracking ? 'On' : 'Off'],
                 ['Silence removal', silenceRemoval ? 'On' : 'Off'],

@@ -25,12 +25,15 @@ import { ENGINE_URL, extractAudio, probeVideo, type ProbeResult } from '../lib/a
 import { formatBytes, formatDuration } from '../lib/format'
 import {
   CAPTION_POSITION_LABELS,
+  CAPTION_TRANSLATION_LABELS,
   createJob,
+  EXPORT_RATIO_OPTIONS,
   HEADLINE_STYLE_DESCRIPTIONS,
   HEADLINE_STYLE_LABELS,
   SELECTION_MODE_DESCRIPTIONS,
   SELECTION_MODE_LABELS,
   type CaptionPosition,
+  type CaptionTranslation,
   type HeadlineStyle,
   type SelectionMode,
 } from '../lib/jobs'
@@ -68,7 +71,7 @@ const IS_LOCAL_SITE =
   typeof window !== 'undefined' &&
   /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname)
 
-/** The 10 caption presets (same ids as the Captions Studio page). */
+/** The 15 caption presets (same ids as the Captions Studio page). */
 const CAPTION_STYLES = [
   { id: 'bold-pop', label: 'Bold Pop' },
   { id: 'highlight', label: 'Highlight' },
@@ -80,6 +83,12 @@ const CAPTION_STYLES = [
   { id: 'podcast', label: 'Podcast' },
   { id: 'cinematic', label: 'Cinematic' },
   { id: 'minimal', label: 'Minimal' },
+  // Batch 3 (2026-11-25): the five new styles, as wizard presets.
+  { id: 'word-zoom', label: 'Word Zoom' },
+  { id: 'word-fade', label: 'Word Fade' },
+  { id: 'highlight-box', label: 'Highlight Box' },
+  { id: 'bounce-pop', label: 'Bounce Pop' },
+  { id: 'glitch-pop', label: 'Glitch Pop' },
 ] as const
 
 /**
@@ -97,7 +106,9 @@ const CAPTION_STYLES = [
  * CaptionPreset passes real ids through unchanged, so it cannot bridge
  * the two. Styles with no legacy equivalent (typewriter, sweep,
  * outline, gradient, kinetic, glow_pop) have no wizard option: loading
- * a preset with one of those keeps the wizard's current preset.
+ * a preset with one of those keeps the wizard's current preset. The
+ * Batch 3 styles DO have wizard presets (word-zoom, word-fade,
+ * highlight-box, bounce-pop, glitch-pop).
  */
 const REAL_STYLE_TO_LEGACY_PRESET: Record<string, string> = {
   punchy: 'bold-pop',
@@ -109,6 +120,11 @@ const REAL_STYLE_TO_LEGACY_PRESET: Record<string, string> = {
   clean_subs: 'modern',
   classic: 'podcast',
   title_card: 'cinematic',
+  word_zoom: 'word-zoom',
+  word_fade: 'word-fade',
+  highlight_sweep: 'highlight-box',
+  bounce_in: 'bounce-pop',
+  glitch_pop: 'glitch-pop',
 }
 
 /** Preset quality → wizard processing mode. */
@@ -403,6 +419,22 @@ export function ClipperPage() {
     if (s.caption_position === 'bottom' || s.caption_position === 'top' || s.caption_position === 'middle') {
       patch.captionPosition = s.caption_position
     }
+    // Batch 3 (2026-11-25): beat sync, caption translation, export ratios.
+    if (typeof s.beat_sync === 'boolean') patch.beatSync = s.beat_sync
+    if (
+      s.caption_translation === 'none' ||
+      s.caption_translation === 'ur' ||
+      s.caption_translation === 'hi' ||
+      s.caption_translation === 'en'
+    ) {
+      patch.captionTranslation = s.caption_translation
+    }
+    if (Array.isArray(s.export_ratios)) {
+      const ratios = s.export_ratios.filter((r) => r === '9:16' || r === '1:1' || r === '16:9')
+      if (ratios.length > 0) {
+        patch.exportRatios = ratios.includes('9:16') ? ratios : ['9:16', ...ratios]
+      }
+    }
     if (CONTENT_TYPES.some((c) => c.id === s.content_type)) {
       patch.contentType = s.content_type as ClipSpec['contentType']
     }
@@ -477,6 +509,9 @@ export function ClipperPage() {
       fillerRemoval: spec.fillerRemoval ?? true,
       headlineStyle: spec.headlineStyle ?? 'bold_bar',
       captionPosition: spec.captionPosition ?? 'bottom',
+      beatSync: spec.beatSync ?? true,
+      captionTranslation: spec.captionTranslation ?? 'none',
+      exportRatios: spec.exportRatios ?? ['9:16'],
       jobType: 'myself',
       notes: keywordsAvoid.trim()
         ? `Keywords to avoid: ${keywordsAvoid.trim()}`
@@ -1531,6 +1566,76 @@ export function ClipperPage() {
                   Where the burn-in captions sit — never over the headline.
                 </span>
               </label>
+
+              {/* Batch 3 beat sync + caption translation + export ratios. */}
+              <div>
+                <span className="text-sm font-medium text-white">Beat sync</span>
+                <div className="mt-2 flex items-center gap-3">
+                  <Toggle
+                    checked={spec.beatSync ?? true}
+                    onChange={(v) => updateSpec({ beatSync: v })}
+                    label="Beat sync on or off"
+                  />
+                  <span className="text-sm text-[var(--color-text-muted)]">
+                    Beat sync — snap cuts and zoom to the beat of the audio
+                  </span>
+                </div>
+              </div>
+
+              <label className="block">
+                <span className="text-sm font-medium text-white">Translate captions</span>
+                <select
+                  value={spec.captionTranslation ?? 'none'}
+                  onChange={(e) =>
+                    updateSpec({ captionTranslation: e.target.value as CaptionTranslation })
+                  }
+                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
+                >
+                  {(Object.keys(CAPTION_TRANSLATION_LABELS) as CaptionTranslation[]).map((t) => (
+                    <option key={t} value={t}>
+                      {CAPTION_TRANSLATION_LABELS[t]}
+                    </option>
+                  ))}
+                </select>
+                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
+                  Translates the captions after transcription. If the free
+                  translation service is unavailable, captions stay in the
+                  original language and the job says so.
+                </span>
+              </label>
+
+              <div>
+                <span className="text-sm font-medium text-white">Export ratios</span>
+                <div className="mt-2 flex flex-wrap items-center gap-4">
+                  {EXPORT_RATIO_OPTIONS.map((ratio) => {
+                    const ratios = spec.exportRatios ?? ['9:16']
+                    const checked = ratios.includes(ratio)
+                    const locked = ratio === '9:16'
+                    return (
+                      <label key={ratio} className="flex items-center gap-2 text-sm text-white">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={locked}
+                          onChange={() => {
+                            const next = checked
+                              ? ratios.filter((r) => r !== ratio)
+                              : [...ratios, ratio]
+                            updateSpec({ exportRatios: next })
+                          }}
+                          className="h-4 w-4 accent-fuchsia-500 disabled:opacity-60"
+                        />
+                        {ratio}
+                        {locked ? ' (always on)' : ''}
+                      </label>
+                    )
+                  })}
+                </div>
+                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
+                  The same clips render in each ratio — each gets its own
+                  download. 1:1 and 16:9 use a centre crop.
+                </span>
+              </div>
 
               {/* Batch 1 clip enhancements — all default ON. A spec saved
                   before they existed has no value; `?? true` keeps the

@@ -11,9 +11,11 @@
  * `anim` drives the animated sample preview in Captions Studio — the
  * preview loops the same motion the worker burns onto the video
  * (pop / karaoke fill / bounce / typewriter / sweep / neon pulse /
- * slam / outline pop / gradient pop). The preview and the burned-in
- * captions must match: same words-per-screen, same colours, same
- * motion. `wordColors` (gradient only) cycles one colour per word.
+ * slam / outline pop / gradient pop / kinetic slide / glow pop /
+ * word zoom / word fade / highlight box / bounce pop / glitch pop).
+ * The preview and the burned-in captions must match: same
+ * words-per-screen, same colours, same motion. `wordColors` (gradient
+ * only) cycles one colour per word.
  */
 
 export type CaptionStyleId =
@@ -32,6 +34,11 @@ export type CaptionStyleId =
   | 'gradient'
   | 'kinetic'
   | 'glow_pop'
+  | 'word_zoom'
+  | 'word_fade'
+  | 'highlight_sweep'
+  | 'bounce_in'
+  | 'glitch_pop'
 
 export type CaptionPreviewAnim =
   | 'pop'
@@ -47,6 +54,11 @@ export type CaptionPreviewAnim =
   | 'gradient'
   | 'kinetic'
   | 'glow_pop'
+  | 'word_zoom'
+  | 'word_fade'
+  | 'highlight_sweep'
+  | 'bounce_in'
+  | 'glitch_pop'
 
 export interface CaptionStyle {
   id: CaptionStyleId
@@ -182,6 +194,49 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     sample: 'GLOW UP',
     anim: 'glow_pop',
   },
+  // Batch 3 (2026-11-25). "Bounce In" is taken by `bounce`, so the
+  // overshoot variant is "Bounce Pop"; `sweep` already owns "Highlight
+  // Sweep", so the boxed-word variant is "Highlight Box".
+  {
+    id: 'word_zoom',
+    name: 'Word Zoom',
+    description:
+      'Each word lands slightly big and settles to full size as it is spoken.',
+    sample: 'ZOOM IN CLOSE',
+    anim: 'word_zoom',
+  },
+  {
+    id: 'word_fade',
+    name: 'Word Fade',
+    description:
+      'Each word fades in softly as it is spoken — calm, clean, readable.',
+    sample: 'SOFT AND CLEAR',
+    anim: 'word_fade',
+  },
+  {
+    id: 'highlight_sweep',
+    name: 'Highlight Box',
+    description:
+      'The current word sits in a yellow highlight box that moves word to word.',
+    sample: 'WATCH THIS NOW',
+    anim: 'highlight_sweep',
+  },
+  {
+    id: 'bounce_in',
+    name: 'Bounce Pop',
+    description:
+      'Each word pops in with a small overshoot bounce — springier than Bounce In.',
+    sample: 'BOUNCE RIGHT IN',
+    anim: 'bounce_in',
+  },
+  {
+    id: 'glitch_pop',
+    name: 'Glitch Pop',
+    description:
+      'Each word pops in with a quick magenta-cyan flicker — a subtle glitch feel. (The burn flickers colours; libass cannot do a true RGB channel split.)',
+    sample: 'GLITCH IT UP',
+    anim: 'glitch_pop',
+  },
 ]
 
 /** The matching style, or Punchy for unknown / missing ids. */
@@ -208,6 +263,13 @@ export const LEGACY_CAPTION_PRESET_TO_STYLE: Record<string, CaptionStyleId> = {
   podcast: 'classic',
   cinematic: 'title_card',
   minimal: 'clean_subs',
+  // Batch 3 (2026-11-25): the five new styles got wizard presets too,
+  // so they are pickable in the wizard as well as in New Job.
+  'word-zoom': 'word_zoom',
+  'word-fade': 'word_fade',
+  'highlight-box': 'highlight_sweep',
+  'bounce-pop': 'bounce_in',
+  'glitch-pop': 'glitch_pop',
 }
 
 /**

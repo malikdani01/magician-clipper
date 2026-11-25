@@ -143,6 +143,40 @@ RATIO_TARGETS = {
     "4:5": (1080, 1350),
 }
 
+# Batch 3 multi-ratio export: the ratios a job renders in. The UI
+# offers 9:16 (always on) + 1:1 + 16:9; the job's own aspect_ratio is
+# always rendered even if a stale client omitted it from the list.
+#: Hard cap on TOTAL clip rows a job may produce (all ratios together).
+MAX_TOTAL_CLIPS = 50
+
+
+def export_ratios(settings: dict) -> list[str]:
+    """The ratios this job renders, in render order.
+
+    The job's aspect_ratio comes first, then the requested export
+    ratios in the order given; 9:16 is always included (it is the
+    default and the UI keeps it checked). Unknown values are dropped,
+    so a bad client cannot ask for a ratio with no target.
+    """
+    primary = (settings.get("aspect_ratio") or "9:16")
+    wanted = settings.get("export_ratios") or [primary]
+    if isinstance(wanted, str):
+        wanted = [wanted]
+    ratios: list[str] = []
+    for r in [primary, "9:16", *wanted]:
+        if isinstance(r, str) and r in RATIO_TARGETS and r not in ratios:
+            ratios.append(r)
+    return ratios or ["9:16"]
+
+
+def windows_per_ratio(requested: int, ratios: list[str]) -> int:
+    """Windows to select when each window renders once per ratio: the
+    50-clip total cap binds (e.g. 30 requested x 3 ratios -> 16
+    windows, 48 clips). A single ratio is never capped by this."""
+    if len(ratios) <= 1:
+        return requested
+    return min(requested, MAX_TOTAL_CLIPS // len(ratios))
+
 LANGUAGE_MAP = {"english": "en", "roman_urdu": "ur", "hindi": "hi", "auto": None}
 
 # Highlight scoring weights (documented, deterministic).
@@ -758,6 +792,176 @@ def transcribe(wav_path: Path, language: str | None) -> list[dict]:
                     "text": seg.text.strip(), "words": words})
     log.info("Transcription produced %d segments.", len(out))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Captions auto-translate (Batch 3, 2026-11-25)
+# ---------------------------------------------------------------------------
+# Free MyMemory API, no key: GET
+# https://api.mymemory.translated.net/get?q=<text>&langpair=<src>|<dst>
+# Short timeout (5s), at most one retry per segment, in-memory cache
+# per job. On ANY failure the segment keeps its original text — the
+# job never fails for translation, and the note says so honestly.
+# Two things the free tier forces us to live with: the anonymous quota
+# (5,000 chars/day, shared across this server's egress IP) is often
+# exhausted, so the fallback is the COMMON path, not an edge case; and
+# a 200 can still carry a bad translation-memory match, which no code
+# can detect — the note never claims a translation is good, only that
+# it was attempted. Translated words have no real timings, so they are
+# spread evenly across the segment span — the same behaviour the
+# caption builders already use when a segment has no word timings —
+# which keeps density/hook scoring and every caption style working.
+# Urdu/Hindi glyphs render through fontconfig fallback (this machine
+# has Noto Nastaliq Urdu / Noto Naskh Arabic / Noto Sans Devanagari
+# installed); a machine without those fonts would show boxes, which
+# no setting here can fix.
+# ---------------------------------------------------------------------------
+
+#: Target language code -> display name (the only values the API accepts).
+TRANSLATION_TARGETS = {"ur": "Urdu", "hi": "Hindi", "en": "English"}
+#: Job captions_language -> MyMemory source code. "auto" lets MyMemory
+#: detect the source language itself.
+TRANSLATION_SOURCES = {"english": "en", "hindi": "hi",
+                       "roman_urdu": "ur", "auto": "autodetect"}
+MYMEMORY_URL = "https://api.mymemory.translated.net/get"
+MYMEMORY_TIMEOUT = 5.0
+#: MyMemory's anonymous per-request limit is 500 chars; stay under it.
+MYMEMORY_MAX_CHARS = 450
+
+
+def _mymemory_translate(text: str, source: str, target: str) -> str | None:
+    """One MyMemory call. Returns the translated text, or None on any
+    failure (network, timeout, non-200, rate limit / quota, empty or
+    unusable response). NEVER returns the API's quota-warning text as
+    a translation — responseStatus must be 200 first."""
+    import urllib.error
+    import urllib.parse
+    query = urllib.parse.urlencode(
+        {"q": text, "langpair": f"{source}|{target}"})
+    req = urllib.request.Request(f"{MYMEMORY_URL}?{query}",
+                                 headers={"User-Agent": "MagicianClipper/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=MYMEMORY_TIMEOUT) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception as exc:  # noqa: BLE001 - any transport failure is a fallback
+        log.warning("MyMemory request failed (%s); segment keeps its original text.", exc)
+        return None
+    if not isinstance(payload, dict) or payload.get("responseStatus") != 200:
+        log.warning("MyMemory refused the translation (status=%s); segment "
+                    "keeps its original text.",
+                    payload.get("responseStatus") if isinstance(payload, dict) else "?")
+        return None
+    data = payload.get("responseData") or {}
+    translated = (data.get("translatedText") or "").strip()
+    if not translated:
+        return None
+    return translated
+
+
+def _split_for_translation(text: str,
+                           max_chars: int = MYMEMORY_MAX_CHARS) -> list[str]:
+    """Split a long segment into <=max_chars chunks at word boundaries
+    (MyMemory's anonymous limit is 500 chars per request)."""
+    if len(text) <= max_chars:
+        return [text]
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for word in text.split():
+        add = len(word) + (1 if current else 0)
+        if current and current_len + add > max_chars:
+            chunks.append(" ".join(current))
+            current, current_len = [], 0
+        current.append(word)
+        current_len += len(word) + (1 if len(current) > 1 else 0)
+    if current:
+        chunks.append(" ".join(current))
+    return chunks
+
+
+def _even_word_timings(text: str, start: float, end: float) -> list[dict]:
+    """Word timings spread evenly across [start, end] — the same
+    behaviour the caption builders use for segments without timings."""
+    words = text.split()
+    if not words:
+        return []
+    span = max(0.0, end - start)
+    step = span / len(words)
+    return [{"start": start + i * step, "end": start + (i + 1) * step,
+             "word": w} for i, w in enumerate(words)]
+
+
+def translate_segments(segments: list[dict], target: str,
+                       source_language: str = "auto",
+                       cache: dict | None = None) -> tuple[list[dict], dict]:
+    """Translate every segment's text into ``target`` (MyMemory).
+
+    Returns (segments, info) where info is {"status", "translated",
+    "failed", "target"}: status is "ok" (every segment translated),
+    "partial" (some fell back to the original text), "unavailable"
+    (none translated — every call failed), "same" (target is already
+    the source language, no call made), or "none" (target "none" or
+    unknown). ``cache`` maps source text -> translated text and is
+    shared across the job so a repeated line is translated once.
+    The returned segments are NEW dicts; the input is untouched.
+    """
+    if target not in TRANSLATION_TARGETS:
+        return segments, {"status": "none", "translated": 0, "failed": 0,
+                          "target": target}
+    source = TRANSLATION_SOURCES.get(
+        (source_language or "auto").lower(), "autodetect")
+    if source == target:
+        return segments, {"status": "same", "translated": 0, "failed": 0,
+                          "target": target}
+    cache = cache if cache is not None else {}
+    out: list[dict] = []
+    translated_n = 0
+    failed_n = 0
+    for seg in segments:
+        text = (seg.get("text") or "").strip()
+        if not text:
+            out.append(dict(seg))
+            continue
+        if text in cache:
+            translated = cache[text]
+        else:
+            translated = None
+            for attempt in range(2):  # one attempt + at most one retry
+                parts = []
+                ok = True
+                for chunk in _split_for_translation(text):
+                    got = _mymemory_translate(chunk, source, target)
+                    if got is None:
+                        ok = False
+                        break
+                    parts.append(got)
+                if ok:
+                    translated = " ".join(parts).strip()
+                    break
+                if attempt == 0:
+                    log.info("Retrying MyMemory translation for one segment.")
+            if translated:
+                cache[text] = translated
+        if not translated:
+            failed_n += 1
+            out.append(dict(seg))
+            continue
+        translated_n += 1
+        out.append({
+            "start": seg["start"], "end": seg["end"],
+            "text": translated,
+            "words": _even_word_timings(translated, seg["start"], seg["end"]),
+        })
+    if translated_n and failed_n:
+        status = "partial"
+    elif translated_n:
+        status = "ok"
+    elif failed_n:
+        status = "unavailable"
+    else:
+        status = "ok"
+    return out, {"status": status, "translated": translated_n,
+                 "failed": failed_n, "target": target}
 
 
 def wav_rms_profile(wav_path: Path, window: float = 1.0) -> list[float]:
@@ -1533,8 +1737,10 @@ def write_clip_srt(segments: list[dict], start: float, end: float,
 
 
 # ---------------------------------------------------------------------------
-# Caption styles (15 total: 5 original + 10 CapCut-style animated,
-# added 2026-11-22, kinetic + glow_pop 2026-11-24)
+# Caption styles (20 total: 5 original + 10 CapCut-style animated,
+# added 2026-11-22, kinetic + glow_pop 2026-11-24, Batch 3's five
+# 2026-11-25: word_zoom, word_fade, highlight_sweep, bounce_in,
+# glitch_pop)
 #
 # The styles are a DATA table shared with the frontend
 # (apps/web/src/lib/captionStyles.ts) — the Captions Studio page shows
@@ -1554,6 +1760,12 @@ def write_clip_srt(segments: list[dict], start: float, end: float,
 # preview loops the same motion the ASS below burns in — same words,
 # same colours, same entrance. libass renders the \t scale transforms,
 # \k karaoke fills and \1c colour overrides used here.
+# Batch 3 adds five more in the same spirit. Two honest limits, written
+# where they apply in write_clip_ass: libass has no per-channel offset,
+# so glitch_pop's "RGB split" is a rapid magenta->cyan colour flicker
+# on each word change, not a true channel split; highlight_sweep's box
+# is the style's BorderStyle-3 background on the single current word
+# (the full phrase is NOT shown behind it).
 # ---------------------------------------------------------------------------
 
 CAPTION_STYLES = {
@@ -1572,6 +1784,14 @@ CAPTION_STYLES = {
     "gradient": "Gradient Pop",
     "kinetic": "Kinetic Slide",
     "glow_pop": "Glow Pop",
+    # Batch 3 (2026-11-25). "Bounce In" is taken by `bounce`, so the
+    # overshoot variant is "Bounce Pop" in the UI; `sweep` already owns
+    # "Highlight Sweep", so the boxed-word variant is "Highlight Box".
+    "word_zoom": "Word Zoom",
+    "word_fade": "Word Fade",
+    "highlight_sweep": "Highlight Box",
+    "bounce_in": "Bounce Pop",
+    "glitch_pop": "Glitch Pop",
 }
 
 # One bright colour per word, cycled (ASS BGR hex) — the Gradient Pop
@@ -2038,7 +2258,9 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
         )
     elif style_id in ("karaoke", "bounce", "typewriter", "sweep",
                       "neon", "slam", "outline", "gradient",
-                      "kinetic", "glow_pop"):
+                      "kinetic", "glow_pop",
+                      "word_zoom", "word_fade", "highlight_sweep",
+                      "bounce_in", "glitch_pop"):
         # (name, fs_big, fs_small, primary, secondary, outline_colour,
         #  back_colour, bold, border_style, outline, shadow)
         # Colours are ASS &HAABBGGRR. Neon shadow is BackColour magenta,
@@ -2048,6 +2270,12 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
         # it, the burn keeps the glow constant). Kinetic's slide is a
         # straight linear \move (no easing curve in libass); the preview
         # eases it — same spirit, not the same curve.
+        # Batch 3: highlight_sweep's box IS the style — BorderStyle 3
+        # fills the text box with the yellow BackColour, and the text
+        # is black on it (white on yellow would not read). glitch_pop
+        # has no true RGB split in libass (no per-channel offset), so
+        # the flicker lives in the per-word prefix below: a rapid
+        # magenta -> cyan colour flash on each word change.
         _NEW_STYLE_PARAMS = {
             "karaoke": ("Karaoke", 96, 68, "&H0000FFFF", "&H00FFFFFF",
                         "&H00000000", "&H80000000", -1, 1, 3, 0),
@@ -2069,6 +2297,17 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                         "&H00000000", "&H80000000", -1, 1, 4, 0),
             "glow_pop": ("GlowPop", 110, 78, "&H00FFFFFF", "&H0000FFFF",
                          "&H00000000", "&H0000CCFF", -1, 1, 4, 2),
+            "word_zoom": ("WordZoom", 110, 78, "&H00FFFFFF", "&H0000FFFF",
+                          "&H00000000", "&H80000000", -1, 1, 4, 0),
+            "word_fade": ("WordFade", 110, 78, "&H00FFFFFF", "&H0000FFFF",
+                          "&H00000000", "&H80000000", -1, 1, 4, 0),
+            "highlight_sweep": ("HighlightSweep", 96, 68, "&H00000000",
+                                "&H00FFFFFF", "&H00000000", "&H0000FFFF",
+                                -1, 3, 0, 0),
+            "bounce_in": ("BounceIn", 110, 78, "&H00FFFFFF", "&H0000FFFF",
+                          "&H00000000", "&H80000000", -1, 1, 4, 0),
+            "glitch_pop": ("GlitchPop", 110, 78, "&H00FFFFFF", "&H0000FFFF",
+                           "&H00000000", "&H80000000", -1, 1, 4, 0),
         }
         (sname, fs_big, fs_small, primary, secondary, outline_c, back_c,
          bold, border, outline_w, shadow) = _NEW_STYLE_PARAMS[style_id]
@@ -2134,7 +2373,9 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                     )
     elif style_id in ("karaoke", "bounce", "typewriter", "sweep",
                       "neon", "slam", "outline", "gradient",
-                      "kinetic", "glow_pop"):
+                      "kinetic", "glow_pop",
+                      "word_zoom", "word_fade", "highlight_sweep",
+                      "bounce_in", "glitch_pop"):
         # CapCut-style animated captions. Every branch produces events
         # in the SAME style the Captions Studio preview loops.
         sname = _NEW_STYLE_PARAMS[style_id][0]
@@ -2199,13 +2440,15 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                     )
         else:
             # Word-at-a-time styles: bounce / slam / neon / outline /
-            # gradient / kinetic / glow_pop. Same timing loop as
-            # word_pop; only the entrance override (and, for gradient,
-            # the per-word colour) differs.
+            # gradient / kinetic / glow_pop / word_zoom / word_fade /
+            # highlight_sweep / bounce_in / glitch_pop. Same timing
+            # loop as word_pop; only the entrance override (and, for
+            # gradient, the per-word colour) differs.
             for i, w in enumerate(words):
                 s, e = w["start"], w["end"]
-                min_dur = 0.35 if style_id in ("bounce", "kinetic") else (
-                    0.30 if style_id == "glow_pop" else 0.25)
+                min_dur = 0.35 if style_id in ("bounce", "kinetic", "bounce_in") else (
+                    0.30 if style_id in ("glow_pop", "word_zoom", "word_fade",
+                                         "glitch_pop") else 0.25)
                 if e - s < min_dur:
                     e = s + min_dur
                 if i + 1 < len(words):
@@ -2238,6 +2481,36 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                     # gold shadow (steady in the burn).
                     prefix = ("{\\fscx0\\fscy0\\t(0,150,\\fscx118\\fscy118)"
                               "\\t(150,280,\\fscx100\\fscy100)}")
+                elif style_id == "word_zoom":
+                    # Each word lands at 120% and settles to 100% over
+                    # its first 300ms — a gentle zoom as it is spoken.
+                    prefix = "{\\fscx120\\fscy120\\t(0,300,\\fscx100\\fscy100)}"
+                elif style_id == "word_fade":
+                    # Each word fades in from fully transparent over
+                    # its first 250ms (\alpha FF -> 00).
+                    prefix = "{\\alpha&HFF&\\t(0,250,\\alpha&H00&)}"
+                elif style_id == "highlight_sweep":
+                    # No prefix: the yellow box IS the style (BorderStyle
+                    # 3 + yellow BackColour). One word per event, so the
+                    # box sits behind the current word only and moves
+                    # word to word as each word is spoken.
+                    prefix = ""
+                elif style_id == "bounce_in":
+                    # Pop in with an overshoot AND an undershoot settle
+                    # (118% -> 95% -> 100%): a real bounce, distinct
+                    # from `bounce`'s single overshoot.
+                    prefix = ("{\\fscx0\\fscy0\\t(0,120,\\fscx118\\fscy118)"
+                              "\\t(120,240,\\fscx95\\fscy95)"
+                              "\\t(240,340,\\fscx100\\fscy100)}")
+                elif style_id == "glitch_pop":
+                    # libass has no per-channel offset, so a true RGB
+                    # split is impossible; the flicker is simulated as
+                    # a rapid magenta -> cyan colour flash on each word
+                    # change, settling to white with a small scale pop.
+                    prefix = ("{\\fscx112\\fscy112"
+                              "\\t(0,80,\\1c&HFF00FF&)"
+                              "\\t(80,160,\\1c&H00FFFF&)"
+                              "\\t(160,260,\\fscx100\\fscy100)}")
                 else:  # neon, outline
                     prefix = ""
                 events.append(
@@ -2878,6 +3151,145 @@ def zoompan_filter(moments: list[tuple[float, float]], tw: int, th: int,
         env = f"max({env},{extra})"
     return (f"zoompan=z='1+0.08*{env}':x='iw/2-(iw/zoom/2)':"
             f"y='ih/2-(ih/zoom/2)':d=1:s={tw}x{th}:fps={fps}")
+
+
+# ---------------------------------------------------------------------------
+# Beat sync (Batch 3, 2026-11-25)
+# ---------------------------------------------------------------------------
+# Beats come from the SAME per-second RMS profile the selector and the
+# auto-zoom already use — no new dependency, no new analysis pass. A
+# beat is an onset second: the RMS jumps by >= 25% of the profile peak
+# against the previous second AND reaches >= 60% of the peak. The beat
+# time is the centre of the onset second (i + 0.5) — the profile is
+# per-second, so a beat is only known to the nearest second and every
+# snap below is honest about that resolution. Flat audio (no rise
+# anywhere, or a peak so small it is noise) yields no beats at all and
+# the job falls back to the unsynced behaviour with a note.
+# ---------------------------------------------------------------------------
+
+#: A beat must clear this absolute RMS rise too, so near-silent noise
+#: on a flat profile cannot manufacture "beats".
+BEAT_MIN_RISE = 0.05
+#: Snap window: a moment/window boundary only moves when a beat is
+#: this close (seconds). The shift is always uniform (start and end
+#: move together), so a duration promise is never broken to chase a beat.
+BEAT_SNAP_WINDOW = 0.5
+
+
+def detect_beats(energy_profile: list[float]) -> list[float]:
+    """Onset times (seconds) from the per-second RMS profile.
+
+    [] when the profile is empty, flat, or silent — the caller treats
+    that as "no clear beat" and does not sync anything.
+    """
+    if not energy_profile:
+        return []
+    peak = max(energy_profile)
+    if peak <= 0:
+        return []
+    rise_needed = max(0.25 * peak, BEAT_MIN_RISE)
+    beats: list[float] = []
+    for i in range(1, len(energy_profile)):
+        v, prev = energy_profile[i], energy_profile[i - 1]
+        if v >= 0.6 * peak and v - prev >= rise_needed:
+            beats.append(i + 0.5)
+    return beats
+
+
+def _nearest_beat(t: float, beats: list[float],
+                  max_shift: float = BEAT_SNAP_WINDOW) -> float | None:
+    """Nearest beat to ``t`` within ``max_shift`` seconds, else None."""
+    best: float | None = None
+    best_dist = max_shift + 1e-9
+    for b in beats:
+        dist = abs(b - t)
+        if dist <= max_shift and dist < best_dist:
+            best, best_dist = b, dist
+    return best
+
+
+def snap_zoom_moments_to_beats(
+        moments: list[tuple[float, float]], beats: list[float],
+        clip_start: float, clip_end: float) -> tuple[list[tuple[float, float]], int]:
+    """Snap each zoom moment's START to its nearest beat (source time).
+
+    The moment keeps its length (end shifts by the same delta), so the
+    zoompan envelope is unchanged in shape. A moment is only snapped
+    when a beat lies within +/-0.5s of its start AND the shifted
+    moment still sits inside [clip_start, clip_end]; otherwise it
+    stays exactly where it was. Returns (moments, snapped_count).
+    """
+    if not beats or not moments:
+        return moments, 0
+    snapped: list[tuple[float, float]] = []
+    count = 0
+    for a, b in moments:
+        beat = _nearest_beat(a, beats)
+        if beat is None:
+            snapped.append((a, b))
+            continue
+        delta = beat - a
+        na, nb = a + delta, b + delta
+        if na < clip_start:
+            nb -= na - clip_start
+            na = clip_start
+        if nb > clip_end:
+            na -= nb - clip_end
+            nb = clip_end
+        if nb - na < 0.5:
+            # The clamp would have crushed the moment; keep it unsnapped.
+            snapped.append((a, b))
+            continue
+        snapped.append((na, nb))
+        count += 1
+    return snapped, count
+
+
+def snap_windows_to_beats(windows: list[dict], beats: list[float],
+                          source_duration: float) -> int:
+    """Nudge chosen clip windows so their START lands on a beat.
+
+    Each window shifts uniformly (start and end by the same delta, so
+    its duration is preserved exactly) toward the nearest beat within
+    +/-0.5s of its start. A shift is refused when it would push the
+    window out of [0, source_duration] or into a neighbour — the
+    window keeps its original bounds instead. The window dict gains
+    ``beat_shift`` (seconds, 0.0 when unsnapped) and the "beat_aligned"
+    signal; the reason line notes the alignment. Returns how many
+    windows were snapped. Pure function — no I/O, unit-tested.
+    """
+    if not beats or not windows:
+        return 0
+    ordered = sorted(windows, key=lambda w: w["start"])
+    snapped = 0
+    for idx, w in enumerate(ordered):
+        beat = _nearest_beat(float(w["start"]), beats)
+        if beat is None:
+            w["beat_shift"] = 0.0
+            continue
+        delta = beat - float(w["start"])
+        ns, ne = float(w["start"]) + delta, float(w["end"]) + delta
+        if ns < 0.0 or ne > source_duration:
+            w["beat_shift"] = 0.0
+            continue
+        if idx > 0 and ns < float(ordered[idx - 1]["end"]):
+            w["beat_shift"] = 0.0
+            continue
+        if idx + 1 < len(ordered) and ne > float(ordered[idx + 1]["start"]):
+            w["beat_shift"] = 0.0
+            continue
+        w["start"], w["end"] = round(ns, 3), round(ne, 3)
+        w["duration"] = round(ne - ns, 3)
+        w["beat_shift"] = round(delta, 3)
+        signals = w.get("signals") or []
+        if "beat_aligned" not in signals:
+            signals.append("beat_aligned")
+            w["signals"] = signals
+        reason = w.get("reason") or ""
+        if "Beat-aligned" not in reason:
+            w["reason"] = reason + " Beat-aligned start."
+        snapped += 1
+    return snapped
 
 
 def face_track_trajectory(source: Path, start: float, duration: float,
@@ -3715,7 +4127,8 @@ def _throw_if_cancelled(api: "JobApi", job_id) -> None:
 
 
 def _ready_note(clips: list[dict], requested: int, failed: list[str],
-                rendered: list[dict] | None = None) -> str | None:
+                rendered: list[dict] | None = None,
+                extra: list[str] | None = None) -> str | None:
     """The note the job page shows when a job finishes Ready but the
     result is not the full request: fewer clips than asked for (speech
     was scarce, visual moments may have filled some slots), or some
@@ -3726,6 +4139,9 @@ def _ready_note(clips: list[dict], requested: int, failed: list[str],
     given, the note also reports the enhancements honestly — seconds of
     silence trimmed, fillers cut, zoom/face-tracking counts, and any
     fallback or skip — from the per-clip stats render_clip stashed.
+    Batch 3: ``extra`` carries pre-built honest lines the caller adds
+    (beat sync, caption translation, multi-ratio export); they are
+    appended verbatim, so a job with nothing to report still gets None.
     """
     notes: list[str] = []
     if len(clips) < requested:
@@ -3781,6 +4197,8 @@ def _ready_note(clips: list[dict], requested: int, failed: list[str],
             notes.append(
                 "Silence/filler removal skipped for a clip: "
                 + "; ".join(skipped) + ".")
+    if extra:
+        notes.extend(extra)
     return " ".join(notes) if notes else None
 
 
@@ -3826,6 +4244,13 @@ def process_rerender(api: JobApi, rerender: dict) -> None:
             lang = LANGUAGE_MAP.get(
                 (settings.get("captions_language") or "auto").lower(), None)
             segments = transcribe(wav_path, lang)
+            # Batch 3: the re-render keeps the job's caption translation
+            # (same fallback rule as a fresh job — never fails the clip).
+            target_lang = (settings.get("caption_translation") or "none").lower()
+            if target_lang in TRANSLATION_TARGETS:
+                segments, _translation_info = translate_segments(
+                    segments, target_lang,
+                    source_language=(settings.get("captions_language") or "auto"))
             # Batch 1: the re-render keeps the job's enhancements — the
             # auto-zoom moments come from this clip's own audio energy.
             # (Silence/filler cleaning is computed inside render_clip
@@ -3834,8 +4259,16 @@ def process_rerender(api: JobApi, rerender: dict) -> None:
             if _feature_on(settings, "auto_zoom"):
                 energy = wav_rms_profile(wav_path)
                 if energy:
-                    clip["_zoom_moments"] = zoom_moments(
+                    moments = zoom_moments(
                         energy, clip["start"], clip["end"])
+                    # Batch 3: snap the zoom moments to beats, as a
+                    # fresh job does.
+                    if _feature_on(settings, "beat_sync"):
+                        beats = detect_beats(energy)
+                        if beats:
+                            moments, _n = snap_zoom_moments_to_beats(
+                                moments, beats, clip["start"], clip["end"])
+                    clip["_zoom_moments"] = moments
         out_path = job_dir / "clip.mp4"
         render_clip(source, clip, settings, segments, out_path,
                     source_info, job_dir)
@@ -3924,6 +4357,9 @@ def process_job(api: JobApi, job: dict) -> None:
 
         api.set_status(job_id, "Processing", stage="transcribing", progress=20)
         wav_path = job_dir / "audio_16k.wav"
+        # Batch 3: translation info for the job note (None when the job
+        # does not ask for a translation, or has no audio to translate).
+        translation_info: dict | None = None
         if source_info["has_audio"]:
             extract_audio(source, wav_path)
             # The extracted WAV must span the video timeline (gap-filled
@@ -3940,19 +4376,41 @@ def process_job(api: JobApi, job: dict) -> None:
                 (settings.get("captions_language") or "auto").lower(), None)
             segments = transcribe(wav_path, lang)
             energy = wav_rms_profile(wav_path)
+            # Batch 3: captions auto-translate, BEFORE selection — the
+            # windows, scores, headlines and captions all use the
+            # translated text. A failed translation never fails the
+            # job: the segment keeps its original text (see
+            # translate_segments) and the note says so.
+            target_lang = (settings.get("caption_translation") or "none").lower()
+            if target_lang in TRANSLATION_TARGETS:
+                segments, translation_info = translate_segments(
+                    segments, target_lang,
+                    source_language=(settings.get("captions_language") or "auto"))
+                log.info("Job %s translation to %s: %s (%d translated, %d fell back).",
+                         job_id, target_lang, translation_info["status"],
+                         translation_info["translated"], translation_info["failed"])
         else:
             segments, energy = [], []
             log.info("Source has no audio track; skipping transcription.")
 
         api.set_status(job_id, "Processing", stage="selecting_clips", progress=45)
         _throw_if_cancelled(api, job_id)
-        face_prof = face_profile(source, source_info["duration"])
-        clips = select_highlights(segments, source_info["duration"], settings, energy, face_prof)
+        # Batch 3 multi-ratio: the SAME windows render once per ratio,
+        # so the window count is capped by the 50-clip total limit
+        # (e.g. 3 ratios -> at most 16 windows). The cap is reported
+        # in the job note; the selector is asked for the capped count.
+        ratios = export_ratios(settings)
         requested = int(settings.get("clip_count", 3))
-        if len(clips) < requested:
+        windows_requested = windows_per_ratio(requested, ratios)
+        capped_for_ratios = windows_requested < requested
+        face_prof = face_profile(source, source_info["duration"])
+        clips = select_highlights(segments, source_info["duration"],
+                                  dict(settings, clip_count=windows_requested),
+                                  energy, face_prof)
+        if len(clips) < windows_requested:
             log.warning("Job %s: only %d of %d requested clips could be "
                         "selected from the source; proceeding with %d.",
-                        job_id, len(clips), requested, len(clips))
+                        job_id, len(clips), windows_requested, len(clips))
         log.info("Selected %d clip window(s) for job %s.", len(clips), job_id)
         for clip in clips:
             if "low_audio_coverage" in (clip.get("signals") or []):
@@ -3983,81 +4441,137 @@ def process_job(api: JobApi, job: dict) -> None:
                     clip["start"], clip["end"] = ns, ne
                     clip["duration"] = round(ne - ns, 3)
 
+        # Batch 3: beat sync — detect beats from the RMS profile and
+        # snap each chosen window's start to the nearest beat (uniform
+        # shift, so the duration promise is untouched). Runs AFTER the
+        # cleaning extension above, so the snapped bounds are the final
+        # ones. A window that cannot shift without leaving the source
+        # or overlapping a neighbour keeps its original bounds.
+        beat_on = _feature_on(settings, "beat_sync")
+        beats: list[float] = []
+        windows_snapped = 0
+        if beat_on and energy:
+            beats = detect_beats(energy)
+            if beats:
+                windows_snapped = snap_windows_to_beats(
+                    clips, beats, source_info["duration"])
+                log.info("Job %s beat sync: %d beat(s) detected, %d of %d "
+                         "window starts aligned.",
+                         job_id, len(beats), windows_snapped, len(clips))
+            else:
+                log.info("Job %s beat sync: no clear beat in this audio; "
+                         "clips cut as usual.", job_id)
+
         # Batch 1: high-energy moments for the auto-zoom punch-in, from
         # the same RMS profile the selector already uses. Stashed on the
         # clip dict in source time; render_clip re-maps them through any
-        # silence/filler cuts.
+        # silence/filler cuts. Batch 3: each moment's start snaps to its
+        # nearest beat when one is within +/-0.5s.
+        zoom_snapped = 0
+        zoom_total = 0
         if _feature_on(settings, "auto_zoom") and energy:
             for clip in clips:
-                clip["_zoom_moments"] = zoom_moments(
+                moments = zoom_moments(
                     energy, clip["start"], clip["end"])
+                snapped_n = 0
+                if beats:
+                    moments, snapped_n = snap_zoom_moments_to_beats(
+                        moments, beats, clip["start"], clip["end"])
+                clip["_zoom_moments"] = moments
+                zoom_snapped += snapped_n
+                zoom_total += len(moments)
+            if beats:
+                log.info("Job %s beat sync: %d of %d zoom moment(s) snapped "
+                         "to beats.", job_id, zoom_snapped, zoom_total)
 
         api.set_status(job_id, "Processing", stage="rendering", progress=60)
-        rendered: list[tuple[Path, dict, dict, Path | None]] = []
+        # Batch 3 multi-ratio: the SAME windows render once per ratio.
+        # Each ratio gets its OWN clip row (own aspect_ratio, thumbnail
+        # and download) sharing the window's score and transcript. The
+        # layouts are 9:16-first: build_layout_chains falls back to a
+        # centre crop for 1:1 / 16:9 (documented there), and the brand
+        # concat normalises to the clip canvas per ratio. A per-ratio
+        # COPY of the clip dict is rendered, so the per-clip stats
+        # render_clip stashes never collide between ratios.
+        rendered: list[tuple[Path, dict, dict, Path | None, str, int]] = []
         failed: list[str] = []
-        for i, clip in enumerate(clips, 1):
-            _throw_if_cancelled(api, job_id)
-            out_path = job_dir / f"clip_{i:02d}.mp4"
-            try:
-                render_clip(source, clip, settings, segments, out_path,
-                            source_info, job_dir)
-                info = validate_clip(out_path, {"settings": settings}, source_info)
-                clip_intro_ok = False
-                if brand:
-                    # Brand the clip: [intro?] + clip + [outro?]. Any
-                    # concat failure falls back to the plain clip
-                    # (apply_brand_assets never raises); the uploaded
-                    # duration then comes from the branded file.
-                    try:
-                        branded_path = job_dir / f"clip_{i:02d}_branded.mp4"
-                        final_path, intro_ok, outro_ok = apply_brand_assets(
-                            out_path, brand.get("intro"), brand.get("outro"),
-                            branded_path)
-                        if final_path != out_path:
-                            info = probe_summary(final_path)
-                            intro_applied = intro_applied or intro_ok
-                            outro_applied = outro_applied or outro_ok
-                            out_path = final_path
-                            clip_intro_ok = intro_ok
-                    except Exception as brand_exc:  # noqa: BLE001 - branding never fails the clip
-                        log.warning("Job %s: clip %d branding failed (%s); "
-                                    "uploading the plain clip.",
-                                    job_id, i, brand_exc)
-                # Thumbnail: a branded clip opens with its intro, so a
-                # frame at 1.0s would show the intro card, not the clip.
-                # Take the frame just after the intro instead.
-                thumb_at = 1.0
-                if clip_intro_ok and "intro" in brand:
-                    intro_info = _probe_video_info(brand["intro"])
-                    if intro_info is not None:
-                        thumb_at = intro_info["duration"] + 1.0
-                thumb = extract_thumbnail(out_path, job_dir / f"thumb_{i:02d}.jpg",
-                                          at_seconds=thumb_at)
-            except Exception as clip_exc:  # noqa: BLE001 - one bad clip must not kill the job
-                # Per-clip failure isolation: log the failure, drop the
-                # partial file, and keep rendering the rest. Only when
-                # EVERY clip fails does the job fail (below).
-                reason = str(clip_exc)[:300]
-                log.error("Job %s: clip %d (%.1f-%.1fs) failed: %s; skipping it.",
-                          job_id, i, clip["start"], clip["end"], reason)
-                failed.append(f"Clip {i} ({clip['start']:.1f}–{clip['end']:.1f}s): {reason}")
-                if out_path.exists():
-                    out_path.unlink(missing_ok=True)
-                continue
-            log.info("Clip %d/%d validated: %.2fs %dx%d %d bytes.",
-                     i, len(clips), info["duration"], info["width"],
-                     info["height"], info["size_bytes"])
-            rendered.append((out_path, clip, info, thumb))
-            api.set_status(job_id, "Processing", stage="rendering",
-                           progress=60 + int(25 * i / len(clips)))
+        total_renders = max(1, len(clips) * len(ratios))
+        render_n = 0
+        for ratio in ratios:
+            ratio_settings = dict(settings)
+            ratio_settings["aspect_ratio"] = ratio
+            slug = ratio.replace(":", "x")
+            for i, clip in enumerate(clips, 1):
+                render_n += 1
+                _throw_if_cancelled(api, job_id)
+                clip_r = dict(clip)
+                out_path = job_dir / f"clip_{i:02d}_{slug}.mp4"
+                try:
+                    render_clip(source, clip_r, ratio_settings, segments, out_path,
+                                source_info, job_dir)
+                    info = validate_clip(out_path, {"settings": ratio_settings}, source_info)
+                    clip_intro_ok = False
+                    if brand:
+                        # Brand the clip: [intro?] + clip + [outro?]. Any
+                        # concat failure falls back to the plain clip
+                        # (apply_brand_assets never raises); the uploaded
+                        # duration then comes from the branded file.
+                        try:
+                            branded_path = job_dir / f"clip_{i:02d}_{slug}_branded.mp4"
+                            final_path, intro_ok, outro_ok = apply_brand_assets(
+                                out_path, brand.get("intro"), brand.get("outro"),
+                                branded_path)
+                            if final_path != out_path:
+                                info = probe_summary(final_path)
+                                intro_applied = intro_applied or intro_ok
+                                outro_applied = outro_applied or outro_ok
+                                out_path = final_path
+                                clip_intro_ok = intro_ok
+                        except Exception as brand_exc:  # noqa: BLE001 - branding never fails the clip
+                            log.warning("Job %s: clip %d (%s) branding failed (%s); "
+                                        "uploading the plain clip.",
+                                        job_id, i, ratio, brand_exc)
+                    # Thumbnail: a branded clip opens with its intro, so a
+                    # frame at 1.0s would show the intro card, not the clip.
+                    # Take the frame just after the intro instead.
+                    thumb_at = 1.0
+                    if clip_intro_ok and "intro" in brand:
+                        intro_info = _probe_video_info(brand["intro"])
+                        if intro_info is not None:
+                            thumb_at = intro_info["duration"] + 1.0
+                    thumb = extract_thumbnail(out_path, job_dir / f"thumb_{i:02d}_{slug}.jpg",
+                                              at_seconds=thumb_at)
+                except Exception as clip_exc:  # noqa: BLE001 - one bad clip must not kill the job
+                    # Per-clip failure isolation: log the failure, drop the
+                    # partial file, and keep rendering the rest. Only when
+                    # EVERY clip fails does the job fail (below).
+                    reason = str(clip_exc)[:300]
+                    log.error("Job %s: clip %d (%s, %.1f-%.1fs) failed: %s; skipping it.",
+                              job_id, i, ratio, clip["start"], clip["end"], reason)
+                    failed.append(
+                        f"Clip {i}" + (f" ({ratio})" if len(ratios) > 1 else "") +
+                        f" ({clip['start']:.1f}–{clip['end']:.1f}s): {reason}")
+                    if out_path.exists():
+                        out_path.unlink(missing_ok=True)
+                    continue
+                log.info("Clip %d/%d (%s) validated: %.2fs %dx%d %d bytes.",
+                         render_n, total_renders, ratio, info["duration"], info["width"],
+                         info["height"], info["size_bytes"])
+                rendered.append((out_path, clip_r, info, thumb, ratio, i))
+                api.set_status(job_id, "Processing", stage="rendering",
+                               progress=60 + int(25 * render_n / total_renders))
         if clips and not rendered:
             raise RuntimeError(
                 "Every clip failed to render: " + "; ".join(failed[:3]))
 
         api.set_status(job_id, "Processing", stage="uploading_clips", progress=90)
-        for i, (out_path, clip, info, thumb) in enumerate(rendered, 1):
+        for n, (out_path, clip, info, thumb, ratio, i) in enumerate(rendered, 1):
             clip_fields = {
-                "title": f"Clip {i}",
+                # In a multi-ratio job the title carries the ratio so the
+                # variants are distinguishable in the Library; a
+                # single-ratio job keeps the plain "Clip N" title.
+                "title": f"Clip {i}" + (f" ({ratio})" if len(ratios) > 1 else ""),
+                "aspect_ratio": ratio,
                 "start_seconds": clip["start"],
                 "end_seconds": clip["end"],
                 "duration_seconds": info["duration"],
@@ -4072,7 +4586,48 @@ def process_job(api: JobApi, job: dict) -> None:
             if clip.get("score_breakdown"):
                 clip_fields["score_breakdown"] = clip["score_breakdown"]
             api.upload_clip(job_id, out_path, clip_fields, thumbnail=thumb)
-            log.info("Uploaded clip %d/%d for job %s.", i, len(rendered), job_id)
+            log.info("Uploaded clip %d/%d for job %s.", n, len(rendered), job_id)
+
+        # Batch 3 job-note lines: beat sync, translation, multi-ratio.
+        # Built here from what actually happened — never claimed in
+        # advance, and absent entirely when the feature was off.
+        extra_notes: list[str] = []
+        if beat_on:
+            if beats:
+                beat_bits = []
+                if zoom_total:
+                    beat_bits.append(
+                        f"{zoom_snapped} of {zoom_total} zoom moment(s) "
+                        f"snapped to beats")
+                beat_bits.append(
+                    f"{windows_snapped} of {len(clips)} clip start(s) "
+                    f"aligned to beats")
+                extra_notes.append("Beat sync: " + "; ".join(beat_bits) + ".")
+            else:
+                extra_notes.append(
+                    "Beat sync: no clear beat in this audio — clips cut as usual.")
+        if translation_info is not None:
+            t_status = translation_info["status"]
+            t_lang = TRANSLATION_TARGETS[translation_info["target"]]
+            if t_status == "ok":
+                extra_notes.append(f"Captions translated to {t_lang}.")
+            elif t_status == "partial":
+                extra_notes.append(
+                    f"Captions translated to {t_lang} where possible — "
+                    f"{translation_info['failed']} segment(s) in the "
+                    f"original language.")
+            elif t_status == "unavailable":
+                extra_notes.append(
+                    "Translation unavailable — captions in the original language.")
+            # "same" (already in the target language): nothing to report.
+        if len(ratios) > 1:
+            extra_notes.append(
+                f"Exported in {len(ratios)} ratios — "
+                f"{', '.join(ratios)} ({len(rendered)} clips total).")
+            if capped_for_ratios:
+                extra_notes.append(
+                    f"Clip count capped at {windows_requested} windows per "
+                    f"ratio (50-clip total limit).")
 
         # Brand flags ride only when the job actually used brand assets,
         # so a job without intro/outro is byte-identical to before.
@@ -4080,9 +4635,14 @@ def process_job(api: JobApi, job: dict) -> None:
         if used_brand_assets:
             ready_kwargs["intro_applied"] = intro_applied
             ready_kwargs["outro_applied"] = outro_applied
+        # Enhancement stats come from the primary ratio's renders only —
+        # the other ratios repeat the same cuts, and counting them twice
+        # would double-report the trimmed seconds.
+        primary_rendered = [c for _, c, _, _, r, _ in rendered if r == ratios[0]]
         api.set_status(job_id, "Ready", stage="ready", progress=100,
-                       note=_ready_note(clips, requested, failed,
-                                        rendered=[c for _, c, _, _ in rendered]),
+                       note=_ready_note(clips, windows_requested, failed,
+                                        rendered=primary_rendered,
+                                        extra=extra_notes or None),
                        **ready_kwargs)
         log.info("Job %s is Ready (%d clip(s)).", job_id, len(rendered))
     except JobCancelled:

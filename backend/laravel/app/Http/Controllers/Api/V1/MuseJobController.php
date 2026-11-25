@@ -465,6 +465,10 @@ class MuseJobController extends Controller
             'reason' => ['sometimes', 'nullable', 'string', 'max:2000'],
             'transcript_excerpt' => ['sometimes', 'nullable', 'string', 'max:5000'],
             'caption_style' => ['sometimes', 'nullable', 'string', Rule::in(UserSetting::CAPTION_STYLES)],
+            // Batch 3 multi-ratio: the worker sends the ratio this clip
+            // was actually rendered in; it wins over the job's ratio so
+            // each ratio variant stores its own row.
+            'aspect_ratio' => ['sometimes', 'nullable', 'string', Rule::in(UserSetting::ASPECT_RATIOS)],
             // Optional per-signal score breakdown, sent by the worker as
             // a JSON-encoded string (multipart has no nested objects):
             // {"hook": 92, "retention": 78}. Decoded + shape-checked
@@ -539,7 +543,7 @@ class MuseJobController extends Controller
             'start_seconds' => $start,
             'end_seconds' => $end,
             'duration_seconds' => $duration,
-            'aspect_ratio' => $settings['aspect_ratio'] ?? '9:16',
+            'aspect_ratio' => $validated['aspect_ratio'] ?? ($settings['aspect_ratio'] ?? '9:16'),
             'status' => Clip::STATUS_READY,
             'output_path' => $relativePath,
             'thumbnail_path' => $thumbnailPath,

@@ -716,7 +716,9 @@ class CaptionStyleTests(unittest.TestCase):
     def test_new_styles_in_dict(self):
         self.assertIn("kinetic", muse_worker.CAPTION_STYLES)
         self.assertIn("glow_pop", muse_worker.CAPTION_STYLES)
-        self.assertEqual(len(muse_worker.CAPTION_STYLES), 15)
+        # Batch 3 (2026-11-25) adds five more (word_zoom, word_fade,
+        # highlight_sweep, bounce_in, glitch_pop).
+        self.assertEqual(len(muse_worker.CAPTION_STYLES), 20)
 
     def test_write_clip_ass_kinetic(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1700,6 +1702,366 @@ class Batch2Tests(unittest.TestCase):
             return float(json.loads(m.group(0))["input_i"])
         except (ValueError, KeyError, TypeError):
             return None
+
+
+class Batch3Tests(unittest.TestCase):
+    """Batch 3 (2026-11-25): five new animated caption styles, beat-synced
+    cuts/zoom, captions auto-translate (MyMemory), multi-ratio export."""
+
+    NEW_STYLES = ["word_zoom", "word_fade", "highlight_sweep",
+                  "bounce_in", "glitch_pop"]
+
+    def _words_at(self, pairs):
+        return [{"start": s, "end": e, "word": w} for s, e, w in pairs]
+
+    def _manual_segment(self, start, end, pairs):
+        words = self._words_at(pairs)
+        return {"start": start, "end": end,
+                "text": " ".join(w[2] for w in pairs), "words": words}
+
+    def _make_clip(self, path, duration=10, freq=440):
+        """A real MP4: green frames + a sine tone (no silence gaps)."""
+        cmd = [muse_worker.FFMPEG, "-y", "-v", "error",
+               "-f", "lavfi", "-i",
+               f"color=c=green:s=640x360:d={duration}:r=30",
+               "-f", "lavfi", "-i", f"sine=frequency={freq}:duration={duration}",
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+               "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+               "-shortest", str(path)]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(Path(path).exists())
+
+    def _ass_for(self, style, tmp):
+        segments = [self._manual_segment(
+            0.0, 5.0, [(0.5, 0.9, "hello"), (1.0, 1.4, "brave"),
+                       (1.5, 1.9, "new"), (2.0, 2.4, "world")])]
+        path = tmp / f"{style}.ass"
+        self.assertTrue(muse_worker.write_clip_ass(
+            segments, 0.0, 5.0, style, path, 864, 1080, 1920, "split"))
+        return path.read_text()
+
+    # --- Five new caption styles ---
+
+    def test_new_styles_in_dict(self):
+        for style in self.NEW_STYLES:
+            self.assertIn(style, muse_worker.CAPTION_STYLES)
+        self.assertEqual(len(muse_worker.CAPTION_STYLES), 20)
+
+    def test_new_styles_render_distinct_ass(self):
+        # Every new style must burn real, distinct libass transforms —
+        # not the same file under five names.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            texts = {s: self._ass_for(s, tmp) for s in self.NEW_STYLES}
+            # Each style's file is different from every other style's.
+            self.assertEqual(len(set(texts.values())), 5)
+            # word_zoom: lands at 120% and settles to 100%.
+            self.assertIn("\\fscx120\\fscy120\\t(0,300,\\fscx100\\fscy100)",
+                          texts["word_zoom"])
+            # word_fade: alpha ramp from fully transparent.
+            self.assertIn("\\alpha&HFF&\\t(0,250,\\alpha&H00&)",
+                          texts["word_fade"])
+            # highlight_sweep: opaque yellow box (BorderStyle 3) behind
+            # black text, one word per event.
+            self.assertIn(",3,0,0,", texts["highlight_sweep"])
+            self.assertIn("&H0000FFFF", texts["highlight_sweep"])
+            self.assertIn("Dialogue: 0,0:00:00.50,0:00:00.90,HighlightSweep",
+                          texts["highlight_sweep"])
+            # bounce_in: overshoot AND undershoot settle (118 -> 95 ->
+            # 100) — `bounce` has the overshoot but no 95 undershoot.
+            self.assertIn("\\fscx118\\fscy118", texts["bounce_in"])
+            self.assertIn("\\fscx95\\fscy95", texts["bounce_in"])
+            bounce = self._ass_for("bounce", tmp)
+            self.assertNotIn("\\fscx95\\fscy95", bounce)
+            # glitch_pop: rapid magenta -> cyan colour flicker on each
+            # word change (libass has no true RGB split — documented
+            # in the worker).
+            self.assertIn("\\1c&HFF00FF&", texts["glitch_pop"])
+            self.assertIn("\\1c&H00FFFF&", texts["glitch_pop"])
+
+    def test_new_style_burns_through_real_ffmpeg(self):
+        # The riskiest transforms (a \1c colour change inside a \t)
+        # must survive a real subtitles burn, not just ASS text.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = tmp / "src.mp4"
+            self._make_clip(src, 5)
+            words = [(0.5 + i * 0.5, 0.9 + i * 0.5, w)
+                     for i, w in enumerate(["glitch", "it", "up", "now"])]
+            segments = [self._manual_segment(0.0, 5.0, words)]
+            settings = _settings(layout="center_crop", captions_enabled=True,
+                                 caption_style="glitch_pop",
+                                 duration_mode="maximum", duration_seconds=5)
+            out = tmp / "out.mp4"
+            info = muse_worker.probe_summary(src)
+            muse_worker.render_clip(src, {"start": 0.0, "end": 5.0},
+                                    settings, segments, out, info, tmp)
+            rendered = muse_worker.probe_summary(out)
+            self.assertEqual((rendered["width"], rendered["height"]),
+                             (1080, 1920))
+            self.assertAlmostEqual(rendered["duration"], 5.0, delta=0.4)
+
+    # --- Beat sync ---
+
+    def test_detect_beats_finds_onsets(self):
+        # Flat 0.2 with sharp jumps at seconds 5 and 12 (0.2 -> 0.9).
+        # Beats sit at the centre of the onset second.
+        profile = [0.2] * 20
+        profile[5] = 0.9
+        profile[6] = 0.85
+        profile[12] = 0.95
+        profile[13] = 0.9
+        self.assertEqual(muse_worker.detect_beats(profile), [5.5, 12.5])
+        # Flat audio: no rise anywhere, no beats.
+        self.assertEqual(muse_worker.detect_beats([0.2] * 20), [])
+        self.assertEqual(muse_worker.detect_beats([]), [])
+        self.assertEqual(muse_worker.detect_beats([0.0] * 10), [])
+
+    def test_snap_zoom_moments_moves_start_to_beat(self):
+        moments, n = muse_worker.snap_zoom_moments_to_beats(
+            [(10.2, 12.0), (20.0, 22.0)], [10.5, 30.0], 0.0, 60.0)
+        # First moment snaps +0.3 (start 10.5, end keeps its length);
+        # second is nowhere near a beat and stays put.
+        self.assertEqual(n, 1)
+        self.assertAlmostEqual(moments[0][0], 10.5, places=3)
+        self.assertAlmostEqual(moments[0][1], 12.3, places=3)
+        self.assertEqual(moments[1], (20.0, 22.0))
+        # A moment the clamp would crush below 0.5s stays put: the
+        # 0.4s moment (0.3, 0.7) in a [0.2, 0.6] clip cannot snap to
+        # beat 0.0 without losing its length.
+        moments, n = muse_worker.snap_zoom_moments_to_beats(
+            [(0.3, 0.7)], [0.0], 0.2, 0.6)
+        self.assertEqual((moments, n), ([(0.3, 0.7)], 0))
+
+    def test_snap_windows_preserves_duration_and_avoids_overlap(self):
+        windows = [
+            {"start": 10.0, "end": 30.0, "duration": 20.0, "words": 10,
+             "signals": [], "reason": "Score 0.80 (viral 80/100): test."},
+            {"start": 40.0, "end": 60.0, "duration": 20.0, "words": 10,
+             "signals": [], "reason": "Score 0.70 (viral 70/100): test."},
+        ]
+        n = muse_worker.snap_windows_to_beats(windows, [10.4, 40.4], 120.0)
+        self.assertEqual(n, 2)
+        for w in windows:
+            # Duration preserved EXACTLY — the promise is never broken
+            # to chase a beat.
+            self.assertAlmostEqual(w["duration"], 20.0, places=3)
+        self.assertAlmostEqual(windows[0]["start"], 10.4, places=3)
+        self.assertAlmostEqual(windows[0]["end"], 30.4, places=3)
+        self.assertIn("beat_aligned", windows[0]["signals"])
+        self.assertIn("Beat-aligned start.", windows[0]["reason"])
+        # A shift that would overlap the neighbour is refused.
+        windows = [
+            {"start": 10.0, "end": 30.0, "duration": 20.0, "words": 10,
+             "signals": [], "reason": "x"},
+            {"start": 30.2, "end": 50.2, "duration": 20.0, "words": 10,
+             "signals": [], "reason": "y"},
+        ]
+        n = muse_worker.snap_windows_to_beats(windows, [10.4], 120.0)
+        self.assertEqual(n, 0)
+        self.assertEqual((windows[0]["start"], windows[0]["end"]),
+                         (10.0, 30.0))
+        # A shift past the end of the source is refused.
+        windows = [{"start": 100.0, "end": 120.0, "duration": 20.0, "words": 10,
+                    "signals": [], "reason": "x"}]
+        n = muse_worker.snap_windows_to_beats(windows, [100.4], 120.0)
+        self.assertEqual(n, 0)
+        self.assertEqual((windows[0]["start"], windows[0]["end"]),
+                         (100.0, 120.0))
+
+    def test_beat_snap_never_breaks_exact_duration(self):
+        # Full selection + snap on a fixture: every window still
+        # measures exactly the promised duration afterwards. The
+        # windows start 0.3s off a beat (4.8 vs beat 4.5, 34.8 vs
+        # 34.5), so both actually snap — and still measure 20.0s.
+        segments = [_segment(5.3, 25.3, "we climb the tower now fast"),
+                    _segment(35.3, 55.3, "look at the highest point here")]
+        energy = [0.2] * 60
+        for i in (4, 5, 6):
+            energy[i] = 0.9
+        for i in (34, 35):
+            energy[i] = 0.9
+        clips = muse_worker.select_highlights(
+            segments, 60.0, _settings(clip_count=2, duration_seconds=20),
+            energy, [])
+        self.assertEqual(len(clips), 2)
+        beats = muse_worker.detect_beats(energy)
+        self.assertEqual(beats, [4.5, 34.5])
+        n = muse_worker.snap_windows_to_beats(clips, beats, 60.0)
+        self.assertEqual(n, 2)
+        for c in clips:
+            self.assertAlmostEqual(c["duration"], 20.0, places=3)
+            self.assertAlmostEqual(c["end"] - c["start"], 20.0, places=3)
+        self.assertAlmostEqual(clips[0]["start"], 4.5, places=3)
+        self.assertAlmostEqual(clips[1]["start"], 34.5, places=3)
+
+    # --- Captions auto-translate ---
+
+    def test_translation_fallback_on_failed_api_call(self):
+        # The API itself fails (network error): every segment keeps its
+        # original text and the status says so.
+        segments = [_segment(0.0, 5.0, "hello brave new world")]
+        import urllib.error
+        with mock.patch.object(
+                muse_worker.urllib.request, "urlopen",
+                side_effect=urllib.error.URLError("no network")):
+            out, info = muse_worker.translate_segments(
+                segments, "ur", source_language="english")
+        self.assertEqual(info["status"], "unavailable")
+        self.assertEqual(info["failed"], 1)
+        self.assertEqual(out[0]["text"], "hello brave new world")
+        # The input segments are untouched.
+        self.assertEqual(segments[0]["text"], "hello brave new world")
+
+    def test_translation_quota_warning_is_not_a_translation(self):
+        # MyMemory answers 429 with the quota warning AS the
+        # translatedText — it must never be used as a caption.
+        body = json.dumps({
+            "responseData": {"translatedText":
+                             "MYMEMORY WARNING: YOU USED ALL AVAILABLE FREE "
+                             "TRANSLATIONS FOR TODAY"},
+            "responseStatus": 429}).encode()
+        resp = mock.MagicMock()
+        resp.read.return_value = body
+        resp.__enter__.return_value = resp
+        resp.__exit__.return_value = False
+        segments = [_segment(0.0, 5.0, "hello brave new world")]
+        with mock.patch.object(muse_worker.urllib.request, "urlopen",
+                               return_value=resp):
+            out, info = muse_worker.translate_segments(
+                segments, "ur", source_language="english")
+        self.assertEqual(info["status"], "unavailable")
+        self.assertNotIn("MYMEMORY WARNING", out[0]["text"])
+
+    def test_translation_success_and_cache(self):
+        segments = [_segment(0.0, 5.0, "hello world"),
+                    _segment(6.0, 11.0, "hello world")]
+        calls: list[str] = []
+
+        def fake_translate(text, source, target):
+            calls.append(text)
+            return "ہیلو دنیا"
+
+        with mock.patch.object(muse_worker, "_mymemory_translate",
+                               side_effect=fake_translate):
+            out, info = muse_worker.translate_segments(
+                segments, "ur", source_language="english")
+        self.assertEqual(info["status"], "ok")
+        self.assertEqual(info["translated"], 2)
+        # The repeated line is translated ONCE (in-memory cache).
+        self.assertEqual(calls, ["hello world"])
+        for seg in out:
+            self.assertEqual(seg["text"], "ہیلو دنیا")
+            # Translated words spread evenly across the segment span.
+            self.assertEqual(len(seg["words"]), 2)
+            self.assertAlmostEqual(seg["words"][0]["start"], seg["start"])
+            self.assertAlmostEqual(seg["words"][-1]["end"], seg["end"])
+
+    def test_translation_partial_keeps_failed_segments(self):
+        segments = [_segment(0.0, 5.0, "hello world"),
+                    _segment(6.0, 11.0, "goodbye world")]
+
+        def fake_translate(text, source, target):
+            return "ہیلو دنیا" if text == "hello world" else None
+
+        with mock.patch.object(muse_worker, "_mymemory_translate",
+                               side_effect=fake_translate):
+            out, info = muse_worker.translate_segments(
+                segments, "ur", source_language="english")
+        self.assertEqual(info["status"], "partial")
+        self.assertEqual(info["translated"], 1)
+        self.assertEqual(info["failed"], 1)
+        self.assertEqual(out[0]["text"], "ہیلو دنیا")
+        self.assertEqual(out[1]["text"], "goodbye world")
+
+    def test_translation_skips_same_language(self):
+        segments = [_segment(0.0, 5.0, "hello world")]
+        with mock.patch.object(muse_worker, "_mymemory_translate",
+                               side_effect=AssertionError("must not call")):
+            out, info = muse_worker.translate_segments(
+                segments, "en", source_language="english")
+        self.assertEqual(info["status"], "same")
+        self.assertIs(out, segments)
+
+    # --- Multi-ratio export ---
+
+    def test_export_ratios_defaults_and_forces_primary(self):
+        self.assertEqual(muse_worker.export_ratios({}), ["9:16"])
+        self.assertEqual(
+            muse_worker.export_ratios(
+                {"aspect_ratio": "1:1", "export_ratios": ["16:9"]}),
+            ["1:1", "9:16", "16:9"])
+        # Unknown ratios are dropped; duplicates collapse.
+        self.assertEqual(
+            muse_worker.export_ratios(
+                {"aspect_ratio": "9:16",
+                 "export_ratios": ["1:1", "1:1", "4:3"]}),
+            ["9:16", "1:1"])
+        # A bare string (a sloppy client) still works.
+        self.assertEqual(
+            muse_worker.export_ratios(
+                {"aspect_ratio": "9:16", "export_ratios": "1:1"}),
+            ["9:16", "1:1"])
+
+    def test_windows_per_ratio_cap(self):
+        # 50-clip total cap: 3 ratios -> 16 windows (48 clips).
+        self.assertEqual(
+            muse_worker.windows_per_ratio(
+                30, ["9:16", "1:1", "16:9"]), 16)
+        self.assertEqual(
+            muse_worker.windows_per_ratio(3, ["9:16", "1:1"]), 3)
+        self.assertEqual(muse_worker.windows_per_ratio(30, ["9:16"]), 30)
+
+    def test_multi_ratio_renders_two_ratios(self):
+        # The same window renders in 9:16 AND 1:1 with the new word_zoom
+        # style and face tracking ON: each ratio gets the right
+        # resolution, the promised duration, and its own thumbnail.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = tmp / "src.mp4"
+            self._make_clip(src, 10)
+            words = [(0.5 + i * 0.5, 0.9 + i * 0.5, w)
+                     for i, w in enumerate(
+                         ["zoom", "in", "on", "the", "tower", "now"])]
+            segments = [self._manual_segment(0.0, 5.0, words)]
+            info = muse_worker.probe_summary(src)
+            for ratio, expected in (("9:16", (1080, 1920)),
+                                    ("1:1", (1080, 1080))):
+                settings = _settings(
+                    aspect_ratio=ratio, layout="center_crop",
+                    captions_enabled=True, caption_style="word_zoom",
+                    duration_mode="maximum", duration_seconds=5,
+                    face_tracking=True)
+                clip_dict = {"start": 0.0, "end": 5.0}
+                out = tmp / f"out_{ratio.replace(':', 'x')}.mp4"
+                muse_worker.render_clip(src, clip_dict, settings, segments,
+                                        out, info, tmp)
+                rendered = muse_worker.probe_summary(out)
+                self.assertEqual((rendered["width"], rendered["height"]),
+                                 expected, f"ratio {ratio}")
+                self.assertAlmostEqual(rendered["duration"], 5.0, delta=0.4)
+                thumb = muse_worker.extract_thumbnail(
+                    out, tmp / f"thumb_{ratio.replace(':', 'x')}.jpg",
+                    at_seconds=1.0)
+                self.assertTrue(thumb.exists())
+                self.assertGreater(thumb.stat().st_size, 0)
+
+    # --- Ready note (Batch 3 lines) ---
+
+    def test_ready_note_reports_batch3_extras(self):
+        note = muse_worker._ready_note(
+            [{"signals": []}], 1, [], rendered=[{"_batch1_stats": {}}],
+            extra=["Beat sync: 2 of 3 zoom moment(s) snapped to beats; "
+                   "1 of 1 clip start(s) aligned to beats.",
+                   "Captions translated to Urdu.",
+                   "Exported in 2 ratios — 9:16, 1:1 (2 clips total)."])
+        self.assertIn("Beat sync: 2 of 3 zoom moment(s) snapped", note)
+        self.assertIn("Captions translated to Urdu.", note)
+        self.assertIn("Exported in 2 ratios", note)
+        # A full-count job with no extras still gets no note.
+        self.assertIsNone(muse_worker._ready_note(
+            [{"signals": []}], 1, [], rendered=[{"_batch1_stats": {}}]))
 
 
 if __name__ == "__main__":

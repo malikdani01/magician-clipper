@@ -32,7 +32,9 @@ const ANIMATION_OPTIONS: { id: AnimationChoice; label: string }[] = [
  * The control only offers none/bounce/pop/karaoke/glow, so styles
  * with no close equivalent seed the nearest motion (sweep → karaoke
  * fill; title/subs/typewriter → none; slam/outline/gradient/kinetic
- * → pop). The burned-in look is the style's own anim, not this seed.
+ * → pop; word_zoom/glitch_pop → pop; word_fade → none; highlight
+ * box → karaoke; bounce pop → bounce). The burned-in look is the
+ * style's own anim, not this seed.
  */
 const ANIMATION_FOR_STYLE: Record<CaptionPreviewAnim, AnimationChoice> = {
   pop: 'pop',
@@ -48,6 +50,11 @@ const ANIMATION_FOR_STYLE: Record<CaptionPreviewAnim, AnimationChoice> = {
   gradient: 'pop',
   kinetic: 'pop',
   glow_pop: 'glow',
+  word_zoom: 'pop',
+  word_fade: 'none',
+  highlight_sweep: 'karaoke',
+  bounce_in: 'bounce',
+  glitch_pop: 'pop',
 }
 
 type StudioTab = 'styles' | 'customize' | 'preview'
@@ -71,7 +78,12 @@ const SOFT_SHADOW = '0 1px 3px #000, 0 0 6px rgba(0,0,0,0.8)'
  * video: pop = scale-in, karaoke = colour fill, sweep = highlight
  * box, bounce = drop with overshoot, type = char reveal, slam =
  * oversized slam, neon/outline/gradient = pop with their look,
- * kinetic = slide in from the left, glow_pop = pop with a gold glow.
+ * kinetic = slide in from the left, glow_pop = pop with a gold glow,
+ * word_zoom = land big then settle, word_fade = fade in,
+ * highlight box = one word at a time in a yellow box (only the
+ * current word shows), bounce pop = overshoot + undershoot settle,
+ * glitch pop = magenta-cyan colour flicker on each word change
+ * (libass cannot do a true RGB split — the burn flickers colours).
  * Rendered once (see the samples section) — the cards just use the
  * class names.
  */
@@ -86,6 +98,11 @@ const PREVIEW_CSS = `
 @keyframes cap-neon { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.3); } }
 @keyframes cap-kinetic { 0% { opacity: 0; transform: translateX(-18px) scale(.85); } 8% { opacity: 1; transform: translateX(2px) scale(1.06); } 13% { transform: translateX(0) scale(1); } 80% { opacity: 1; } 90%, 100% { opacity: 0; } }
 @keyframes cap-glow-pop { 0% { opacity: 0; transform: scale(.3); text-shadow: 0 0 0 rgba(250,204,21,0); } 7% { opacity: 1; transform: scale(1.15); text-shadow: 0 0 8px #FACC15, 0 0 18px #FACC15; } 12% { transform: scale(1); text-shadow: 0 0 6px #FACC15, 0 0 14px #FACC15; } 80% { opacity: 1; transform: scale(1); text-shadow: 0 0 6px #FACC15, 0 0 14px #FACC15; } 90%, 100% { opacity: 0; } }
+@keyframes cap-word-zoom { 0% { opacity: 1; transform: scale(1.2); } 10% { transform: scale(1); } 80% { opacity: 1; } 90%, 100% { opacity: 0; } }
+@keyframes cap-word-fade { 0% { opacity: 0; } 12% { opacity: 1; } 80% { opacity: 1; } 90%, 100% { opacity: 0; } }
+@keyframes cap-highlight-sweep { 0%, 16% { opacity: 0; background-color: transparent; } 30%, 80% { opacity: 1; background-color: #FACC15; color: #000; } 90%, 100% { opacity: 0; background-color: transparent; } }
+@keyframes cap-bounce-in { 0% { opacity: 0; transform: scale(0); } 7% { opacity: 1; transform: scale(1.18); } 12% { transform: scale(.95); } 17% { transform: scale(1); } 80% { opacity: 1; } 90%, 100% { opacity: 0; } }
+@keyframes cap-glitch-pop { 0% { opacity: 0; transform: scale(1.12); color: #FF00FF; } 5% { opacity: 1; transform: scale(1.12); color: #FF00FF; } 10% { color: #00FFFF; transform: scale(1.05); } 15% { color: #fff; transform: scale(1); } 80% { opacity: 1; } 90%, 100% { opacity: 0; } }
 .cap-anim { display: inline-block; animation-duration: 3.4s; animation-iteration-count: infinite; animation-fill-mode: both; }
 .cap-word-pop { animation-name: cap-pop; }
 .cap-word-bounce { animation-name: cap-bounce; }
@@ -95,6 +112,11 @@ const PREVIEW_CSS = `
 .cap-word-sweep { animation-name: cap-sweep; padding: 0 2px; border-radius: 3px; }
 .cap-char-type { animation-name: cap-type; }
 .cap-word-slam { animation-name: cap-slam; }
+.cap-word-zoom { animation-name: cap-word-zoom; }
+.cap-word-fade { animation-name: cap-word-fade; }
+.cap-word-highlight-sweep { animation-name: cap-highlight-sweep; padding: 0 2px; border-radius: 3px; }
+.cap-word-bounce-in { animation-name: cap-bounce-in; }
+.cap-word-glitch-pop { animation-name: cap-glitch-pop; }
 .cap-caret { display: inline-block; width: 2px; height: 1em; margin-left: 1px; vertical-align: -0.1em; background: #fff; animation: cap-caret 0.7s steps(1) infinite; }
 .cap-neon-wrap { animation: cap-neon 1.6s ease-in-out infinite; }
 `
@@ -247,6 +269,39 @@ function CaptionStylePreview({ style }: { style: CaptionStyle }) {
       {style.anim === 'glow_pop' ? (
         <span className="absolute inset-x-1 top-1/2 -translate-y-1/2 text-center text-[18px] font-black uppercase leading-tight text-white">
           {animatedWords('cap-word-glow-pop', 0.32)}
+        </span>
+      ) : null}
+
+      {/* Batch 3 (2026-11-25): word zoom / word fade / highlight box /
+          bounce pop / glitch pop — each loops the real motion the
+          worker burns in. */}
+      {style.anim === 'word_zoom' ? (
+        <span className={`${frameClass} text-[15px]`} style={{ textShadow: OUTLINE_SHADOW }}>
+          {animatedWords('cap-word-zoom', 0.32)}
+        </span>
+      ) : null}
+
+      {style.anim === 'word_fade' ? (
+        <span className={`${frameClass} text-[15px]`} style={{ textShadow: OUTLINE_SHADOW }}>
+          {animatedWords('cap-word-fade', 0.32)}
+        </span>
+      ) : null}
+
+      {style.anim === 'highlight_sweep' ? (
+        <span className={`${frameClass} text-[15px]`} style={{ textShadow: OUTLINE_SHADOW }}>
+          {animatedWords('cap-word-highlight-sweep', 0.5)}
+        </span>
+      ) : null}
+
+      {style.anim === 'bounce_in' ? (
+        <span className={`${frameClass} text-[15px]`} style={{ textShadow: OUTLINE_SHADOW }}>
+          {animatedWords('cap-word-bounce-in', 0.32)}
+        </span>
+      ) : null}
+
+      {style.anim === 'glitch_pop' ? (
+        <span className={`${frameClass} text-[15px]`} style={{ textShadow: OUTLINE_SHADOW }}>
+          {animatedWords('cap-word-glitch-pop', 0.32)}
         </span>
       ) : null}
 

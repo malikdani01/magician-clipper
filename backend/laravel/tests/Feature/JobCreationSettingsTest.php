@@ -197,4 +197,109 @@ class JobCreationSettingsTest extends TestCase
             ->assertStatus(422)
             ->assertJsonValidationErrors(['caption_position']);
     }
+
+    /** Batch 3 (2026-11-25): beat sync ON, no translation, 9:16-only export by default. */
+    public function test_batch3_settings_default(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/jobs', $this->payload())
+            ->assertStatus(201)
+            ->assertJsonPath('job.settings.beat_sync', true)
+            ->assertJsonPath('job.settings.caption_translation', 'none')
+            ->assertJsonPath('job.settings.export_ratios', ['9:16']);
+    }
+
+    /** Batch 3: explicit non-default values are stored. */
+    public function test_batch3_explicit_values_are_stored(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/jobs', $this->payload([
+                'beat_sync' => false,
+                'caption_translation' => 'ur',
+                'export_ratios' => ['9:16', '1:1'],
+            ]))
+            ->assertStatus(201)
+            ->assertJsonPath('job.settings.beat_sync', false)
+            ->assertJsonPath('job.settings.caption_translation', 'ur')
+            ->assertJsonPath('job.settings.export_ratios', ['9:16', '1:1']);
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/jobs', $this->payload([
+                'caption_translation' => 'hi',
+                'export_ratios' => ['9:16', '1:1', '16:9'],
+            ]))
+            ->assertStatus(201)
+            ->assertJsonPath('job.settings.caption_translation', 'hi')
+            ->assertJsonPath('job.settings.export_ratios', ['9:16', '1:1', '16:9']);
+    }
+
+    /** Batch 3: 9:16 is always in the export list, even when the client omits it. */
+    public function test_batch3_export_ratios_always_include_9_16(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/jobs', $this->payload(['export_ratios' => ['1:1']]))
+            ->assertStatus(201)
+            ->assertJsonPath('job.settings.export_ratios', ['9:16', '1:1']);
+    }
+
+    /** Batch 3: invalid values are rejected with 422. */
+    public function test_batch3_invalid_values_are_rejected(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/jobs', $this->payload(['beat_sync' => 'maybe']))
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['beat_sync']);
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/jobs', $this->payload(['caption_translation' => 'fr']))
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['caption_translation']);
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/jobs', $this->payload(['export_ratios' => ['4:3']]))
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['export_ratios.0']);
+
+        $this->actingAs($user, 'sanctum')
+            ->postJson('/api/v1/jobs', $this->payload([
+                'export_ratios' => ['9:16', '1:1', '16:9', '9:16'],
+            ]))
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['export_ratios']);
+    }
+
+    /** Batch 3: all five new caption styles are accepted. */
+    public function test_batch3_new_caption_styles_are_accepted(): void
+    {
+        $user = User::factory()->create();
+
+        foreach (['word_zoom', 'word_fade', 'highlight_sweep', 'bounce_in', 'glitch_pop'] as $style) {
+            $this->actingAs($user, 'sanctum')
+                ->postJson('/api/v1/jobs', $this->payload(['caption_style' => $style]))
+                ->assertStatus(201)
+                ->assertJsonPath('job.settings.caption_style', $style);
+        }
+    }
+
+    /**
+     * Batch 3: multipart (FormData) clients send booleans as the strings
+     * "true"/"false"; the store must normalise beat_sync like the Batch 1 flags.
+     */
+    public function test_batch3_beat_sync_string_boolean_from_form_data_is_normalised(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user, 'sanctum')
+            ->post('/api/v1/jobs', $this->payload(['beat_sync' => 'false']))
+            ->assertStatus(201)
+            ->assertJsonPath('job.settings.beat_sync', false);
+    }
 }

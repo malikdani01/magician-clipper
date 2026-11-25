@@ -47,6 +47,13 @@ export interface ClipSpec {
    * bold_bar / bottom (the pre-Batch-2 behaviour). */
   headlineStyle: 'bold_bar' | 'lower_third' | 'big_centre'
   captionPosition: 'bottom' | 'top' | 'middle'
+  /** Batch 3 beat sync (2026-11-25); default ON. */
+  beatSync: boolean
+  /** Batch 3 caption translation (2026-11-25); default 'none'. */
+  captionTranslation: 'none' | 'ur' | 'hi' | 'en'
+  /** Batch 3 export ratios (2026-11-25); default ['9:16'] — 9:16 is
+   * always on, 1:1 and 16:9 are optional extras. */
+  exportRatios: string[]
   /** How clips are picked: best parts only, or any parts to fill the count. */
   selectionMode: 'interesting_only' | 'fill_any'
   contentType:
@@ -76,6 +83,9 @@ export function defaultClipSpec(): ClipSpec {
     fillerRemoval: true,
     headlineStyle: 'bold_bar',
     captionPosition: 'bottom',
+    beatSync: true,
+    captionTranslation: 'none',
+    exportRatios: ['9:16'],
     selectionMode: 'interesting_only',
     contentType: 'general',
     keywords: '',

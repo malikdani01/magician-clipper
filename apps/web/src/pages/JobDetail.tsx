@@ -24,6 +24,7 @@ import { VIRAL_TONE_CLASS, viralScore } from '../lib/viralScore'
 import {
   cancelJob,
   CAPTION_POSITION_LABELS,
+  CAPTION_TRANSLATION_LABELS,
   downloadClip,
   downloadClipAudio,
   getClipRerenders,
@@ -33,6 +34,7 @@ import {
   retryJob,
   SELECTION_MODE_LABELS,
   type CaptionPosition,
+  type CaptionTranslation,
   type ClipRerender,
   type HeadlineStyle,
   type Job,
@@ -99,6 +101,22 @@ function settingRows(job: Job): Array<[string, string]> {
       CAPTION_POSITION_LABELS[
         (s.caption_position as CaptionPosition | undefined) ?? 'bottom'
       ] ?? 'Bottom',
+    ],
+    // Batch 3 (2026-11-25) — absent on older jobs means the defaults
+    // (beat sync ON, no translation, the job's own ratio only), which
+    // is what the worker renders for them.
+    ['Beat sync', s.beat_sync === false ? 'Off' : 'On'],
+    [
+      'Translate captions',
+      CAPTION_TRANSLATION_LABELS[
+        (s.caption_translation as CaptionTranslation | undefined) ?? 'none'
+      ] ?? 'None (original language)',
+    ],
+    [
+      'Export ratios',
+      Array.isArray(s.export_ratios) && s.export_ratios.length > 0
+        ? s.export_ratios.join(', ')
+        : s.aspect_ratio,
     ],
     ['Job type', s.job_type === 'campaign' ? 'For a campaign' : 'For myself'],
     [
@@ -644,6 +662,7 @@ export function JobDetailPage() {
                         {clip.duration_seconds != null
                           ? `${formatDuration(clip.duration_seconds)} · `
                           : ''}
+                        {clip.aspect_ratio ? `${clip.aspect_ratio} · ` : ''}
                         {clip.file_size_bytes != null ? formatBytes(clip.file_size_bytes) : 'Size unknown'}
                         {clip.start_seconds != null && clip.end_seconds != null
                           ? ` · ${formatDuration(clip.start_seconds)}–${formatDuration(clip.end_seconds)} in source`

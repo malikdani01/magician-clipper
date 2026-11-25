@@ -584,6 +584,72 @@ class MuseJobApiTest extends TestCase
             ->assertStatus(404);
     }
 
+    /**
+     * Batch 3 (2026-11-25): a clip upload may carry its own aspect_ratio
+     * (multi-ratio export) — it wins over the job's ratio; without one
+     * the job's ratio is used, as before. An unknown ratio is a 422.
+     */
+    public function test_store_clip_aspect_ratio_prefers_per_clip_value(): void
+    {
+        $user = User::factory()->create();
+        $job = $this->createLinkJob($user);
+        $this->patchJson(
+            "/api/v1/muse/jobs/{$job['id']}/status",
+            ['status' => 'Processing'],
+            $this->museHeaders()
+        )->assertStatus(200);
+
+        // 1:1 variant of a 9:16 job.
+        $this->post(
+            "/api/v1/muse/jobs/{$job['id']}/clips",
+            [
+                'file' => new UploadedFile(
+                    base_path('../../demo/demo-source-3min.mp4'),
+                    'clip.mp4', 'video/mp4', null, true
+                ),
+                'title' => 'Clip 1 (1:1)',
+                'aspect_ratio' => '1:1',
+                'score' => 0.8,
+            ],
+            $this->museHeaders()
+        )->assertStatus(201);
+        $clip = \App\Models\Clip::where('job_id', $job['id'])->first();
+        $this->assertNotNull($clip);
+        $this->assertSame('1:1', $clip->aspect_ratio);
+
+        // No ratio sent: falls back to the job's 9:16.
+        $this->post(
+            "/api/v1/muse/jobs/{$job['id']}/clips",
+            [
+                'file' => new UploadedFile(
+                    base_path('../../demo/demo-source-3min.mp4'),
+                    'clip.mp4', 'video/mp4', null, true
+                ),
+                'title' => 'Clip 2',
+                'score' => 0.7,
+            ],
+            $this->museHeaders()
+        )->assertStatus(201);
+        $clip2 = \App\Models\Clip::where('job_id', $job['id'])
+            ->where('title', 'Clip 2')->first();
+        $this->assertNotNull($clip2);
+        $this->assertSame('9:16', $clip2->aspect_ratio);
+
+        // Unknown ratio: 422.
+        $this->post(
+            "/api/v1/muse/jobs/{$job['id']}/clips",
+            [
+                'file' => new UploadedFile(
+                    base_path('../../demo/demo-source-3min.mp4'),
+                    'clip.mp4', 'video/mp4', null, true
+                ),
+                'title' => 'Clip 3',
+                'aspect_ratio' => '4:3',
+            ],
+            $this->museHeaders()
+        )->assertStatus(422);
+    }
+
     // --- Server-side export ZIP ---
 
     private function uploadClipForJob(array $job, string $title = 'Clip 1'): \App\Models\Clip

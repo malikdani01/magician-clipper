@@ -76,7 +76,8 @@ class JobController extends Controller
         // true/false/1/0/"1"/"0", so normalise the string forms first.
         // (JSON clients send real booleans and are unaffected.)
         foreach (['captions_enabled', 'on_screen_text', 'auto_zoom',
-                  'face_tracking', 'silence_removal', 'filler_removal'] as $boolField) {
+                  'face_tracking', 'silence_removal', 'filler_removal',
+                  'beat_sync'] as $boolField) {
             if ($request->has($boolField) && is_string($request->input($boolField))) {
                 $request->merge([
                     $boolField => filter_var($request->input($boolField), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE)
@@ -228,6 +229,16 @@ class JobController extends Controller
             // captions), so old API clients are unaffected.
             'headline_style' => $validated['headline_style'] ?? 'bold_bar',
             'caption_position' => $validated['caption_position'] ?? 'bottom',
+            // Batch 3: beat sync ON unless explicitly off (the worker
+            // treats a missing key as ON too); caption translation off
+            // ("none") unless asked for; multi-ratio export defaults
+            // to the job's own ratio only, with 9:16 always included.
+            'beat_sync' => $validated['beat_sync'] ?? true,
+            'caption_translation' => $validated['caption_translation'] ?? 'none',
+            'export_ratios' => self::normaliseExportRatios(
+                $validated['export_ratios'] ?? null,
+                $validated['aspect_ratio'],
+            ),
             'job_type' => $validated['job_type'] ?? 'myself',
             'campaign_requirements' => $validated['campaign_requirements'] ?? null,
             'notes' => $validated['notes'] ?? null,
@@ -333,6 +344,30 @@ class JobController extends Controller
      * video-file URL. Anything else is rejected — the worker must never be
      * asked to fetch an arbitrary URL.
      */
+    /**
+     * Batch 3: normalise the export_ratios list for storage. The job's
+     * own aspect_ratio always renders first, 9:16 is always included
+     * (it is the default and the UI keeps it checked), duplicates are
+     * dropped, and anything outside the validated set is ignored —
+     * validation already rejected those, so this is defence in depth
+     * for callers that build settings without the rules (presets are
+     * validated too, but a stored preset predates this field).
+     */
+    private static function normaliseExportRatios(mixed $ratios, string $primary): array
+    {
+        $allowed = ['9:16', '1:1', '16:9'];
+        $out = [];
+        foreach ([$primary, '9:16', ...(is_array($ratios) ? $ratios : [])] as $ratio) {
+            if (is_string($ratio) && in_array($ratio, $allowed, true) && ! in_array($ratio, $out, true)) {
+                $out[] = $ratio;
+            }
+        }
+        // A 4:5 job's primary ratio is not in the exportable set — the
+        // worker still renders it (it forces the primary ratio in), so
+        // store the plain default instead of an empty list.
+        return $out !== [] ? $out : ['9:16'];
+    }
+
     private function isAllowedSourceUrl(string $url): bool
     {
         $host = strtolower(parse_url($url, PHP_URL_HOST) ?? '');

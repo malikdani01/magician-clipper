@@ -76,6 +76,21 @@ export const CAPTION_POSITION_LABELS: Record<CaptionPosition, string> = {
   middle: 'Middle',
 }
 
+/** Captions auto-translate target (Batch 3, 2026-11-25). 'none' means
+ * the captions stay in the transcript's original language. */
+export type CaptionTranslation = 'none' | 'ur' | 'hi' | 'en'
+
+export const CAPTION_TRANSLATION_LABELS: Record<CaptionTranslation, string> = {
+  none: 'None (original language)',
+  ur: 'Urdu',
+  hi: 'Hindi',
+  en: 'English',
+}
+
+/** Ratios a job renders in (Batch 3, 2026-11-25). 9:16 is always on;
+ * 1:1 and 16:9 are optional extras — the same clips in each ratio. */
+export const EXPORT_RATIO_OPTIONS = ['9:16', '1:1', '16:9'] as const
+
 export interface JobSettings {
   platform: 'tiktok' | 'instagram'
   aspect_ratio: '9:16' | '16:9' | '1:1' | '4:5'
@@ -101,6 +116,14 @@ export interface JobSettings {
    * older jobs, where the worker uses bold_bar / bottom. */
   headline_style?: string
   caption_position?: string
+  /** Batch 3 beat sync (2026-11-25); absent on older jobs, where the
+   * worker treats it as ON. */
+  beat_sync?: boolean
+  /** Batch 3 caption translation (2026-11-25); absent means "none". */
+  caption_translation?: string
+  /** Batch 3 export ratios (2026-11-25); absent means the job's own
+   * aspect_ratio only. */
+  export_ratios?: string[]
   job_type: 'myself' | 'campaign'
   campaign_requirements: string | null
   /** Free-text notes for Muse (campaign brief, extra instructions). */
@@ -191,6 +214,12 @@ export interface CreateJobInput {
   headlineStyle: HeadlineStyle
   /** Batch 2 caption position; default 'bottom'. */
   captionPosition: CaptionPosition
+  /** Batch 3 beat sync (default ON) — snap cuts and zoom to the beat. */
+  beatSync: boolean
+  /** Batch 3 caption translation (default 'none'). */
+  captionTranslation: CaptionTranslation
+  /** Batch 3 export ratios (default ['9:16'] — 9:16 is always on). */
+  exportRatios: string[]
   jobType: 'myself' | 'campaign'
   campaignRequirements?: string
   /** Free-text notes for Muse (campaign brief, extra instructions). */
@@ -285,6 +314,11 @@ export async function createJob(input: CreateJobInput): Promise<JobResult> {
       form.append('filler_removal', String(input.fillerRemoval))
       form.append('headline_style', input.headlineStyle)
       form.append('caption_position', input.captionPosition)
+      form.append('beat_sync', String(input.beatSync))
+      form.append('caption_translation', input.captionTranslation)
+      for (const ratio of input.exportRatios) {
+        form.append('export_ratios[]', ratio)
+      }
       form.append('job_type', input.jobType)
       if (input.jobType === 'campaign' && input.campaignRequirements) {
         form.append('campaign_requirements', input.campaignRequirements)
@@ -325,6 +359,9 @@ export async function createJob(input: CreateJobInput): Promise<JobResult> {
           filler_removal: input.fillerRemoval,
           headline_style: input.headlineStyle,
           caption_position: input.captionPosition,
+          beat_sync: input.beatSync,
+          caption_translation: input.captionTranslation,
+          export_ratios: input.exportRatios,
           job_type: input.jobType,
           campaign_requirements:
             input.jobType === 'campaign' ? (input.campaignRequirements ?? null) : null,
