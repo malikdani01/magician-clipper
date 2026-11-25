@@ -214,6 +214,17 @@ HEADLINE_STYLES = ("bold_bar", "lower_third", "big_centre")
 # Batch 2 caption positions (per-job setting `caption_position`,
 # default "bottom" = where captions always sat before Batch 2).
 CAPTION_POSITIONS = ("bottom", "top", "middle")
+
+# Batch 7 (2026-11-25): on-screen text for the whole clip.
+# `ost_animation` values — the headline's entrance only; "none" is
+# the pre-Batch-7 behaviour (the headline appears instantly).
+OST_ANIMATIONS = ("none", "slide", "fade", "pop")
+# Default end-card text when end_card is on but no text was given.
+OST_END_CARD_DEFAULT = "Follow for more"
+# Progress bar: brand violet #8b5cf6 = RGB (139, 92, 246), 8px tall,
+# bottom edge, growing left-to-right across the full clip.
+PROGRESS_BAR_HEIGHT = 8
+PROGRESS_BAR_COLOUR = "0x8b5cf6"
 # Visual-moment windows (speech-scarce sources): the score is built only
 # from what a wordless window honestly has — loud audio, gameplay on
 # screen, a stable scene. No speech terms: a visual moment must never
@@ -2349,13 +2360,123 @@ def derive_title_hashtags(segments: list[dict],
     return title, hashtags
 
 
-def write_headline_ass(text: str, duration: float, ass_path: Path,
-                       tw: int, th: int, style: str = "bold_bar") -> bool:
-    """Write a minimal ASS file with one headline event.
+def derive_keyword_popups(segments: list[dict], start: float, end: float,
+                            max_popups: int = 4) -> list[dict]:
+    """Up to ``max_popups`` keyword pop-ups for one clip, from the
+    clip's OWN transcript — never invented words.
 
-    Shown for the first 4 seconds of the clip only. Batch 2 styles
-    (per-job setting ``headline_style``; unknown values fall back to
-    "bold_bar", the look every job used before Batch 2):
+    The words are the top content words by frequency inside [start,
+    end] (same rules as the hashtag derivation: 3–20 chars, alnum,
+    stopwords and fillers removed), each shown at its FIRST spoken
+    moment (Whisper word timestamp, 0-based on the clip) for 1.0s.
+    When two keywords fall within 1s of each other only the first is
+    kept — never more than one pop-up on screen at once. Returns []
+    when the clip has no speech (silent clips get no pop-ups).
+    Each item is {"word": str, "start": float, "end": float}.
+    """
+    if not segments or end <= start:
+        return []
+    counts: dict[str, int] = {}
+    first: dict[str, dict] = {}
+    for word in _clip_words(segments, start, end):
+        clean = word["word"].strip(_PUNCT).lower()
+        if (not clean or len(clean) < 3 or len(clean) > 20
+                or not clean.isalnum()
+                or clean in _ON_SCREEN_STOPWORDS
+                or clean in FILLER_WORDS):
+            continue
+        if clean not in counts:
+            counts[clean] = 0
+            first[clean] = word
+        counts[clean] += 1
+    if not counts:
+        return []
+    ranked = sorted(counts, key=lambda w: (-counts[w], first[w]["start"]))
+    duration = end - start
+    popups: list[dict] = []
+    for clean in ranked[:max_popups]:
+        w = first[clean]
+        s = max(0.0, w["start"])
+        e = min(s + 1.0, duration)
+        if e <= s:
+            continue
+        popups.append({"word": w["word"].strip(_PUNCT).upper(),
+                       "start": s, "end": e})
+    popups.sort(key=lambda p: p["start"])
+    # Never two at once: drop a pop-up that starts within 1s of the
+    # previous kept one (keep the first).
+    kept: list[dict] = []
+    for p in popups:
+        if kept and p["start"] < kept[-1]["start"] + 1.0:
+            continue
+        kept.append(p)
+    return kept
+
+
+def _text_box_filter(tw: int, text: str, fs: int, y_centre: int,
+                     pad_x: int = 40, pad_y: int = 20,
+                     enable: str | None = None) -> str:
+    """A filled dark box behind one line of text — the background for
+    the end card and the lower-third tag. ASS BorderStyle 3 opaque
+    boxes do NOT render in this ffmpeg/libass build (verified
+    2026-11-25 with a minimal test: the text rendered, the box did
+    not — 0% dark pixels behind it), so the card background is a
+    drawbox with static geometry (proven to work on this build) plus
+    an ``enable`` timeline for the end card. It is drawn UNDER the
+    subtitles step, so the text sits on top of it. ``y_centre`` is the
+    text line's vertical centre in output px; the box is centred
+    horizontally and padded by ``pad_x``/``pad_y`` around the measured
+    text width (real font measurement, estimator fallback).
+    """
+    # _measure_text_width_px already falls back to the estimator when
+    # Pillow/the font is unavailable, so this is always a real number.
+    text_w = _measure_text_width_px(text, fs)
+    box_w = min(int(text_w) + 2 * pad_x, tw - 40)
+    box_h = int(fs * 1.2) + 2 * pad_y
+    x = max(0, (tw - box_w) // 2)
+    y = max(0, y_centre - box_h // 2)
+    s = f"drawbox=x={x}:y={y}:w={box_w}:h={box_h}:color=black@0.8:t=fill"
+    if enable:
+        s += f":enable='{enable}'"
+    return s
+
+
+def _progress_bar_source(tw: int, duration: float) -> str:
+    """The filter chain that generates the progress bar stream.
+
+    A brand-violet colour source (``tw`` x 8px, 30fps) whose ALPHA
+    grows with time via geq — the one filter on this ffmpeg build
+    that genuinely evaluates per frame. drawbox's ``t`` does NOT
+    animate here (verified 2026-11-25: a drawbox width of
+    ``iw*t/20`` stayed full-width at every frame, and crop
+    re-evaluates its width once at config time), so a static bar
+    would be a fake — this geq bar was measured growing 54px at 1s,
+    270px at 5s, 810px at 15s, 1026px at 19s on a 20s 1080px clip.
+    The bar is overlaid at the bottom edge (``overlay=0:H-8``) as the
+    LAST step, after captions and headline, so it never covers text.
+    """
+    return (
+        f"color=c={PROGRESS_BAR_COLOUR}:s={tw}x{PROGRESS_BAR_HEIGHT}:r=30:"
+        f"d={duration:.3f},format=rgba,"
+        f"geq=r=139:g=92:b=246:"
+        f"a='if(lt(X,{tw}*T/{duration:.3f}),255,0)'[bar]"
+    )
+
+
+def write_headline_ass(text: str | None, duration: float, ass_path: Path,
+                       tw: int, th: int, style: str = "bold_bar",
+                       persistent: bool = False,
+                       animation: str = "none",
+                       end_card_text: str | None = None,
+                       keyword_popups: list[dict] | None = None,
+                       lower_third_text: str | None = None) -> bool:
+    """Write a minimal ASS file with the on-screen-text events.
+
+    The headline (``text``) is shown for the first 4 seconds of the
+    clip only — unless ``persistent`` is on, when it stays up for the
+    FULL clip. Batch 2 styles (per-job setting ``headline_style``;
+    unknown values fall back to "bold_bar", the look every job used
+    before Batch 2):
     - "bold_bar": top-centre, huge bold white on a translucent bar
       (the original look; MarginV 120).
     - "lower_third": a bottom band (opaque box, Alignment 2, MarginV
@@ -2363,15 +2484,57 @@ def write_headline_ass(text: str, duration: float, ass_path: Path,
       instead of colliding.
     - "big_centre": very large, vertically centred (Alignment 5) —
       the clip's hook as a title card. Middle captions drop to 62%
-      while it shows (see _caption_align_mv), so they never overlap it.
+      while it shows (see _caption_align_mv), so they never overlap
+      it — the guard is positional, not time-based, so it holds for
+      the persistent headline too.
     A single very long word is scaled down (auto-fit) so it cannot
-    overflow the frame; ordinary text wraps as before. Returns False
-    when there is nothing to show.
+    overflow the frame; ordinary text wraps as before.
+
+    Batch 7 (whole-clip on-screen text) — all optional, all off by
+    default, so a call with no extras is byte-identical to before:
+    - ``animation`` ("none"/"slide"/"fade"/"pop") is the headline's
+      ENTRANCE only (first 300ms for slide/fade, 150ms for pop).
+      slide moves 90px onto the style's alignment anchor (the point
+      libass pins the text to); fade is \\fad(300,0); pop is the
+      60%->100% scale ramp Batch 6 uses for TikTok Bold phrases.
+      libass has no easing curves, so the slide is linear.
+    - ``end_card_text`` renders a centred card with that exact text
+      in the LAST 2 seconds. The headline — persistent or not — ends
+      at duration-2 when an end card is set, so the two centred
+      cards never stack; a clip shorter than 2s cannot happen
+      (duration_min is 5s). The card's dark background is a drawbox
+      in render_clip (_text_box_filter): this libass build does not
+      render ASS BorderStyle 3 opaque boxes (verified 2026-11-25),
+      so the style carries an outline only and the box is drawn
+      under the text.
+    - ``keyword_popups`` (from derive_keyword_popups) renders each
+      word LARGE (yellow, thick outline) at Alignment 8, MarginV
+      28% — centre-above the captions, so it never covers them — for
+      1.0s at its spoken moment, with the pop entrance.
+    - ``lower_third_text`` renders a persistent lower-third tag for
+      the FULL clip: bottom-centre, MarginV 260 — above the bottom
+      captions (MarginV 140) and above the lower_third headline band
+      (MarginV 40), so it never covers either; on split layouts the
+      captions sit on the divider, far above the tag. The text is the
+      user's own words, never derived or translated. Like the end
+      card, its dark band is a drawbox in render_clip (same libass
+      BorderStyle 3 limitation).
+    Returns False when there is nothing to show at all (no headline,
+    no end card, no pop-ups, no tag).
     """
-    if not text or duration <= 0:
+    if duration <= 0:
         return False
     style = style if style in HEADLINE_STYLES else "bold_bar"
-    show = min(4.0, duration)
+    animation = animation if animation in OST_ANIMATIONS else "none"
+    # Headline span: first 4s, or the full clip when persistent. An
+    # end card always replaces it for the last 2s.
+    headline_end: float | None = None
+    if text:
+        headline_end = duration if persistent else min(4.0, duration)
+        if end_card_text:
+            headline_end = min(headline_end, max(0.0, duration - 2.0))
+        if headline_end <= 0:
+            headline_end = None
     if style == "lower_third":
         fs = 64 if tw >= 1080 else 48
         align, mv = 2, 40
@@ -2387,11 +2550,64 @@ def write_headline_ass(text: str, duration: float, ass_path: Path,
         align, mv = 8, 120
         border, outline_w, shadow = 1, 4, 0
         back = "&H80000000"
+    # Entrance animation prefix for the headline event. \move's
+    # coordinates are the style's alignment anchor: (tw/2, 120) for
+    # the top bar, (tw/2, th-40) for the bottom band (slides UP from
+    # below), (tw/2, th/2) for the centred card.
+    anim = ""
+    if headline_end is not None and animation == "slide":
+        if style == "lower_third":
+            x2, y2 = tw // 2, th - 40
+            x1, y1 = x2, y2 + 90
+        elif style == "big_centre":
+            x2, y2 = tw // 2, th // 2
+            x1, y1 = x2, y2 - 90
+        else:
+            x2, y2 = tw // 2, 120
+            x1, y1 = x2, max(0, y2 - 90)
+        anim = f"{{\\move({x1},{y1},{x2},{y2},0,300)}}"
+    elif headline_end is not None and animation == "fade":
+        anim = "{\\fad(300,0)}"
+    elif headline_end is not None and animation == "pop":
+        anim = "{\\fscx60\\fscy60\\t(0,150,\\fscx100\\fscy100)}"
     # Auto-fit: a single long word must fit on one line; the rest of
     # the headline may wrap (WrapStyle 0) as before.
-    longest = max(text.split(), key=len) if text.split() else text
-    fitted = _fit_font_size(longest, fs, tw - 120)
-    fs_prefix = f"{{\\fs{fitted}}}" if fitted is not None else ""
+    fs_prefix = ""
+    if text:
+        longest = max(text.split(), key=len) if text.split() else text
+        fitted = _fit_font_size(longest, fs, tw - 120)
+        fs_prefix = f"{{\\fs{fitted}}}" if fitted is not None else ""
+    pop_fs = 120 if tw >= 1080 else 84
+    pop_mv = int(th * 0.28)
+    tag_fs = 40 if tw >= 1080 else 30
+    card_fs = 96 if tw >= 1080 else 68
+    events: list[str] = []
+    if headline_end is not None and text:
+        events.append(
+            f"Dialogue: 0,0:00:00.00,{_fmt_ass_time(headline_end)},Headline,,0,0,0,,"
+            f"{anim}{fs_prefix}{_ass_escape(text)}"
+        )
+    if end_card_text:
+        events.append(
+            f"Dialogue: 0,{_fmt_ass_time(max(0.0, duration - 2.0))},{_fmt_ass_time(duration)},"
+            f"EndCard,,0,0,0,,{_ass_escape(end_card_text)}"
+        )
+    for popup in keyword_popups or []:
+        s, e = popup["start"], popup["end"]
+        if e <= s or s >= duration:
+            continue
+        events.append(
+            f"Dialogue: 0,{_fmt_ass_time(s)},{_fmt_ass_time(min(e, duration))},"
+            f"KeywordPop,,0,0,0,,{{\\fscx60\\fscy60\\t(0,150,\\fscx100\\fscy100)}}"
+            f"{_ass_escape(popup['word'])}"
+        )
+    if lower_third_text:
+        events.append(
+            f"Dialogue: 0,0:00:00.00,{_fmt_ass_time(duration)},LowerThirdTag,,0,0,0,,"
+            f"{_ass_escape(lower_third_text)}"
+        )
+    if not events:
+        return False
     header = (
         "[Script Info]\n"
         "; Magician Clipper — on-screen headline\n"
@@ -2407,10 +2623,25 @@ def write_headline_ass(text: str, duration: float, ass_path: Path,
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: Headline,DejaVu Sans,{fs},&H00FFFFFF,&H000000FF,&H00000000,"
         f"{back},-1,0,0,0,100,100,0,0,{border},{outline_w},{shadow},{align},40,40,{mv},1\n"
+        # Batch 7: the end card is a centred card; keyword pop-ups
+        # are large yellow on the upper-middle (Alignment 8,
+        # MarginV 28%); the lower-third tag is a small band at the
+        # bottom (Alignment 2, MarginV 260). NOTE: these styles use
+        # BorderStyle 1 (outline), NOT BorderStyle 3 — this libass
+        # build does not render opaque boxes at all (verified
+        # 2026-11-25), so the card/band background is a drawbox added
+        # in render_clip (_text_box_filter), drawn UNDER the text.
+        f"Style: EndCard,DejaVu Sans,{card_fs},&H00FFFFFF,&H000000FF,&H00000000,"
+        f"&H80000000,-1,0,0,0,100,100,0,0,1,2,0,5,40,40,0,1\n"
+        f"Style: KeywordPop,DejaVu Sans,{pop_fs},&H0000FFFF,&H00FFFFFF,&H00000000,"
+        f"&H80000000,-1,0,0,0,100,100,0,0,1,4,1,8,40,40,{pop_mv},1\n"
+        f"Style: LowerThirdTag,DejaVu Sans,{tag_fs},&H00FFFFFF,&H000000FF,&H00000000,"
+        f"&H80000000,-1,0,0,0,100,100,0,0,1,2,0,2,40,40,260,1\n"
         "\n[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
         "Effect, Text\n"
-        f"Dialogue: 0,0:00:00.00,{_fmt_ass_time(show)},Headline,,0,0,0,,{fs_prefix}{_ass_escape(text)}\n"
+        + "\n".join(events)
+        + "\n"
     )
     ass_path.write_text(header, encoding="utf-8")
     return True
@@ -3967,7 +4198,13 @@ def render_clip(source: Path, clip: dict, settings: dict,
     start, end = clip["start"], clip["end"]
     duration = end - start
     stats = {"silence_trimmed": 0.0, "fillers_cut": 0, "zoom_moments": 0,
-             "face_tracked": False, "face_fallback": None, "cleaning_skipped": None}
+             "face_tracked": False, "face_fallback": None, "cleaning_skipped": None,
+             # Batch 7: whole-clip on-screen text (see the OST block
+             # below); the job note reads these, never the settings.
+             "ost_persistent": False, "ost_animation": "none",
+             "end_card": False, "keyword_popups": 0,
+             "keyword_popups_on": False, "lower_third": False,
+             "progress_bar": False}
     clip["_batch1_stats"] = stats
 
     # --- Cleaning pre-pass (silence + filler removal) ---
@@ -4043,6 +4280,24 @@ def render_clip(source: Path, clip: dict, settings: dict,
     caption_safe_zone = settings.get("caption_safe_zone", True)
     if not isinstance(caption_safe_zone, bool):
         caption_safe_zone = str(caption_safe_zone).lower() in ("true", "1", "yes")
+    # Batch 7: whole-clip on-screen text — all default OFF / "none" /
+    # empty (a missing key means the default, so jobs made before
+    # Batch 7 render exactly as before). end_card_text falls back to
+    # "Follow for more" when the card is on but no text was given;
+    # lower_third_text is empty = OFF.
+    ost_persistent = bool(settings.get("ost_persistent", False))
+    ost_animation = (settings.get("ost_animation") or "none").lower()
+    if ost_animation not in OST_ANIMATIONS:
+        ost_animation = "none"
+    end_card = bool(settings.get("end_card", False))
+    end_card_text = None
+    if end_card:
+        end_card_text = (str(settings.get("end_card_text") or "")
+                         .strip()[:40] or OST_END_CARD_DEFAULT)
+    keyword_popups_on = bool(settings.get("keyword_popups", False))
+    lower_third_text = (str(settings.get("lower_third_text") or "")
+                        .strip()[:40] or None)
+    progress_bar = bool(settings.get("progress_bar", False))
     captions_path: Path | None = None
     captions_is_ass = False
     if captions_on:
@@ -4064,20 +4319,50 @@ def render_clip(source: Path, clip: dict, settings: dict,
     # else its transcript; silent windows get none — never invented).
     # It goes in its own ASS file so it works whether captions are
     # ASS, classic SRT, or off entirely.
+    # Batch 7: the same file also carries the whole-clip OST — the
+    # persistent headline, the end card, keyword pop-ups and the
+    # lower-third tag. The end card, pop-ups and tag are INDEPENDENT
+    # of the headline toggle: a job can have an end card, pop-ups or
+    # a tag with on_screen_text off (the headline itself still needs
+    # it on).
     headline_path: Path | None = None
+    headline = None
     if bool(settings.get("on_screen_text", False)):
         headline = derive_on_screen_text(render_clip_view, render_segments, settings)
         if headline:
             log.info("Clip %.1f-%.1fs on-screen headline: %r (style %s)",
                      start, end, headline, headline_style)
-            candidate = job_dir / f"clip_{uuid.uuid4().hex}_headline.ass"
-            if write_headline_ass(headline, render_duration, candidate, tw, th,
-                                  headline_style):
-                headline_path = candidate
         else:
             log.info("Clip %.1f-%.1fs: on-screen text on, but no headline "
                      "could be derived (no campaign text, no transcript) — "
                      "no headline burned.", start, end)
+    popups: list[dict] = []
+    if keyword_popups_on:
+        popups = derive_keyword_popups(render_segments, render_start, render_end)
+        if popups:
+            log.info("Clip %.1f-%.1fs: %d keyword pop-up(s): %s",
+                     start, end, len(popups),
+                     ", ".join(p["word"] for p in popups))
+        else:
+            log.info("Clip %.1f-%.1fs: keyword pop-ups on, but no words "
+                     "to pop up (silent clip) — none burned.",
+                     start, end)
+    if headline or end_card_text or popups or lower_third_text:
+        candidate = job_dir / f"clip_{uuid.uuid4().hex}_headline.ass"
+        if write_headline_ass(headline, render_duration, candidate, tw, th,
+                              headline_style,
+                              persistent=ost_persistent,
+                              animation=ost_animation,
+                              end_card_text=end_card_text,
+                              keyword_popups=popups or None,
+                              lower_third_text=lower_third_text):
+            headline_path = candidate
+            stats["ost_persistent"] = bool(ost_persistent and headline)
+            stats["ost_animation"] = ost_animation
+            stats["end_card"] = bool(end_card_text)
+            stats["keyword_popups"] = len(popups)
+            stats["keyword_popups_on"] = keyword_popups_on
+            stats["lower_third"] = lower_third_text is not None
 
     sw, sh = source_info["width"], source_info["height"]
 
@@ -4163,6 +4448,30 @@ def render_clip(source: Path, clip: dict, settings: dict,
             )
         video_label = "[v1]"
     if headline_path is not None:
+        # Batch 7 card backgrounds: the end card and the lower-third
+        # tag are a card / a band — a dark box BEHIND the text. This
+        # libass build does not render ASS BorderStyle 3 opaque boxes
+        # (verified 2026-11-25), so the box is a drawbox here, UNDER
+        # the subtitles step. The end card's box is time-gated to the
+        # last 2s (enable timeline); the tag's box runs the full clip.
+        # Static geometry + enable are both proven on this build.
+        boxes: list[str] = []
+        if end_card_text:
+            card_fs = 96 if tw >= 1080 else 68
+            boxes.append(_text_box_filter(
+                tw, end_card_text, card_fs, th // 2,
+                enable=f"between(t,{render_duration - 2.0:.3f},{render_duration:.3f})"))
+        if lower_third_text:
+            tag_fs = 40 if tw >= 1080 else 30
+            # Alignment 2 + MarginV 260: the tag's bottom edge sits
+            # 260px above the frame bottom, so its line centre is
+            # ~260 + half a line above the bottom.
+            tag_centre = th - 260 - int(tag_fs * 0.6)
+            boxes.append(_text_box_filter(
+                tw, lower_third_text, tag_fs, tag_centre, pad_x=30, pad_y=16))
+        if boxes:
+            chains.append(f"{video_label}{','.join(boxes)}[vcard]")
+            video_label = "[vcard]"
         # Second subtitles filter, after the captions: the headline
         # burns on top, first 4 seconds only, near the top of frame.
         next_label = "[v2]" if captions_path is not None else "[v1]"
@@ -4170,7 +4479,23 @@ def render_clip(source: Path, clip: dict, settings: dict,
             f"{video_label}subtitles={escape_ffmpeg_path(headline_path)}{next_label}"
         )
         video_label = next_label
-    chains.append(f"{video_label}{'format=yuv420p' if fps_applied else 'fps=30,format=yuv420p'}[vout]")
+    # Batch 7: progress bar — a thin brand-violet bar growing
+    # left-to-right across the full clip, on the bottom 8px. It is the
+    # LAST step (after captions and headline), so it never covers
+    # text. The bar stream comes from _progress_bar_source (a violet
+    # colour source whose alpha grows with time via geq — the one
+    # filter on this ffmpeg build that genuinely evaluates per frame;
+    # drawbox `t` and crop widths do not animate here), overlaid at
+    # the bottom edge. When OFF, the chain is byte-identical to before.
+    if progress_bar:
+        chains.append(_progress_bar_source(tw, render_duration))
+        chains.append(
+            f"{video_label}{'format=yuv420p' if fps_applied else 'fps=30,format=yuv420p'}[vfmt]"
+        )
+        chains.append(f"[vfmt][bar]overlay=0:H-{PROGRESS_BAR_HEIGHT}[vout]")
+        stats["progress_bar"] = True
+    else:
+        chains.append(f"{video_label}{'format=yuv420p' if fps_applied else 'fps=30,format=yuv420p'}[vout]")
     filter_complex = ";".join(chains)
 
     cmd = [FFMPEG, "-y", "-v", "error",
@@ -4667,6 +4992,23 @@ def _ready_note(clips: list[dict], requested: int, failed: list[str],
             notes.append(
                 "Silence/filler removal skipped for a clip: "
                 + "; ".join(skipped) + ".")
+        # Batch 7: whole-clip on-screen text — claimed only from what
+        # the renders actually did (the stats), never the settings.
+        if any(_stats(c).get("ost_persistent") for c in rendered):
+            notes.append("On-screen headline shown for the full clip.")
+        if any(_stats(c).get("end_card") for c in rendered):
+            notes.append("Follow end card shown in the last 2 seconds.")
+        popup_total = sum(_stats(c).get("keyword_popups", 0) for c in rendered)
+        if popup_total:
+            notes.append(f"{popup_total} keyword pop-up(s) shown.")
+        elif any(_stats(c).get("keyword_popups_on") for c in rendered):
+            notes.append(
+                "Keyword pop-ups on, but no words to pop up — "
+                "the clip has no speech.")
+        if any(_stats(c).get("lower_third") for c in rendered):
+            notes.append("Lower-third tag shown for the full clip.")
+        if any(_stats(c).get("progress_bar") for c in rendered):
+            notes.append("Progress bar shown.")
     if extra:
         notes.extend(extra)
     return " ".join(notes) if notes else None

@@ -59,6 +59,15 @@ export interface ClipSpec {
   /** Batch 6 caption safe zone (2026-11-25); default ON — keep
    * captions clear of TikTok's right action rail and bottom bar. */
   captionSafeZone: boolean
+  /** Batch 7 whole-clip on-screen text (2026-11-25); defaults OFF /
+   * 'none' / '' (empty text = OFF). */
+  ostPersistent: boolean
+  ostAnimation: 'none' | 'slide' | 'fade' | 'pop'
+  endCard: boolean
+  endCardText: string
+  keywordPopups: boolean
+  lowerThirdText: string
+  progressBar: boolean
   /** How clips are picked: best parts only, or any parts to fill the count. */
   selectionMode: 'interesting_only' | 'fill_any'
   contentType:
@@ -93,6 +102,13 @@ export function defaultClipSpec(): ClipSpec {
     exportRatios: ['9:16'],
     logoOverlay: false,
     captionSafeZone: true,
+    ostPersistent: false,
+    ostAnimation: 'none',
+    endCard: false,
+    endCardText: '',
+    keywordPopups: false,
+    lowerThirdText: '',
+    progressBar: false,
     selectionMode: 'interesting_only',
     contentType: 'general',
     keywords: '',

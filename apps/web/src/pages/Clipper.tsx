@@ -30,11 +30,14 @@ import {
   EXPORT_RATIO_OPTIONS,
   HEADLINE_STYLE_DESCRIPTIONS,
   HEADLINE_STYLE_LABELS,
+  OST_ANIMATION_DESCRIPTIONS,
+  OST_ANIMATION_LABELS,
   SELECTION_MODE_DESCRIPTIONS,
   SELECTION_MODE_LABELS,
   type CaptionPosition,
   type CaptionTranslation,
   type HeadlineStyle,
+  type OstAnimation,
   type SelectionMode,
 } from '../lib/jobs'
 import { translateLegacyCaptionPreset } from '../lib/captionStyles'
@@ -227,10 +230,12 @@ function Toggle({
   checked,
   onChange,
   label,
+  disabled = false,
 }: {
   checked: boolean
   onChange: (value: boolean) => void
   label: string
+  disabled?: boolean
 }) {
   return (
     <button
@@ -238,8 +243,9 @@ function Toggle({
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
-      className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+      className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
         checked ? 'bg-brand' : 'bg-ink-border'
       }`}
     >
@@ -449,6 +455,21 @@ export function ClipperPage() {
     if (typeof s.logo_overlay === 'boolean') patch.logoOverlay = s.logo_overlay
     // Batch 6 (2026-11-25): caption safe zone (default ON).
     if (typeof s.caption_safe_zone === 'boolean') patch.captionSafeZone = s.caption_safe_zone
+    // Batch 7 (2026-11-25): whole-clip on-screen text (defaults OFF).
+    if (typeof s.ost_persistent === 'boolean') patch.ostPersistent = s.ost_persistent
+    if (
+      s.ost_animation === 'none' ||
+      s.ost_animation === 'slide' ||
+      s.ost_animation === 'fade' ||
+      s.ost_animation === 'pop'
+    ) {
+      patch.ostAnimation = s.ost_animation
+    }
+    if (typeof s.end_card === 'boolean') patch.endCard = s.end_card
+    if (typeof s.end_card_text === 'string') patch.endCardText = s.end_card_text
+    if (typeof s.keyword_popups === 'boolean') patch.keywordPopups = s.keyword_popups
+    if (typeof s.lower_third_text === 'string') patch.lowerThirdText = s.lower_third_text
+    if (typeof s.progress_bar === 'boolean') patch.progressBar = s.progress_bar
     if (CONTENT_TYPES.some((c) => c.id === s.content_type)) {
       patch.contentType = s.content_type as ClipSpec['contentType']
     }
@@ -528,6 +549,13 @@ export function ClipperPage() {
       exportRatios: spec.exportRatios ?? ['9:16'],
       logoOverlay: spec.logoOverlay ?? false,
       captionSafeZone: spec.captionSafeZone ?? true,
+      ostPersistent: spec.ostPersistent ?? false,
+      ostAnimation: spec.ostAnimation ?? 'none',
+      endCard: spec.endCard ?? false,
+      endCardText: (spec.endCardText ?? '').trim(),
+      keywordPopups: spec.keywordPopups ?? false,
+      lowerThirdText: (spec.lowerThirdText ?? '').trim(),
+      progressBar: spec.progressBar ?? false,
       jobType: 'myself',
       notes: keywordsAvoid.trim()
         ? `Keywords to avoid: ${keywordsAvoid.trim()}`
@@ -1562,6 +1590,129 @@ export function ClipperPage() {
                   {HEADLINE_STYLE_DESCRIPTIONS[spec.headlineStyle ?? 'bold_bar']}
                 </span>
               </label>
+
+              {/* Batch 7 whole-clip on-screen text (2026-11-25). The
+                  persistent headline and its animation need on-screen
+                  text on; the end card, keyword pop-ups, lower-third
+                  tag and progress bar work on their own. */}
+              <div>
+                <span className="text-sm font-medium text-white">Persistent headline</span>
+                <div className="mt-2 flex items-center gap-3">
+                  <Toggle
+                    checked={spec.ostPersistent ?? false}
+                    onChange={(v) => updateSpec({ ostPersistent: v })}
+                    label="Persistent headline on or off"
+                    disabled={!spec.onScreenText}
+                  />
+                  <span className="text-sm text-[var(--color-text-muted)]">
+                    {spec.ostPersistent ? 'Persistent headline on' : 'Persistent headline off'} — keep
+                    the headline up for the whole clip instead of the first 4 seconds
+                  </span>
+                </div>
+                {!spec.onScreenText ? (
+                  <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                    Turn on-screen text on to use the persistent headline.
+                  </span>
+                ) : null}
+              </div>
+
+              <label className="block">
+                <span className="text-sm font-medium text-white">Headline animation</span>
+                <select
+                  value={spec.ostAnimation ?? 'none'}
+                  disabled={!spec.onScreenText}
+                  onChange={(e) =>
+                    updateSpec({ ostAnimation: e.target.value as OstAnimation })
+                  }
+                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {(Object.keys(OST_ANIMATION_LABELS) as OstAnimation[]).map((a) => (
+                    <option key={a} value={a}>
+                      {OST_ANIMATION_LABELS[a]}
+                    </option>
+                  ))}
+                </select>
+                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
+                  {OST_ANIMATION_DESCRIPTIONS[spec.ostAnimation ?? 'none']}
+                </span>
+              </label>
+
+              <div>
+                <span className="text-sm font-medium text-white">Follow end card</span>
+                <div className="mt-2 flex items-center gap-3">
+                  <Toggle
+                    checked={spec.endCard ?? false}
+                    onChange={(v) => updateSpec({ endCard: v })}
+                    label="Follow end card on or off"
+                  />
+                  <span className="text-sm text-[var(--color-text-muted)]">
+                    {spec.endCard ? 'End card on' : 'End card off'} — show a card
+                    in the last 2 seconds of every clip
+                  </span>
+                </div>
+                {spec.endCard ? (
+                  <label className="mt-3 block">
+                    <span className="text-sm font-medium text-white">End card text</span>
+                    <input
+                      type="text"
+                      value={spec.endCardText ?? ''}
+                      maxLength={40}
+                      placeholder="Follow for more"
+                      onChange={(e) => updateSpec({ endCardText: e.target.value })}
+                      className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)]"
+                    />
+                    <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                      Leave empty for “Follow for more”. Max 40 characters.
+                    </span>
+                  </label>
+                ) : null}
+              </div>
+
+              <div>
+                <span className="text-sm font-medium text-white">Keyword pop-ups</span>
+                <div className="mt-2 flex items-center gap-3">
+                  <Toggle
+                    checked={spec.keywordPopups ?? false}
+                    onChange={(v) => updateSpec({ keywordPopups: v })}
+                    label="Keyword pop-ups on or off"
+                  />
+                  <span className="text-sm text-[var(--color-text-muted)]">
+                    {spec.keywordPopups ? 'Keyword pop-ups on' : 'Keyword pop-ups off'} — pop up to 4
+                    important spoken words as large text at the moment they are said
+                  </span>
+                </div>
+              </div>
+
+              <label className="block">
+                <span className="text-sm font-medium text-white">Lower-third tag</span>
+                <input
+                  type="text"
+                  value={spec.lowerThirdText ?? ''}
+                  maxLength={40}
+                  placeholder="@yourchannel"
+                  onChange={(e) => updateSpec({ lowerThirdText: e.target.value })}
+                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)]"
+                />
+                <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                  Your name or channel, shown at the bottom of the whole
+                  clip. Empty = off. Never translated. Max 40 characters.
+                </span>
+              </label>
+
+              <div>
+                <span className="text-sm font-medium text-white">Progress bar</span>
+                <div className="mt-2 flex items-center gap-3">
+                  <Toggle
+                    checked={spec.progressBar ?? false}
+                    onChange={(v) => updateSpec({ progressBar: v })}
+                    label="Progress bar on or off"
+                  />
+                  <span className="text-sm text-[var(--color-text-muted)]">
+                    {spec.progressBar ? 'Progress bar on' : 'Progress bar off'} — a thin violet bar
+                    along the bottom edge, growing across the full clip
+                  </span>
+                </div>
+              </div>
 
               <label className="block">
                 <span className="text-sm font-medium text-white">Caption position</span>

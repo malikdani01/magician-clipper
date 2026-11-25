@@ -31,6 +31,7 @@ import {
   getClipRerenders,
   getJob,
   HEADLINE_STYLE_LABELS,
+  OST_ANIMATION_LABELS,
   requestClipRerender,
   retryJob,
   SELECTION_MODE_LABELS,
@@ -40,6 +41,7 @@ import {
   type HeadlineStyle,
   type Job,
   type JobClip,
+  type OstAnimation,
 } from '../lib/jobs'
 import { useAuth } from '../state/auth'
 import { mapLaravelStatus, useProjects } from '../state/projects'
@@ -125,6 +127,23 @@ function settingRows(job: Job): Array<[string, string]> {
     // Batch 6 (2026-11-25) — absent on older jobs means ON (the
     // worker treats a missing key as ON), which is what this shows.
     ['Caption safe zone', s.caption_safe_zone === false ? 'Off' : 'On'],
+    // Batch 7 (2026-11-25) — absent on older jobs means OFF / 'none' /
+    // empty (the worker treats a missing key as the default), which
+    // is what this shows.
+    ['Persistent headline', s.ost_persistent ? 'On' : 'Off'],
+    [
+      'Headline animation',
+      OST_ANIMATION_LABELS[
+        (s.ost_animation as OstAnimation | undefined) ?? 'none'
+      ] ?? 'None',
+    ],
+    [
+      'Follow end card',
+      s.end_card ? (s.end_card_text?.trim() || 'Follow for more') : 'Off',
+    ],
+    ['Keyword pop-ups', s.keyword_popups ? 'On' : 'Off'],
+    ['Lower-third tag', s.lower_third_text?.trim() || 'Off'],
+    ['Progress bar', s.progress_bar ? 'On' : 'Off'],
     ['Job type', s.job_type === 'campaign' ? 'For a campaign' : 'For myself'],
     [
       'Layout',

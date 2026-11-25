@@ -78,7 +78,9 @@ class JobController extends Controller
         // (JSON clients send real booleans and are unaffected.)
         foreach (['captions_enabled', 'on_screen_text', 'auto_zoom',
                   'face_tracking', 'silence_removal', 'filler_removal',
-                  'beat_sync', 'logo_overlay', 'caption_safe_zone'] as $boolField) {
+                  'beat_sync', 'logo_overlay', 'caption_safe_zone',
+                  'ost_persistent', 'end_card', 'keyword_popups',
+                  'progress_bar'] as $boolField) {
             if ($request->has($boolField) && is_string($request->input($boolField))) {
                 $request->merge([
                     $boolField => filter_var($request->input($boolField), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE)
@@ -415,6 +417,17 @@ class JobController extends Controller
             // (the worker treats a missing key as ON too); OFF keeps
             // the pre-Batch-6 full-width centred captions.
             'caption_safe_zone' => $validated['caption_safe_zone'] ?? true,
+            // Batch 7: whole-clip on-screen text — all default OFF /
+            // "none" / null, so old clients and old jobs render
+            // exactly as before (the worker treats missing keys as
+            // these defaults too).
+            'ost_persistent' => $validated['ost_persistent'] ?? false,
+            'ost_animation' => $validated['ost_animation'] ?? 'none',
+            'end_card' => $validated['end_card'] ?? false,
+            'end_card_text' => $validated['end_card_text'] ?? null,
+            'keyword_popups' => $validated['keyword_popups'] ?? false,
+            'lower_third_text' => $validated['lower_third_text'] ?? null,
+            'progress_bar' => $validated['progress_bar'] ?? false,
             // Batch 4: logo overlay OFF unless explicitly on — a
             // watermark must never surprise the user (the worker also
             // treats a missing key as OFF).

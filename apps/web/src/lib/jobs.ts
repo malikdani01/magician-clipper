@@ -76,6 +76,24 @@ export const CAPTION_POSITION_LABELS: Record<CaptionPosition, string> = {
   middle: 'Middle',
 }
 
+/** Headline entrance animation (Batch 7, 2026-11-25). Applies to the
+ * on-screen headline only — 'none' is the pre-Batch-7 behaviour. */
+export type OstAnimation = 'none' | 'slide' | 'fade' | 'pop'
+
+export const OST_ANIMATION_LABELS: Record<OstAnimation, string> = {
+  none: 'None',
+  slide: 'Slide in',
+  fade: 'Fade in',
+  pop: 'Pop in',
+}
+
+export const OST_ANIMATION_DESCRIPTIONS: Record<OstAnimation, string> = {
+  none: 'The headline appears instantly, as before.',
+  slide: 'The headline slides into place over its first 0.3s.',
+  fade: 'The headline fades in over its first 0.3s.',
+  pop: 'The headline pops in from 60% size over its first 0.15s.',
+}
+
 /** Captions auto-translate target (Batch 3, 2026-11-25). 'none' means
  * the captions stay in the transcript's original language. */
 export type CaptionTranslation = 'none' | 'ur' | 'hi' | 'en'
@@ -130,6 +148,17 @@ export interface JobSettings {
   /** Batch 6 caption safe zone (2026-11-25); absent means ON — the
    * worker treats a missing key as ON. */
   caption_safe_zone?: boolean
+  /** Batch 7 whole-clip on-screen text (2026-11-25); absent means
+   * the defaults (persistent OFF, animation none, end card OFF,
+   * keyword pop-ups OFF, no lower-third tag, no progress bar) — the
+   * worker treats missing keys as the defaults. */
+  ost_persistent?: boolean
+  ost_animation?: string
+  end_card?: boolean
+  end_card_text?: string | null
+  keyword_popups?: boolean
+  lower_third_text?: string | null
+  progress_bar?: boolean
   job_type: 'myself' | 'campaign'
   campaign_requirements: string | null
   /** Free-text notes for Muse (campaign brief, extra instructions). */
@@ -242,6 +271,21 @@ export interface CreateJobInput {
   /** Batch 6 caption safe zone (default ON) — keep captions clear
    * of TikTok's right action rail and the bottom bar. */
   captionSafeZone: boolean
+  /** Batch 7 whole-clip on-screen text (2026-11-25). */
+  /** Keep the headline up for the full clip (default OFF — first 4s only, as before). */
+  ostPersistent: boolean
+  /** Headline entrance animation (default 'none'). */
+  ostAnimation: OstAnimation
+  /** Show a Follow card in the last 2s (default OFF). */
+  endCard: boolean
+  /** End-card text (default 'Follow for more', max 40 chars). */
+  endCardText: string
+  /** Pop up to 4 spoken keywords as large text (default OFF). */
+  keywordPopups: boolean
+  /** Persistent lower-third tag (empty = OFF, max 40 chars). */
+  lowerThirdText: string
+  /** Thin violet progress bar across the full clip (default OFF). */
+  progressBar: boolean
   jobType: 'myself' | 'campaign'
   campaignRequirements?: string
   /** Free-text notes for Muse (campaign brief, extra instructions). */
@@ -340,6 +384,17 @@ function appendSettingsForm(form: FormData, input: CreateJobInput): void {
   }
   form.append('logo_overlay', String(input.logoOverlay))
   form.append('caption_safe_zone', String(input.captionSafeZone))
+  form.append('ost_persistent', String(input.ostPersistent))
+  form.append('ost_animation', input.ostAnimation)
+  form.append('end_card', String(input.endCard))
+  if (input.endCardText.trim()) {
+    form.append('end_card_text', input.endCardText.trim().slice(0, 40))
+  }
+  form.append('keyword_popups', String(input.keywordPopups))
+  if (input.lowerThirdText.trim()) {
+    form.append('lower_third_text', input.lowerThirdText.trim().slice(0, 40))
+  }
+  form.append('progress_bar', String(input.progressBar))
   form.append('job_type', input.jobType)
   if (input.jobType === 'campaign' && input.campaignRequirements) {
     form.append('campaign_requirements', input.campaignRequirements)
@@ -398,6 +453,17 @@ export async function createJob(input: CreateJobInput): Promise<JobResult> {
           export_ratios: input.exportRatios,
           logo_overlay: input.logoOverlay,
           caption_safe_zone: input.captionSafeZone,
+          ost_persistent: input.ostPersistent,
+          ost_animation: input.ostAnimation,
+          end_card: input.endCard,
+          end_card_text: input.endCardText.trim()
+            ? input.endCardText.trim().slice(0, 40)
+            : null,
+          keyword_popups: input.keywordPopups,
+          lower_third_text: input.lowerThirdText.trim()
+            ? input.lowerThirdText.trim().slice(0, 40)
+            : null,
+          progress_bar: input.progressBar,
           job_type: input.jobType,
           campaign_requirements:
             input.jobType === 'campaign' ? (input.campaignRequirements ?? null) : null,

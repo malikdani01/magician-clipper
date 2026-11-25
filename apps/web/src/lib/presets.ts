@@ -41,6 +41,15 @@ export interface PresetSettings {
   logo_overlay: boolean
   /** Batch 6 caption safe zone (2026-11-25); default ON. */
   caption_safe_zone: boolean
+  /** Batch 7 whole-clip on-screen text (2026-11-25); defaults OFF /
+   * 'none' / null (empty text = OFF). */
+  ost_persistent: boolean
+  ost_animation: 'none' | 'slide' | 'fade' | 'pop'
+  end_card: boolean
+  end_card_text: string | null
+  keyword_popups: boolean
+  lower_third_text: string | null
+  progress_bar: boolean
   job_type: 'myself' | 'campaign'
   campaign_requirements: string | null
   notes: string | null

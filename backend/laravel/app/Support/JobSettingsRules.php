@@ -60,6 +60,25 @@ class JobSettingsRules
             // width, left-of-centre); OFF restores full-width centred
             // captions. The worker also treats a missing key as ON.
             'caption_safe_zone' => ['sometimes', 'boolean'],
+            // Batch 7 (2026-11-25): on-screen text for the whole clip.
+            // ost_persistent (default OFF) keeps the headline up for
+            // the full clip instead of the first 4s; ost_animation
+            // (default "none") is the headline's entrance; end_card
+            // (default OFF) shows a Follow card in the last 2s
+            // (end_card_text, max 40 chars, default "Follow for
+            // more"); keyword_popups (default OFF) pops up to 4
+            // spoken keywords; lower_third_text (max 40 chars, empty
+            // = OFF) is a persistent lower-third tag; progress_bar
+            // (default OFF) is a thin violet bar growing across the
+            // full clip. The worker treats missing keys as the
+            // defaults, so old jobs render exactly as before.
+            'ost_persistent' => ['sometimes', 'boolean'],
+            'ost_animation' => ['sometimes', 'string', Rule::in(['none', 'slide', 'fade', 'pop'])],
+            'end_card' => ['sometimes', 'boolean'],
+            'end_card_text' => ['sometimes', 'nullable', 'string', 'max:40'],
+            'keyword_popups' => ['sometimes', 'boolean'],
+            'lower_third_text' => ['sometimes', 'nullable', 'string', 'max:40'],
+            'progress_bar' => ['sometimes', 'boolean'],
             // Batch 4 (2026-11-25): logo overlay (default OFF — a
             // watermark must never surprise the user).
             'logo_overlay' => ['sometimes', 'boolean'],

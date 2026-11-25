@@ -29,6 +29,8 @@ import {
   HEADLINE_STYLE_DESCRIPTIONS,
   HEADLINE_STYLE_LABELS,
   LAYOUT_LABELS,
+  OST_ANIMATION_DESCRIPTIONS,
+  OST_ANIMATION_LABELS,
   SELECTION_MODE_DESCRIPTIONS,
   SELECTION_MODE_LABELS,
   type CaptionPosition,
@@ -36,6 +38,7 @@ import {
   type ClipLayout,
   type HeadlineStyle,
   type JobSettings,
+  type OstAnimation,
   type SelectionMode,
 } from '../lib/jobs'
 import {
@@ -115,10 +118,12 @@ function Toggle({
   checked,
   onChange,
   label,
+  disabled = false,
 }: {
   checked: boolean
   onChange: (value: boolean) => void
   label: string
+  disabled?: boolean
 }) {
   return (
     <button
@@ -126,8 +131,9 @@ function Toggle({
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
-      className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+      className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
         checked ? 'bg-brand' : 'bg-ink-border'
       }`}
     >
@@ -142,6 +148,8 @@ function Toggle({
 
 const selectClass =
   'w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none'
+const inputClass =
+  'w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)] focus:border-brand focus:outline-none'
 const numberClass =
   'w-24 rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none'
 
@@ -263,6 +271,17 @@ export function NewJobPage() {
   // TikTok's right action rail and the bottom bar. OFF restores
   // full-width centred captions.
   const [captionSafeZone, setCaptionSafeZone] = useState(true)
+  // Batch 7 whole-clip on-screen text — all default OFF / 'none' /
+  // empty (the pre-Batch-7 behaviour). The end card and pop-ups/tag
+  // work on their own; only the persistent headline and its animation
+  // need on-screen text on.
+  const [ostPersistent, setOstPersistent] = useState(false)
+  const [ostAnimation, setOstAnimation] = useState<OstAnimation>('none')
+  const [endCard, setEndCard] = useState(false)
+  const [endCardText, setEndCardText] = useState('')
+  const [keywordPopups, setKeywordPopups] = useState(false)
+  const [lowerThirdText, setLowerThirdText] = useState('')
+  const [progressBar, setProgressBar] = useState(false)
   // Batch 4 bulk jobs — up to 5 files, one job per file with the same
   // settings. Off by default; the wizard stays single-file only.
   const [bulkMode, setBulkMode] = useState(false)
@@ -471,6 +490,21 @@ export function NewJobPage() {
     if (typeof s.logo_overlay === 'boolean') setLogoOverlay(s.logo_overlay)
     // Batch 6 (2026-11-25): caption safe zone (default ON).
     if (typeof s.caption_safe_zone === 'boolean') setCaptionSafeZone(s.caption_safe_zone)
+    // Batch 7 (2026-11-25): whole-clip on-screen text (defaults OFF).
+    if (typeof s.ost_persistent === 'boolean') setOstPersistent(s.ost_persistent)
+    if (
+      s.ost_animation === 'none' ||
+      s.ost_animation === 'slide' ||
+      s.ost_animation === 'fade' ||
+      s.ost_animation === 'pop'
+    ) {
+      setOstAnimation(s.ost_animation)
+    }
+    if (typeof s.end_card === 'boolean') setEndCard(s.end_card)
+    if (typeof s.end_card_text === 'string') setEndCardText(s.end_card_text)
+    if (typeof s.keyword_popups === 'boolean') setKeywordPopups(s.keyword_popups)
+    if (typeof s.lower_third_text === 'string') setLowerThirdText(s.lower_third_text)
+    if (typeof s.progress_bar === 'boolean') setProgressBar(s.progress_bar)
     if (s.job_type === 'myself' || s.job_type === 'campaign') setJobType(s.job_type)
     if (typeof s.campaign_requirements === 'string') setCampaignRequirements(s.campaign_requirements)
     if (typeof s.notes === 'string') setNotes(s.notes)
@@ -515,6 +549,13 @@ export function NewJobPage() {
     export_ratios: exportRatios,
     logo_overlay: logoOverlay,
     caption_safe_zone: captionSafeZone,
+    ost_persistent: ostPersistent,
+    ost_animation: ostAnimation,
+    end_card: endCard,
+    end_card_text: endCardText.trim() ? endCardText.trim() : null,
+    keyword_popups: keywordPopups,
+    lower_third_text: lowerThirdText.trim() ? lowerThirdText.trim() : null,
+    progress_bar: progressBar,
     job_type: jobType,
     campaign_requirements: campaignRequirements.trim() ? campaignRequirements : null,
     notes: notes.trim() ? notes : null,
@@ -642,6 +683,13 @@ export function NewJobPage() {
       exportRatios,
       logoOverlay,
       captionSafeZone,
+      ostPersistent,
+      ostAnimation,
+      endCard,
+      endCardText: endCardText.trim(),
+      keywordPopups,
+      lowerThirdText: lowerThirdText.trim(),
+      progressBar,
       jobType,
       campaignRequirements: campaignRequirements.trim(),
       notes: notes.trim(),
@@ -1254,6 +1302,127 @@ export function NewJobPage() {
                 </span>
               </label>
 
+              {/* Batch 7 whole-clip on-screen text (2026-11-25). The
+                  persistent headline and its animation need on-screen
+                  text on; the end card, keyword pop-ups, lower-third
+                  tag and progress bar work on their own. */}
+              <div>
+                <span className="text-sm font-medium text-white">Persistent headline</span>
+                <div className="mt-2 flex items-center gap-3">
+                  <Toggle
+                    checked={ostPersistent}
+                    onChange={setOstPersistent}
+                    label="Persistent headline on or off"
+                    disabled={!onScreenText}
+                  />
+                  <span className="text-sm text-[var(--color-text-muted)]">
+                    {ostPersistent ? 'Persistent headline on' : 'Persistent headline off'} — keep
+                    the headline up for the whole clip instead of the first 4 seconds
+                  </span>
+                </div>
+                {!onScreenText ? (
+                  <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                    Turn on-screen text on to use the persistent headline.
+                  </span>
+                ) : null}
+              </div>
+
+              <label className="block">
+                <span className="text-sm font-medium text-white">Headline animation</span>
+                <select
+                  value={ostAnimation}
+                  disabled={!onScreenText}
+                  onChange={(e) => setOstAnimation(e.target.value as OstAnimation)}
+                  className={`${selectClass} mt-2 disabled:cursor-not-allowed disabled:opacity-50`}
+                >
+                  {(Object.keys(OST_ANIMATION_LABELS) as OstAnimation[]).map((a) => (
+                    <option key={a} value={a}>
+                      {OST_ANIMATION_LABELS[a]}
+                    </option>
+                  ))}
+                </select>
+                <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                  {OST_ANIMATION_DESCRIPTIONS[ostAnimation]}
+                </span>
+              </label>
+
+              <div>
+                <span className="text-sm font-medium text-white">Follow end card</span>
+                <div className="mt-2 flex items-center gap-3">
+                  <Toggle
+                    checked={endCard}
+                    onChange={setEndCard}
+                    label="Follow end card on or off"
+                  />
+                  <span className="text-sm text-[var(--color-text-muted)]">
+                    {endCard ? 'End card on' : 'End card off'} — show a card
+                    in the last 2 seconds of every clip
+                  </span>
+                </div>
+                {endCard ? (
+                  <label className="mt-3 block">
+                    <span className="text-sm font-medium text-white">End card text</span>
+                    <input
+                      type="text"
+                      value={endCardText}
+                      maxLength={40}
+                      placeholder="Follow for more"
+                      onChange={(e) => setEndCardText(e.target.value)}
+                      className={`${inputClass} mt-2`}
+                    />
+                    <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                      Leave empty for “Follow for more”. Max 40 characters.
+                    </span>
+                  </label>
+                ) : null}
+              </div>
+
+              <div>
+                <span className="text-sm font-medium text-white">Keyword pop-ups</span>
+                <div className="mt-2 flex items-center gap-3">
+                  <Toggle
+                    checked={keywordPopups}
+                    onChange={setKeywordPopups}
+                    label="Keyword pop-ups on or off"
+                  />
+                  <span className="text-sm text-[var(--color-text-muted)]">
+                    {keywordPopups ? 'Keyword pop-ups on' : 'Keyword pop-ups off'} — pop up to 4
+                    important spoken words as large text at the moment they are said
+                  </span>
+                </div>
+              </div>
+
+              <label className="block">
+                <span className="text-sm font-medium text-white">Lower-third tag</span>
+                <input
+                  type="text"
+                  value={lowerThirdText}
+                  maxLength={40}
+                  placeholder="@yourchannel"
+                  onChange={(e) => setLowerThirdText(e.target.value)}
+                  className={`${inputClass} mt-2`}
+                />
+                <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                  Your name or channel, shown at the bottom of the whole
+                  clip. Empty = off. Never translated. Max 40 characters.
+                </span>
+              </label>
+
+              <div>
+                <span className="text-sm font-medium text-white">Progress bar</span>
+                <div className="mt-2 flex items-center gap-3">
+                  <Toggle
+                    checked={progressBar}
+                    onChange={setProgressBar}
+                    label="Progress bar on or off"
+                  />
+                  <span className="text-sm text-[var(--color-text-muted)]">
+                    {progressBar ? 'Progress bar on' : 'Progress bar off'} — a thin violet bar
+                    along the bottom edge, growing across the full clip
+                  </span>
+                </div>
+              </div>
+
               <label className="block">
                 <span className="text-sm font-medium text-white">{t('captionPosition')}</span>
                 <select
@@ -1589,6 +1758,12 @@ export function NewJobPage() {
                 ['Clip selection', SELECTION_MODE_LABELS[selectionMode]],
                 ['On-screen text', onScreenText ? 'On' : 'Off'],
                 ['Headline style', HEADLINE_STYLE_LABELS[headlineStyle]],
+                ['Persistent headline', ostPersistent ? 'On' : 'Off'],
+                ['Headline animation', OST_ANIMATION_LABELS[ostAnimation]],
+                ['Follow end card', endCard ? (endCardText.trim() || 'Follow for more') : 'Off'],
+                ['Keyword pop-ups', keywordPopups ? 'On' : 'Off'],
+                ['Lower-third tag', lowerThirdText.trim() || 'Off'],
+                ['Progress bar', progressBar ? 'On' : 'Off'],
                 ['Caption position', CAPTION_POSITION_LABELS[captionPosition]],
                 ['Beat sync', beatSync ? 'On' : 'Off'],
                 ['Translate captions', CAPTION_TRANSLATION_LABELS[captionTranslation]],

@@ -2700,5 +2700,294 @@ class Batch6Tests(unittest.TestCase):
             self.assertAlmostEqual(rendered["duration"], 5.0, delta=0.4)
 
 
+class Batch7Tests(unittest.TestCase):
+    """Batch 7 (2026-11-25): on-screen text for the whole clip —
+    persistent headline, entrance animation, Follow end card, keyword
+    pop-ups, lower-third tag, animated progress bar."""
+
+    def _words_at(self, pairs):
+        return [{"start": s, "end": e, "word": w} for s, e, w in pairs]
+
+    def _manual_segment(self, start, end, pairs):
+        words = self._words_at(pairs)
+        return {"start": start, "end": end,
+                "text": " ".join(w[2] for w in pairs), "words": words}
+
+    @staticmethod
+    def _ass_seconds(stamp: str) -> float:
+        h, m, rest = stamp.split(":")
+        s, cs = rest.split(".")
+        return int(h) * 3600 + int(m) * 60 + int(s) + int(cs) / 100
+
+    def _dialogue_events(self, text: str):
+        events = []
+        for line in text.splitlines():
+            m = re.match(
+                r"Dialogue: 0,(\d+:\d\d:\d\d\.\d\d),"
+                r"(\d+:\d\d:\d\d\.\d\d),(\w+),,0,0,0,,(.*)$", line)
+            if m:
+                events.append((self._ass_seconds(m.group(1)),
+                               self._ass_seconds(m.group(2)),
+                               m.group(3), m.group(4)))
+        return events
+
+    def _headline_ass(self, path, **kwargs):
+        kwargs.setdefault("text", "WIN THE PS5 TODAY")
+        kwargs.setdefault("duration", 20.0)
+        self.assertTrue(muse_worker.write_headline_ass(
+            kwargs.pop("text"), kwargs.pop("duration"), path,
+            1080, 1920, **kwargs))
+        return self._dialogue_events(path.read_text())
+
+    # --- Persistent headline ---
+
+    def test_persistent_headline_spans_full_clip(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "persistent.ass"
+            events = self._headline_ass(path, persistent=True)
+            headline = [e for e in events if e[2] == "Headline"]
+            self.assertEqual(len(headline), 1)
+            self.assertEqual((headline[0][0], headline[0][1]), (0.0, 20.0))
+
+    def test_headline_still_4s_when_not_persistent(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "short.ass"
+            events = self._headline_ass(path)
+            headline = [e for e in events if e[2] == "Headline"]
+            self.assertEqual((headline[0][0], headline[0][1]), (0.0, 4.0))
+
+    # --- Entrance animation ---
+
+    def test_animation_tags_present_only_when_set(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            path = tmp / "slide.ass"
+            self._headline_ass(path, animation="slide")
+            self.assertIn("\\move(540,30,540,120,0,300)",
+                          path.read_text())
+            path = tmp / "fade.ass"
+            self._headline_ass(path, animation="fade")
+            self.assertIn("\\fad(300,0)", path.read_text())
+            path = tmp / "pop.ass"
+            self._headline_ass(path, animation="pop")
+            self.assertIn("\\fscx60\\fscy60\\t(0,150,\\fscx100\\fscy100)",
+                          path.read_text())
+            path = tmp / "none.ass"
+            self._headline_ass(path, animation="none")
+            text = path.read_text()
+            self.assertNotIn("\\move(", text)
+            self.assertNotIn("\\fad(", text)
+            self.assertNotIn("\\fscx60", text)
+            # Unknown animation falls back to none.
+            path = tmp / "bad.ass"
+            self._headline_ass(path, animation="spin")
+            self.assertNotIn("\\move(", path.read_text())
+
+    # --- End card ---
+
+    def test_end_card_last_two_seconds_replaces_headline(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "endcard.ass"
+            events = self._headline_ass(
+                path, persistent=True, end_card_text="Follow for more")
+            headline = [e for e in events if e[2] == "Headline"]
+            card = [e for e in events if e[2] == "EndCard"]
+            self.assertEqual((headline[0][0], headline[0][1]), (0.0, 18.0))
+            self.assertEqual((card[0][0], card[0][1]), (18.0, 20.0))
+            self.assertIn("Follow for more", card[0][3])
+            # Non-persistent headline still ends before the card.
+            path = Path(d) / "endcard2.ass"
+            events = self._headline_ass(path, end_card_text="Follow for more")
+            headline = [e for e in events if e[2] == "Headline"]
+            card = [e for e in events if e[2] == "EndCard"]
+            self.assertEqual((headline[0][0], headline[0][1]), (0.0, 4.0))
+            self.assertEqual((card[0][0], card[0][1]), (18.0, 20.0))
+
+    def test_end_card_without_headline(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "cardonly.ass"
+            self.assertTrue(muse_worker.write_headline_ass(
+                None, 20.0, path, 1080, 1920,
+                end_card_text="Follow for more"))
+            events = self._dialogue_events(path.read_text())
+            self.assertEqual([e[2] for e in events], ["EndCard"])
+            self.assertEqual((events[0][0], events[0][1]), (18.0, 20.0))
+
+    def test_no_ost_returns_false(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "empty.ass"
+            self.assertFalse(muse_worker.write_headline_ass(
+                None, 20.0, path, 1080, 1920))
+            self.assertFalse(muse_worker.write_headline_ass(
+                "", 20.0, path, 1080, 1920))
+
+    # --- Keyword pop-ups ---
+
+    def _popup_segments(self):
+        # tower x3, climb x2, insane/guys/view x1 — spaced so none
+        # overlap after the 1s rule.
+        return [self._manual_segment(0.0, 20.0, [
+            (1.0, 1.5, "tower"), (2.0, 2.5, "climb"),
+            (5.0, 5.5, "tower"), (6.0, 6.5, "insane"),
+            (9.0, 9.5, "tower"), (12.0, 12.5, "climb"),
+            (15.0, 15.5, "guys"), (16.0, 16.5, "view")])]
+
+    def test_keyword_popups_at_spoken_timestamps(self):
+        popups = muse_worker.derive_keyword_popups(
+            self._popup_segments(), 0.0, 20.0)
+        self.assertEqual([p["word"] for p in popups],
+                         ["TOWER", "CLIMB", "INSANE", "GUYS"])
+        self.assertEqual([p["start"] for p in popups],
+                         [1.0, 2.0, 6.0, 15.0])
+        for p in popups:
+            self.assertAlmostEqual(p["end"] - p["start"], 1.0)
+
+    def test_keyword_popups_never_overlap(self):
+        # climb's first mention is 0.5s after tower's — keep tower only.
+        segs = [self._manual_segment(0.0, 20.0, [
+            (1.0, 1.5, "tower"), (1.5, 2.0, "climb"),
+            (5.0, 5.5, "tower"), (9.0, 9.5, "tower"),
+            (12.0, 12.5, "climb")])]
+        popups = muse_worker.derive_keyword_popups(segs, 0.0, 20.0)
+        self.assertEqual([p["word"] for p in popups], ["TOWER"])
+
+    def test_keyword_popups_max_four(self):
+        pairs = []
+        for i, word in enumerate(
+                ["tower", "climb", "insane", "guys", "view", "mission"]):
+            pairs.append((float(i * 2), float(i * 2 + 0.5), word))
+            pairs.append((float(i * 2 + 10), float(i * 2 + 10.5), word))
+        segs = [self._manual_segment(0.0, 20.0, pairs)]
+        self.assertLessEqual(
+            len(muse_worker.derive_keyword_popups(segs, 0.0, 20.0)), 4)
+
+    def test_keyword_popups_silent_clip(self):
+        self.assertEqual(muse_worker.derive_keyword_popups([], 0.0, 20.0), [])
+        self.assertEqual(
+            muse_worker.derive_keyword_popups(
+                [_segment(0.0, 20.0, "um uh hmm")], 0.0, 20.0), [])
+
+    def test_keyword_popups_burned_into_ass(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "popups.ass"
+            popups = muse_worker.derive_keyword_popups(
+                self._popup_segments(), 0.0, 20.0)
+            self.assertTrue(muse_worker.write_headline_ass(
+                "WIN THE PS5 TODAY", 20.0, path, 1080, 1920,
+                keyword_popups=popups))
+            events = self._dialogue_events(path.read_text())
+            pops = [e for e in events if e[2] == "KeywordPop"]
+            self.assertEqual(len(pops), 4)
+            self.assertEqual((pops[0][0], pops[0][1]), (1.0, 2.0))
+            self.assertIn("TOWER", pops[0][3])
+            # Pop entrance on every pop-up.
+            self.assertIn("\\fscx60\\fscy60", pops[0][3])
+
+    # --- Lower-third tag ---
+
+    def test_lower_third_only_when_text_set(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "tag.ass"
+            self.assertTrue(muse_worker.write_headline_ass(
+                None, 20.0, path, 1080, 1920,
+                lower_third_text="@magicianclips"))
+            events = self._dialogue_events(path.read_text())
+            tags = [e for e in events if e[2] == "LowerThirdTag"]
+            self.assertEqual(len(tags), 1)
+            self.assertEqual((tags[0][0], tags[0][1]), (0.0, 20.0))
+            self.assertIn("@magicianclips", tags[0][3])
+            # No text, no tag — and no headline either means False.
+            path = Path(d) / "notag.ass"
+            self.assertFalse(muse_worker.write_headline_ass(
+                None, 20.0, path, 1080, 1920, lower_third_text=""))
+            # The tag style sits above the bottom captions (MarginV 260).
+            self.assertIn(",2,40,40,260,1", (Path(d) / "tag.ass").read_text())
+
+    # --- Progress bar ---
+
+    def test_progress_bar_source(self):
+        src = muse_worker._progress_bar_source(1080, 20.0)
+        self.assertIn("color=c=0x8b5cf6:s=1080x8", src)
+        self.assertIn("geq=r=139:g=92:b=246", src)
+        self.assertIn("a='if(lt(X,1080*T/20.000),255,0)'", src)
+        self.assertTrue(src.endswith("[bar]"))
+        # Other widths/durations are honoured.
+        src = muse_worker._progress_bar_source(720, 30.0)
+        self.assertIn("s=720x8", src)
+        self.assertIn("720*T/30.000", src)
+
+    # --- Card backgrounds (drawbox, not ASS BorderStyle 3) ---
+
+    def test_text_box_filter_geometry(self):
+        # "Follow for more" at fs 96, centred vertically on a 1920
+        # frame: a filled 80%-black box, centred horizontally, with
+        # the enable timeline only when asked.
+        s = muse_worker._text_box_filter(
+            1080, "Follow for more", 96, 960,
+            enable="between(t,18.000,20.000)")
+        self.assertIn("color=black@0.8:t=fill", s)
+        self.assertIn("enable='between(t,18.000,20.000)'", s)
+        m = re.match(
+            r"drawbox=x=(\d+):y=(\d+):w=(\d+):h=(\d+):", s)
+        self.assertIsNotNone(m)
+        x, y, w, h = (int(v) for v in m.groups())
+        # Centred within 1px (integer division on an odd box width).
+        self.assertAlmostEqual(x + w / 2, 540, delta=1)
+        self.assertAlmostEqual(y + h / 2, 960, delta=1)
+        self.assertLess(w, 1080)
+        # No enable asked: no enable clause at all.
+        s2 = muse_worker._text_box_filter(1080, "@magicianclips", 40, 1636,
+                                          pad_x=30, pad_y=16)
+        self.assertNotIn("enable=", s2)
+        self.assertIn("color=black@0.8:t=fill", s2)
+
+    def test_end_card_and_tag_styles_use_outline_not_opaque_box(self):
+        # This libass build does not render BorderStyle 3 opaque
+        # boxes (verified 2026-11-25: text rendered, box did not), so
+        # the card/band background is a drawbox and the ASS styles
+        # carry an outline only (BorderStyle 1, Outline 2).
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "card.ass"
+            self.assertTrue(muse_worker.write_headline_ass(
+                None, 20.0, path, 1080, 1920,
+                end_card_text="Follow for more",
+                lower_third_text="@magicianclips"))
+            text = path.read_text()
+            self.assertIn("Style: EndCard,DejaVu Sans,96,", text)
+            self.assertIn(",1,2,0,5,40,40,0,1", text)
+            self.assertNotIn(",3,0,0,5,40,40,0,1", text)
+            self.assertIn("Style: LowerThirdTag,DejaVu Sans,40,", text)
+            self.assertIn(",1,2,0,2,40,40,260,1", text)
+
+    # --- Job note ---
+
+    def test_ready_note_batch7_lines(self):
+        stats = {"ost_persistent": True, "end_card": True,
+                 "keyword_popups": 3, "keyword_popups_on": True,
+                 "lower_third": True, "progress_bar": True}
+        note = muse_worker._ready_note(
+            [{"signals": []}], 1, [],
+            rendered=[{"_batch1_stats": stats}])
+        self.assertIn("On-screen headline shown for the full clip.", note)
+        self.assertIn("Follow end card shown in the last 2 seconds.", note)
+        self.assertIn("3 keyword pop-up(s) shown.", note)
+        self.assertIn("Lower-third tag shown for the full clip.", note)
+        self.assertIn("Progress bar shown.", note)
+        # Pop-ups on but silent: the honest line, not a count.
+        stats = {"ost_persistent": False, "end_card": False,
+                 "keyword_popups": 0, "keyword_popups_on": True,
+                 "lower_third": False, "progress_bar": False}
+        note = muse_worker._ready_note(
+            [{"signals": []}], 1, [],
+            rendered=[{"_batch1_stats": stats}])
+        self.assertIn("Keyword pop-ups on, but no words to pop up", note)
+        self.assertNotIn("keyword pop-up(s) shown", note)
+        # Everything off: no Batch 7 lines at all.
+        note = muse_worker._ready_note(
+            [{"signals": []}], 1, [],
+            rendered=[{"_batch1_stats": {}}])
+        self.assertIsNone(note)
+
+
 if __name__ == "__main__":
     unittest.main()
