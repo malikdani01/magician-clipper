@@ -10,6 +10,7 @@ use App\Models\Notification;
 use App\Models\ProcessingJob;
 use App\Models\Project;
 use App\Models\UserSetting;
+use App\Support\MediaStorage;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
@@ -101,15 +102,19 @@ class MuseJobController extends Controller
      */
     public function source(ProcessingJob $job)
     {
+        // Batch 5: the source lives on the JOB's disk (local as
+        // before, or the owner's cloud bucket). The worker downloads
+        // over this endpoint either way, so it needs no S3 knowledge.
+        $disk = MediaStorage::diskForJob($job);
         if ($job->source_path === null
-            || ! Storage::disk('local')->exists($job->source_path)) {
+            || ! $disk->exists($job->source_path)) {
             return response()->json([
                 'error' => 'not_found',
                 'message' => 'This job has no uploaded source file to download (link job or file missing).',
             ], 404);
         }
 
-        return Storage::disk('local')->download(
+        return $disk->download(
             $job->source_path, basename($job->source_path)
         );
     }
@@ -137,8 +142,10 @@ class MuseJobController extends Controller
             // Relative path under Laravel storage/app (upload source).
             'source_path' => $job->source_path,
             // Absolute local path — only meaningful because the worker runs
-            // on the same machine as this backend.
-            'source_local_path' => $job->source_path
+            // on the same machine as this backend. Batch 5: a source on
+            // the cloud disk has no local path — the worker downloads it
+            // over the source endpoint instead (see resolve_source).
+            'source_local_path' => ($job->source_path && ($job->disk ?? 'local') === 'local')
                 ? Storage::disk('local')->path($job->source_path)
                 : null,
             'clips' => $job->clips->map(fn ($clip) => [
@@ -525,13 +532,22 @@ class MuseJobController extends Controller
         $file = $request->file('file');
         $filename = Str::uuid()->toString().'.mp4';
         $relativePath = "clips/{$job->id}/{$filename}";
-        Storage::disk('local')->putFileAs("clips/{$job->id}", $file, $filename);
-        $absolutePath = Storage::disk('local')->path($relativePath);
+        // Batch 5: clips go to the JOB's disk (local as before, or the
+        // owner's cloud bucket). The clip row records the disk so
+        // downloads always read from the right place.
+        $disk = MediaStorage::diskForJob($job);
+        $disk->putFileAs("clips/{$job->id}", $file, $filename);
+        [$absolutePath, $isTemp] = MediaStorage::localPathFor(
+            $job->disk ?? MediaStorage::DISK_LOCAL, $relativePath, $job->user
+        );
 
         // Validate with ffprobe before creating any record.
         $probe = $this->probeClip($absolutePath);
+        if ($isTemp) {
+            @unlink($absolutePath);
+        }
         if ($probe === null) {
-            Storage::disk('local')->delete($relativePath);
+            $disk->delete($relativePath);
 
             return response()->json([
                 'error' => 'validation_error',
@@ -555,7 +571,7 @@ class MuseJobController extends Controller
         $thumbnailPath = null;
         if ($request->hasFile('thumbnail')) {
             $thumbFilename = 'thumb-'.Str::uuid()->toString().'.jpg';
-            Storage::disk('local')->putFileAs(
+            $disk->putFileAs(
                 "clips/{$job->id}", $request->file('thumbnail'), $thumbFilename
             );
             $thumbnailPath = "clips/{$job->id}/{$thumbFilename}";
@@ -571,7 +587,7 @@ class MuseJobController extends Controller
                 continue;
             }
             $candFilename = 'cand-'.Str::uuid()->toString().'.jpg';
-            Storage::disk('local')->putFileAs(
+            $disk->putFileAs(
                 "clips/{$job->id}", $request->file($field), $candFilename
             );
             $candidatePaths[] = "clips/{$job->id}/{$candFilename}";
@@ -587,9 +603,10 @@ class MuseJobController extends Controller
             'aspect_ratio' => $validated['aspect_ratio'] ?? ($settings['aspect_ratio'] ?? '9:16'),
             'status' => Clip::STATUS_READY,
             'output_path' => $relativePath,
+            'disk' => $job->disk ?? MediaStorage::DISK_LOCAL,
             'thumbnail_path' => $thumbnailPath,
             'thumbnail_candidates' => $candidatePaths !== [] ? $candidatePaths : null,
-            'file_size_bytes' => Storage::disk('local')->size($relativePath),
+            'file_size_bytes' => $disk->size($relativePath),
             'score' => $validated['score'] ?? null,
             'score_breakdown' => $scoreBreakdown,
             'reason' => $validated['reason'] ?? null,
@@ -658,16 +675,18 @@ class MuseJobController extends Controller
     {
         $deleted = 0;
         foreach ($job->clips as $clip) {
+            // Batch 5: delete from the CLIP's own disk.
+            $disk = MediaStorage::disk($clip->disk ?? MediaStorage::DISK_LOCAL, $clip->job?->user);
             if ($clip->output_path) {
-                Storage::disk('local')->delete($clip->output_path);
+                $disk->delete($clip->output_path);
             }
             if ($clip->thumbnail_path) {
-                Storage::disk('local')->delete($clip->thumbnail_path);
+                $disk->delete($clip->thumbnail_path);
             }
             // Batch 4: candidate frames ride with the clip.
             foreach ((array) ($clip->thumbnail_candidates ?? []) as $candidate) {
                 if (is_string($candidate)) {
-                    Storage::disk('local')->delete($candidate);
+                    $disk->delete($candidate);
                 }
             }
             $clip->delete();
@@ -780,12 +799,19 @@ class MuseJobController extends Controller
         $file = $request->file('file');
         $filename = Str::uuid()->toString().'.mp4';
         $relativePath = "clips/{$jobId}/{$filename}";
-        Storage::disk('local')->putFileAs("clips/{$jobId}", $file, $filename);
-        $absolutePath = Storage::disk('local')->path($relativePath);
+        // Batch 5: the replacement lives on the clip's own disk.
+        $disk = MediaStorage::disk($clip->disk ?? MediaStorage::DISK_LOCAL, $clip->job?->user);
+        $disk->putFileAs("clips/{$jobId}", $file, $filename);
+        [$absolutePath, $isTemp] = MediaStorage::localPathFor(
+            $clip->disk ?? MediaStorage::DISK_LOCAL, $relativePath, $clip->job?->user
+        );
 
         $probe = $this->probeClip($absolutePath);
+        if ($isTemp) {
+            @unlink($absolutePath);
+        }
         if ($probe === null) {
-            Storage::disk('local')->delete($relativePath);
+            $disk->delete($relativePath);
 
             return response()->json([
                 'error' => 'validation_error',
@@ -796,7 +822,7 @@ class MuseJobController extends Controller
         $thumbnailPath = $clip->thumbnail_path;
         if ($request->hasFile('thumbnail')) {
             $thumbFilename = 'thumb-'.Str::uuid()->toString().'.jpg';
-            Storage::disk('local')->putFileAs(
+            $disk->putFileAs(
                 "clips/{$jobId}", $request->file('thumbnail'), $thumbFilename
             );
             $thumbnailPath = "clips/{$jobId}/{$thumbFilename}";
@@ -816,7 +842,7 @@ class MuseJobController extends Controller
                     continue;
                 }
                 $candFilename = 'cand-'.Str::uuid()->toString().'.jpg';
-                Storage::disk('local')->putFileAs(
+                $disk->putFileAs(
                     "clips/{$jobId}", $request->file($field), $candFilename
                 );
                 $newCandidates[] = "clips/{$jobId}/{$candFilename}";
@@ -831,7 +857,7 @@ class MuseJobController extends Controller
             'output_path' => $relativePath,
             'thumbnail_path' => $thumbnailPath,
             'thumbnail_candidates' => $newCandidates ?? $clip->thumbnail_candidates,
-            'file_size_bytes' => Storage::disk('local')->size($relativePath),
+            'file_size_bytes' => $disk->size($relativePath),
             'duration_seconds' => (float) ($validated['duration_seconds'] ?? $probe['duration']),
             'caption_style' => $rerender->caption_style,
             'status' => Clip::STATUS_READY,
@@ -843,15 +869,15 @@ class MuseJobController extends Controller
         // (is_favourite is never touched here, so a re-rendered clip
         // keeps its favourite flag.)
         if ($oldOutput && $oldOutput !== $relativePath) {
-            Storage::disk('local')->delete($oldOutput);
+            $disk->delete($oldOutput);
         }
         if ($oldThumbnail && $oldThumbnail !== $thumbnailPath) {
-            Storage::disk('local')->delete($oldThumbnail);
+            $disk->delete($oldThumbnail);
         }
         if ($newCandidates !== null) {
             foreach ($oldCandidates as $candidate) {
                 if (is_string($candidate)) {
-                    Storage::disk('local')->delete($candidate);
+                    $disk->delete($candidate);
                 }
             }
         }

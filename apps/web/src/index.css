@@ -5,9 +5,11 @@
 /* ============================================================
    Magician Clipper — "Aurora" theme
    Deep navy-black base, vivid violet → fuchsia → cyan aurora
-   gradients, glassmorphism panels, refined shadows, one dark
-   theme only (no light mode). Visual system only — every
-   feature, route and data flow is unchanged.
+   gradients, glassmorphism panels, refined shadows. Two themes
+   (Batch 5): dark Aurora (default) and a real Light theme —
+   `:root` holds the dark tokens, `[data-theme="light"]` overrides
+   them below (never an inverted filter). Visual system only —
+   every feature, route and data flow is unchanged.
    ============================================================ */
 :root {
   --color-bg: #05050f;
@@ -32,6 +34,144 @@
   --radius-control: 0.7rem;
   --aurora-gradient: linear-gradient(135deg, #7c3aed 0%, #d946ef 52%, #22d3ee 100%);
   --aurora-gradient-soft: linear-gradient(135deg, rgba(124, 58, 237, 0.9), rgba(217, 70, 239, 0.9) 52%, rgba(34, 211, 238, 0.9));
+}
+
+/* ---------- Light theme (Batch 5) ----------
+   Real light tokens: pale lavender-grey surfaces, dark ink text,
+   the same violet brand. Dark Aurora stays the default. */
+[data-theme='light'] {
+  --color-bg: #f3f4fa;
+  --color-bg-deep: #e8eaf6;
+  /* Solid-ish white panels — the aurora mesh shows through only
+     faintly (see the softened mesh below). */
+  --color-panel: rgba(255, 255, 255, 0.88);
+  --color-panel-2: rgba(255, 255, 255, 0.96);
+  --color-panel-solid: #ffffff;
+  --color-border: rgba(109, 40, 217, 0.16);
+  --color-border-strong: rgba(109, 40, 217, 0.38);
+  --color-primary: #7c3aed;
+  --color-primary-light: #8b5cf6;
+  --color-primary-dark: #6d28d9;
+  --color-fuchsia: #c026d3;
+  --color-cyan: #0891b2;
+  --color-text: #17172b;
+  --color-text-muted: #565670;
+  --color-success: #15803d;
+  --color-warning: #b45309;
+  --color-danger: #b91c1c;
+}
+
+/* Light theme: soften the aurora mesh to a faint tint — the full
+   dark glows would fight the light surfaces. */
+[data-theme='light'] .aurora-mesh {
+  background:
+    radial-gradient(ellipse 55% 45% at 12% -5%, rgba(124, 58, 237, 0.08) 0%, transparent 65%),
+    radial-gradient(ellipse 45% 40% at 95% 10%, rgba(217, 70, 239, 0.06) 0%, transparent 65%),
+    radial-gradient(ellipse 60% 50% at 50% 115%, rgba(8, 145, 178, 0.05) 0%, transparent 65%);
+}
+[data-theme='light'] .aurora-mesh::before {
+  background: radial-gradient(circle, rgba(124, 58, 237, 0.07) 0%, transparent 65%);
+}
+[data-theme='light'] .aurora-mesh::after {
+  background: radial-gradient(circle, rgba(217, 70, 239, 0.05) 0%, transparent 65%);
+}
+
+/* Light theme: most surfaces are light now, so the app's many
+   `text-white` classes (written for dark panels) flip to dark ink.
+   White text STAYS white on the surfaces that are still dark:
+   gradient buttons, violet fills, black video areas/overlays,
+   gradient chips/badges, and the two previews whose backgrounds
+   are hard-coded dark (Captions Studio phone mockup, Brand Kit
+   live preview). The compound selectors below beat the blanket
+   rule by specificity. */
+[data-theme='light'] .text-white {
+  color: var(--color-text);
+}
+[data-theme='light'] .hover\:text-white:hover {
+  color: var(--color-text);
+}
+[data-theme='light'] .btn-aurora,
+[data-theme='light'] .btn-aurora *,
+[data-theme='light'] .bg-brand.text-white,
+[data-theme='light'] .bg-brand-dark.text-white,
+[data-theme='light'] .bg-black.text-white,
+[data-theme='light'] .bg-black .text-white,
+[data-theme='light'] .bg-black\/40.text-white,
+[data-theme='light'] .bg-black\/40 .text-white,
+[data-theme='light'] .bg-black\/50.text-white,
+[data-theme='light'] .bg-black\/50 .text-white,
+[data-theme='light'] .bg-black\/60.text-white,
+[data-theme='light'] .bg-black\/60 .text-white,
+[data-theme='light'] .bg-black\/70.text-white,
+[data-theme='light'] .bg-black\/70 .text-white,
+[data-theme='light'] .bg-black\/80.text-white,
+[data-theme='light'] .bg-black\/80 .text-white,
+[data-theme='light'] .bg-gradient-to-br.text-white,
+[data-theme='light'] .bg-gradient-to-r.text-white,
+[data-theme='light'] .caption-preview .text-white,
+[data-theme='light'] .caption-preview .text-white\/50,
+[data-theme='light'] .brand-preview .text-white,
+[data-theme='light'] .brand-preview .text-white\/80 {
+  color: #fff;
+}
+
+/* Light theme: translucent-white fills/hover states are invisible
+   on white panels — swap them for translucent ink. (The white/25
+   divider lines inside the dark Captions preview are NOT touched.) */
+[data-theme='light'] .bg-white\/5 {
+  background-color: rgba(23, 23, 43, 0.06);
+}
+[data-theme='light'] .bg-white\/10 {
+  background-color: rgba(23, 23, 43, 0.1);
+}
+[data-theme='light'] .hover\:bg-white\/5:hover {
+  background-color: rgba(23, 23, 43, 0.06);
+}
+[data-theme='light'] .border-white\/10 {
+  border-color: rgba(23, 23, 43, 0.14);
+}
+
+/* Light theme: the pastel -200/-300 status colours were designed
+   for dark panels and are unreadable on white — use their darker
+   siblings instead (same hue, honest meaning, real contrast). */
+[data-theme='light'] .text-red-300 {
+  color: #b91c1c;
+}
+[data-theme='light'] .text-red-200 {
+  color: #991b1b;
+}
+[data-theme='light'] .text-red-400 {
+  color: #dc2626;
+}
+[data-theme='light'] .text-emerald-300 {
+  color: #047857;
+}
+[data-theme='light'] .text-emerald-200 {
+  color: #065f46;
+}
+[data-theme='light'] .text-emerald-400 {
+  color: #059669;
+}
+[data-theme='light'] .text-amber-300 {
+  color: #b45309;
+}
+[data-theme='light'] .text-amber-200 {
+  color: #92400e;
+}
+[data-theme='light'] .text-blue-300 {
+  color: #1d4ed8;
+}
+[data-theme='light'] .text-yellow-300 {
+  color: #a16207;
+}
+[data-theme='light'] .text-pink-400 {
+  color: #be185d;
+}
+[data-theme='light'] .text-brand-light {
+  color: #6d28d9;
+}
+[data-theme='light'] .text-brand {
+  color: #6d28d9;
 }
 
 html,

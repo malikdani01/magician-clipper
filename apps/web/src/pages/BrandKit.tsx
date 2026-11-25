@@ -16,6 +16,7 @@ import {
 } from '../lib/brandAssets'
 import { formatBytes, formatDuration } from '../lib/format'
 import { PageHeader } from '../components/PageHeader'
+import { usePreferences } from '../state/preferences'
 
 const STORAGE_KEY = 'magician-clipper.brand-kit.v1'
 
@@ -67,6 +68,7 @@ function loadSaved(): BrandKitSaved {
  */
 function IntroOutroAssets() {
   const [assets, setAssets] = useState<BrandAsset[]>([])
+  const { t } = usePreferences()
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [uploadingKind, setUploadingKind] = useState<BrandAssetKind | null>(null)
@@ -185,7 +187,7 @@ function IntroOutroAssets() {
               ) : (
                 <Trash2 className="h-3.5 w-3.5" />
               )}
-              Remove
+              {t('remove')}
             </button>
           </div>
         ) : (
@@ -206,8 +208,8 @@ function IntroOutroAssets() {
         </p>
       ) : (
         <div className="mt-4 space-y-3">
-          {uploadRow('intro', 'Intro clip')}
-          {uploadRow('outro', 'Outro clip')}
+          {uploadRow('intro', t('introVideo'))}
+          {uploadRow('outro', t('outroVideo'))}
         </div>
       )}
       {loadError ? (
@@ -237,6 +239,7 @@ function IntroOutroAssets() {
  */
 function LogoAsset() {
   const [asset, setAsset] = useState<BrandAsset | null>(null)
+  const { t } = usePreferences()
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
@@ -375,7 +378,7 @@ function LogoAsset() {
             ) : (
               <Trash2 className="h-3.5 w-3.5" />
             )}
-            Remove
+            {t('remove')}
           </button>
         </div>
       ) : null}
@@ -398,6 +401,7 @@ function LogoAsset() {
 }
 export function BrandKitPage() {
   const [initial] = useState(loadSaved)
+  const { t } = usePreferences()
   const [brandName, setBrandName] = useState(initial.brandName)
   const [primary, setPrimary] = useState(initial.primary)
   const [accent, setAccent] = useState(initial.accent)
@@ -440,8 +444,8 @@ export function BrandKitPage() {
   return (
     <div>
       <PageHeader
-        title="Brand Kit"
-        subtitle="Your colours, logo and fonts — applied to every clip."
+        title={t('brandKitTitle')}
+        subtitle={t('brandKitSubtitle')}
       />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
@@ -532,7 +536,7 @@ export function BrandKitPage() {
             </label>
 
             <div>
-              <span className="text-sm font-medium text-white">Logo</span>
+              <span className="text-sm font-medium text-white">{t('logoImage')}</span>
               <LogoAsset />
             </div>
           </div>
@@ -567,10 +571,10 @@ export function BrandKitPage() {
 
         <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
           <h2 className="flex items-center gap-2 text-lg font-semibold text-white">
-            <Palette className="h-5 w-5 text-brand-light" /> Live preview
+            <Palette className="h-5 w-5 text-brand-light" /> {t('livePreview')}
           </h2>
           <div
-            className="mt-4 flex h-48 flex-col items-center justify-center rounded-xl px-4 text-center"
+            className="brand-preview mt-4 flex h-48 flex-col items-center justify-center rounded-xl px-4 text-center"
             style={{ background: `linear-gradient(135deg, ${primary}, ${accent})` }}
           >
             <p className="text-lg font-bold text-white" style={{ fontFamily: font }}>

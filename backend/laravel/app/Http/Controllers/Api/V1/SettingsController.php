@@ -45,6 +45,9 @@ class SettingsController extends Controller
             'default_quality' => ['sometimes', 'required', 'string', Rule::in(UserSetting::QUALITIES)],
             'caption_style' => ['sometimes', 'required', 'string', Rule::in(UserSetting::CAPTION_STYLES)],
             'notifications_enabled' => ['sometimes', 'required', 'boolean'],
+            // Batch 5: appearance + language preferences.
+            'theme' => ['sometimes', 'required', 'string', Rule::in(UserSetting::THEMES)],
+            'language' => ['sometimes', 'required', 'string', Rule::in(UserSetting::LANGUAGES)],
             'name' => ['sometimes', 'required', 'string', 'max:255'],
             'email' => ['sometimes', 'required', 'email', 'max:255', Rule::unique('users', 'email')->ignore($request->user()->id)],
         ]);

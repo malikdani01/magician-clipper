@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router-dom'
 import { API_URL } from '../lib/api'
 import { CAPTION_STYLES, getCaptionStyle, isCaptionStyleId, type CaptionPreviewAnim, type CaptionStyle } from '../lib/captionStyles'
 import { useAuth } from '../state/auth'
+import { usePreferences } from '../state/preferences'
 import { getProject } from '../state/projects'
 import { PageHeader } from '../components/PageHeader'
 
@@ -163,7 +164,7 @@ function CaptionStylePreview({ style }: { style: CaptionStyle }) {
     'absolute inset-x-1 top-1/2 -translate-y-1/2 text-center font-black uppercase leading-tight text-white'
 
   return (
-    <span className="relative mx-auto block aspect-[9/16] w-full max-w-[150px] overflow-hidden rounded-lg border border-white/10">
+    <span className="relative mx-auto block aspect-[9/16] w-full max-w-[150px] overflow-hidden rounded-lg border border-white/10 caption-preview">
       <span className="absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-[#3d2b63] to-[#241a3d]" />
       <span className="absolute inset-x-0 bottom-0 h-1/2 bg-gradient-to-b from-[#14532d] to-[#052e16]" />
       <span className="absolute inset-x-0 top-1/2 h-px bg-white/25" />
@@ -348,6 +349,7 @@ export function CaptionsPage() {
   const projectId = searchParams.get('project')
   const project = projectId ? getProject(projectId) : undefined
   const { token } = useAuth()
+  const { t } = usePreferences()
 
   // Default caption style for new jobs — saved via PATCH /api/v1/settings.
   const [defaultStyle, setDefaultStyle] = useState<string>('punchy')
@@ -446,7 +448,7 @@ export function CaptionsPage() {
         : { textDecoration: 'underline', textDecorationColor: highlightColor, textUnderlineOffset: 8 }
 
   const preview = (
-    <div className="relative mx-auto flex aspect-[9/16] w-full max-w-[280px] items-center justify-center overflow-hidden rounded-xl border border-white/10 px-4 text-center">
+    <div className="relative mx-auto flex aspect-[9/16] w-full max-w-[280px] items-center justify-center overflow-hidden rounded-xl border border-white/10 px-4 text-center caption-preview">
       <span className="absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-[#3d2b63] to-[#241a3d]" />
       <span className="absolute inset-x-0 bottom-0 h-1/2 bg-gradient-to-b from-[#14532d] to-[#052e16]" />
       <span className="absolute inset-x-0 top-1/2 h-px bg-white/25" />
@@ -473,7 +475,7 @@ export function CaptionsPage() {
   const controls = (
     <div className="space-y-4">
       <label className="block">
-        <span className="text-sm font-medium text-white">Sample text</span>
+        <span className="text-sm font-medium text-white">{t('sampleText')}</span>
         <input
           type="text"
           value={sampleText}
@@ -585,8 +587,8 @@ export function CaptionsPage() {
   return (
     <div>
       <PageHeader
-        title="Captions Studio"
-        subtitle="Add stunning animated captions."
+        title={t('captionsTitle')}
+        subtitle={t('captionsSubtitle')}
         actions={
           project ? (
             <span className="rounded-full border border-ink-border bg-ink-panel px-3 py-1.5 text-xs font-medium text-[var(--color-text-muted)]">

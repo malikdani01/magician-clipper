@@ -26,6 +26,7 @@ import { getCaptionStyle } from '../lib/captionStyles'
 import { LAYOUT_LABELS } from '../lib/jobs'
 import { viralScore } from '../lib/viralScore'
 import { useAuth } from '../state/auth'
+import { usePreferences } from '../state/preferences'
 import { useProjects } from '../state/projects'
 
 interface UserStats {
@@ -81,6 +82,7 @@ function MagicHat() {
 export function DashboardPage() {
   const { projects, loading } = useProjects()
   const { user } = useAuth()
+  const { t } = usePreferences()
   const [engine, setEngine] = useState<EngineHealth | null>(null)
   const [backend, setBackend] = useState<LaravelHealth | null>(null)
   const [stats, setStats] = useState<UserStats | null>(null)
@@ -159,7 +161,7 @@ export function DashboardPage() {
         <div className="relative grid grid-cols-1 items-center gap-6 lg:grid-cols-5">
           <div className="lg:col-span-3">
             <p className="text-sm font-medium text-brand-light">
-              Welcome back{firstName ? `, ${firstName}` : ''}! 👋
+              {t('welcomeBack')}{firstName ? `, ${firstName}` : ''}! 👋
             </p>
             <h1 className="mt-2 text-3xl font-bold leading-tight text-white sm:text-4xl">
               Turn Long Videos Into Amazing Short Clips with{' '}
@@ -218,14 +220,14 @@ export function DashboardPage() {
 
       <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
-          label="Total Projects"
+          label={t('statProjects')}
           value={String(totalProjects)}
           sublabel={loading ? 'Loading…' : totalProjects === 0 ? 'No projects yet' : `${totalProjects} project${totalProjects === 1 ? '' : 's'}`}
           icon={<Folder className="h-5 w-5" />}
           accent="#7C3AED"
         />
         <StatCard
-          label="Total Clips"
+          label={t('statClips')}
           value={String(totalClips)}
           sublabel={
             stats === null
@@ -238,14 +240,14 @@ export function DashboardPage() {
           accent="#8B5CF6"
         />
         <StatCard
-          label="Processing"
+          label={t('statProcessing')}
           value={String(processing)}
           sublabel={processing === 0 ? 'Nothing in the queue' : `${processing} project${processing === 1 ? '' : 's'} processing`}
           icon={<RefreshCw className="h-5 w-5" />}
           accent="#7C3AED"
         />
         <StatCard
-          label="Storage Used"
+          label={t('statStorage')}
           value={formatBytes(storageBytes)}
           sublabel={storageBytes === 0 ? 'Nothing uploaded yet' : 'Sources + rendered clips on disk'}
           icon={<HardDrive className="h-5 w-5" />}
@@ -256,9 +258,9 @@ export function DashboardPage() {
       <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="rounded-2xl border border-ink-border bg-ink-panel p-6 lg:col-span-2">
           <div className="flex items-center justify-between gap-3">
-            <h2 className="text-lg font-semibold text-white">Recent projects</h2>
+            <h2 className="text-lg font-semibold text-white">{t('recentProjects')}</h2>
             <Link to="/projects" className="text-sm font-medium text-brand-light hover:underline">
-              View All →
+              {t('viewAll')} →
             </Link>
           </div>
           <div className="mt-4">
@@ -309,7 +311,7 @@ export function DashboardPage() {
         </div>
 
         <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
-          <h2 className="text-lg font-semibold text-white">Getting started</h2>
+          <h2 className="text-lg font-semibold text-white">{t('gettingStarted')}</h2>
           <ol className="mt-4 space-y-4 text-sm">
             <li className="flex gap-3">
               <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand text-xs font-bold text-white">1</span>
@@ -347,9 +349,9 @@ export function DashboardPage() {
       <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="rounded-2xl border border-ink-border bg-ink-panel p-6 lg:col-span-2">
           <div className="flex items-center justify-between gap-3">
-            <h2 className="text-lg font-semibold text-white">Recent exports</h2>
+            <h2 className="text-lg font-semibold text-white">{t('recentExports')}</h2>
             <Link to="/exports" className="text-sm font-medium text-brand-light hover:underline">
-              View All →
+              {t('viewAll')} →
             </Link>
           </div>
           <div className="mt-4">
@@ -362,7 +364,7 @@ export function DashboardPage() {
         </div>
 
         <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
-          <h2 className="text-lg font-semibold text-white">Quick actions</h2>
+          <h2 className="text-lg font-semibold text-white">{t('quickActions')}</h2>
           <div className="mt-4 grid grid-cols-2 gap-3">
             {[
               { to: '/clipper', label: 'AI Clipper', icon: <Wand2 className="h-5 w-5" /> },
@@ -420,9 +422,9 @@ export function DashboardPage() {
       <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="rounded-2xl border border-ink-border bg-ink-panel p-6 lg:col-span-2">
           <div className="flex items-center justify-between gap-3">
-            <h2 className="text-lg font-semibold text-white">Top clips</h2>
+            <h2 className="text-lg font-semibold text-white">{t('topClips')}</h2>
             <Link to="/library" className="text-sm font-medium text-brand-light hover:underline">
-              View All →
+              {t('viewAll')} →
             </Link>
           </div>
           <p className="mt-1 text-xs text-[var(--color-text-muted)]">
@@ -471,15 +473,15 @@ export function DashboardPage() {
 
         <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
           <div className="flex items-center justify-between gap-3">
-            <h2 className="text-lg font-semibold text-white">Recent activity</h2>
+            <h2 className="text-lg font-semibold text-white">{t('recentActivity')}</h2>
             <Link to="/jobs" className="text-sm font-medium text-brand-light hover:underline">
-              View All →
+              {t('viewAll')} →
             </Link>
           </div>
           <div className="mt-4">
             {activity.length === 0 ? (
               <p className="text-sm text-[var(--color-text-muted)]">
-                No jobs yet — your latest jobs will show up here.
+                {t('noJobsYet')} — your latest jobs will show up here.
               </p>
             ) : (
               <ul className="divide-y divide-ink-border">
@@ -517,7 +519,7 @@ export function DashboardPage() {
           Ready jobs. Only values with at least 3 finished jobs qualify;
           anything less is honestly "not enough data yet". */}
       <div className="mt-4 rounded-2xl border border-ink-border bg-ink-panel p-6">
-        <h2 className="text-lg font-semibold text-white">What works best</h2>
+        <h2 className="text-lg font-semibold text-white">{t('whatWorksBest')}</h2>
         <p className="mt-1 text-xs text-[var(--color-text-muted)]">
           Average viral score from your own finished jobs — only settings
           used in at least 3 jobs are shown.

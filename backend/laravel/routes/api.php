@@ -4,6 +4,7 @@ use App\Http\Controllers\Api\V1\AdminController;
 use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\BrandAssetController;
 use App\Http\Controllers\Api\V1\ClipController;
+use App\Http\Controllers\Api\V1\CloudStorageController;
 use App\Http\Controllers\Api\V1\ExportController;
 use App\Http\Controllers\Api\V1\InsightsController;
 use App\Http\Controllers\Api\V1\JobController;
@@ -119,6 +120,12 @@ Route::prefix('v1')->group(function () {
         // --- Settings ---
         Route::get('/settings', [SettingsController::class, 'show']);
         Route::patch('/settings', [SettingsController::class, 'update']);
+
+        // --- Cloud storage (Batch 5: S3-compatible bucket settings) ---
+        Route::get('/cloud-storage', [CloudStorageController::class, 'show']);
+        Route::patch('/cloud-storage', [CloudStorageController::class, 'update']);
+        Route::post('/cloud-storage/test', [CloudStorageController::class, 'test'])
+            ->middleware('throttle:6,1');
 
         // --- Admin (role-gated) ---
         Route::prefix('admin')->middleware('admin')->group(function () {

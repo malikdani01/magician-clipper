@@ -7,6 +7,7 @@ use App\Models\Clip;
 use App\Models\ClipRerender;
 use App\Models\Project;
 use App\Models\UserSetting;
+use App\Support\MediaStorage;
 use App\Support\VideoProbe;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
@@ -16,6 +17,12 @@ use ZipArchive;
 
 class ClipController extends Controller
 {
+    /** The disk a clip's files live on (its own recorded disk). */
+    private function diskFor(Clip $clip)
+    {
+        return MediaStorage::disk($clip->disk ?? MediaStorage::DISK_LOCAL, $clip->job?->user);
+    }
+
     public function index(Request $request, Project $project)
     {
         $this->authorize('view', $project);
@@ -105,7 +112,7 @@ class ClipController extends Controller
         $skipped = 0;
         foreach ($clips as $clip) {
             if ($clip->output_path === null
-                || ! Storage::disk('local')->exists($clip->output_path)) {
+                || ! $this->diskFor($clip)->exists($clip->output_path)) {
                 $skipped++;
                 continue;
             }
@@ -132,6 +139,7 @@ class ClipController extends Controller
         }
 
         $usedNames = [];
+        $tempCopies = [];
         foreach ($included as $clip) {
             $base = preg_replace('/[^A-Za-z0-9._-]+/', '_', (string) ($clip->title ?? 'clip'));
             $base = trim($base, '._') ?: 'clip';
@@ -142,9 +150,20 @@ class ClipController extends Controller
                 $suffix++;
             }
             $usedNames[$name] = true;
-            $zip->addFile(Storage::disk('local')->path($clip->output_path), $name);
+            // Batch 5: a cloud clip has no local path — download a
+            // temp copy for the ZIP, then remove it again.
+            [$localPath, $isTemp] = MediaStorage::localPathFor(
+                $clip->disk ?? MediaStorage::DISK_LOCAL, $clip->output_path, $clip->job?->user
+            );
+            if ($isTemp) {
+                $tempCopies[] = $localPath;
+            }
+            $zip->addFile($localPath, $name);
         }
         $zip->close();
+        foreach ($tempCopies as $temp) {
+            @unlink($temp);
+        }
 
         return response()
             ->download($absolutePath, 'clips-'.time().'.zip', [
@@ -175,7 +194,7 @@ class ClipController extends Controller
             ], 404);
         }
 
-        if (! Storage::disk('local')->exists($clip->output_path)) {
+        if (! $this->diskFor($clip)->exists($clip->output_path)) {
             return response()->json([
                 'error' => 'file_removed',
                 'message' => 'This clip was rendered, but its file was removed when the server restarted. Create the job again from the same video to get fresh downloadable clips.',
@@ -184,7 +203,7 @@ class ClipController extends Controller
 
         $filename = ($clip->title ?? 'clip').'.mp4';
 
-        return Storage::disk('local')->download($clip->output_path, $filename);
+        return $this->diskFor($clip)->download($clip->output_path, $filename);
     }
 
     /**
@@ -198,14 +217,14 @@ class ClipController extends Controller
         $this->authorize('view', $clip);
 
         if ($clip->thumbnail_path === null
-            || ! Storage::disk('local')->exists($clip->thumbnail_path)) {
+            || ! $this->diskFor($clip)->exists($clip->thumbnail_path)) {
             return response()->json([
                 'error' => 'not_found',
                 'message' => 'This clip has no thumbnail yet.',
             ], 404);
         }
 
-        return Storage::disk('local')->response($clip->thumbnail_path);
+        return $this->diskFor($clip)->response($clip->thumbnail_path);
     }
 
     /**
@@ -229,7 +248,7 @@ class ClipController extends Controller
             ], 404);
         }
 
-        if (! Storage::disk('local')->exists($clip->output_path)) {
+        if (! $this->diskFor($clip)->exists($clip->output_path)) {
             return response()->json([
                 'error' => 'file_removed',
                 'message' => 'This clip was rendered, but its file was removed when the server restarted. Create the job again from the same video to get fresh downloadable clips.',
@@ -248,10 +267,11 @@ class ClipController extends Controller
         $relativePath = 'audio/'.$clip->id.'.m4a';
 
         // Reuse the cached extraction while it is at least as new as
-        // the clip file it came from.
+        // the clip file it came from. (The audio cache itself always
+        // lives on the local disk; only the clip may be on cloud.)
         if (Storage::disk('local')->exists($relativePath)
             && Storage::disk('local')->lastModified($relativePath)
-                >= Storage::disk('local')->lastModified($clip->output_path)) {
+                >= $this->diskFor($clip)->lastModified($clip->output_path)) {
             return Storage::disk('local')->download($relativePath, $filename);
         }
 
@@ -259,8 +279,17 @@ class ClipController extends Controller
         // instead of producing an empty file. (When ffprobe itself is
         // missing the check is skipped and ffmpeg's own failure below
         // reports the problem.)
-        $probe = VideoProbe::probe(Storage::disk('local')->path($clip->output_path));
+        // Batch 5: a cloud clip is downloaded to a temp file first —
+        // ffmpeg only reads local files.
+        [$clipPath, $isTemp] = MediaStorage::localPathFor(
+            $clip->disk ?? MediaStorage::DISK_LOCAL, $clip->output_path, $clip->job?->user
+        );
+        $probe = VideoProbe::probe($clipPath);
         if ($probe !== null && ! $probe['has_audio']) {
+            if ($isTemp) {
+                @unlink($clipPath);
+            }
+
             return response()->json([
                 'error' => 'not_found',
                 'message' => 'This clip has no audio track.',
@@ -270,12 +299,15 @@ class ClipController extends Controller
         Storage::disk('local')->makeDirectory('audio');
         $command = escapeshellcmd($ffmpeg)
             .' -y -v error -i '
-            .escapeshellarg(Storage::disk('local')->path($clip->output_path))
+            .escapeshellarg($clipPath)
             .' -vn -c:a aac -b:a 128k '
             .escapeshellarg(Storage::disk('local')->path($relativePath));
         $output = [];
         $exitCode = 0;
         exec($command, $output, $exitCode);
+        if ($isTemp) {
+            @unlink($clipPath);
+        }
 
         if ($exitCode !== 0
             || ! Storage::disk('local')->exists($relativePath)
@@ -436,14 +468,14 @@ class ClipController extends Controller
         }
 
         $path = $candidates[$index];
-        if (! is_string($path) || ! Storage::disk('local')->exists($path)) {
+        if (! is_string($path) || ! $this->diskFor($clip)->exists($path)) {
             return response()->json([
                 'error' => 'not_found',
                 'message' => 'Candidate frame file not found.',
             ], 404);
         }
 
-        return Storage::disk('local')->response($path, null, [
+        return $this->diskFor($clip)->response($path, null, [
             'Content-Type' => 'image/jpeg',
         ]);
     }

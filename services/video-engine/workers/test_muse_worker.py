@@ -2336,5 +2336,64 @@ class Batch4Tests(unittest.TestCase):
         self.assertNotIn("candidate_1", captured["files"])
 
 
+class Batch5Tests(unittest.TestCase):
+    """Batch 5 (2026-11-25): strip TMX/HTML tags from MyMemory
+    translations (Job #16's transcript showed `<bpt i="0" x="0"/>`
+    verbatim)."""
+
+    def _fake_response(self, translated_text: str):
+        body = json.dumps({
+            "responseData": {"translatedText": translated_text},
+            "responseStatus": 200}).encode()
+        resp = mock.MagicMock()
+        resp.read.return_value = body
+        resp.__enter__.return_value = resp
+        resp.__exit__.return_value = False
+        return resp
+
+    def test_tmx_tags_stripped_from_translation(self):
+        # The exact shape Job #16 showed: TMX tags around real words.
+        tagged = ('<bpt i="0" x="0"/> آپ ایک بار بنا سکتے ہیں '
+                  '<ept i="0" x="0"/> <bpt i="1" x="1"/> موسیقی سن سکتے ہیں')
+        with mock.patch.object(muse_worker.urllib.request, "urlopen",
+                               return_value=self._fake_response(tagged)):
+            got = muse_worker._mymemory_translate(
+                "you can make it once", "en", "ur")
+        self.assertIsNotNone(got)
+        assert got is not None
+        self.assertNotIn("<", got)
+        self.assertNotIn("bpt", got)
+        self.assertIn("آپ ایک بار بنا سکتے ہیں", got)
+        self.assertIn("موسیقی سن سکتے ہیں", got)
+        # No leftover double spaces where tags were removed.
+        self.assertNotIn("  ", got)
+
+    def test_translation_of_only_tags_is_a_failure(self):
+        with mock.patch.object(muse_worker.urllib.request, "urlopen",
+                               return_value=self._fake_response(
+                                   '<bpt i="0" x="0"/><ept i="0" x="0"/>')):
+            got = muse_worker._mymemory_translate(
+                "hello world", "en", "ur")
+        self.assertIsNone(got)
+
+    def test_clean_translation_passes_through_unchanged(self):
+        with mock.patch.object(muse_worker.urllib.request, "urlopen",
+                               return_value=self._fake_response("ہیلو دنیا")):
+            got = muse_worker._mymemory_translate(
+                "hello world", "en", "ur")
+        self.assertEqual(got, "ہیلو دنیا")
+
+    def test_translate_segments_strips_tags_end_to_end(self):
+        segments = [_segment(0.0, 5.0, "hello world")]
+        tagged = '<bpt i="0" x="0"/> ہیلو دنیا'
+        with mock.patch.object(muse_worker.urllib.request, "urlopen",
+                               return_value=self._fake_response(tagged)):
+            out, info = muse_worker.translate_segments(
+                segments, "ur", source_language="english")
+        self.assertEqual(info["status"], "ok")
+        self.assertEqual(out[0]["text"], "ہیلو دنیا")
+        self.assertNotIn("<", out[0]["text"])
+
+
 if __name__ == "__main__":
     unittest.main()

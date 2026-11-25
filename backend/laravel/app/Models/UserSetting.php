@@ -14,6 +14,10 @@ class UserSetting extends Model
     public const QUALITIES = ['draft', 'standard', 'high'];
     public const CAPTION_STYLES = ['punchy', 'word_pop', 'title_card', 'clean_subs', 'classic', 'karaoke', 'bounce', 'typewriter', 'sweep', 'neon', 'slam', 'outline', 'gradient', 'kinetic', 'glow_pop', 'word_zoom', 'word_fade', 'highlight_sweep', 'bounce_in', 'glitch_pop'];
 
+    /** Batch 5 (2026-11-25): appearance + language preferences. */
+    public const THEMES = ['dark', 'light'];
+    public const LANGUAGES = ['en', 'ur'];
+
     public const DEFAULTS = [
         'default_processing_mode' => 'balanced',
         'default_aspect_ratio' => '9:16',
@@ -21,6 +25,8 @@ class UserSetting extends Model
         'default_quality' => 'standard',
         'caption_style' => 'punchy',
         'notifications_enabled' => true,
+        'theme' => 'dark',
+        'language' => 'en',
     ];
 
     protected $fillable = [
@@ -31,6 +37,8 @@ class UserSetting extends Model
         'default_quality',
         'caption_style',
         'notifications_enabled',
+        'theme',
+        'language',
     ];
 
     protected function casts(): array

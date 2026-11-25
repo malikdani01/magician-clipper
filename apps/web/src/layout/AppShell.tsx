@@ -10,38 +10,43 @@ import {
   LayoutDashboard,
   ListVideo,
   Menu,
+  Moon,
   Palette,
   PlusCircle,
   Scissors,
   Search,
   Settings,
+  Sun,
   Video,
   Wand2,
   WandSparkles,
 } from 'lucide-react'
 import { NotificationsBell } from '../components/NotificationsBell'
 import { useAuth } from '../state/auth'
+import { usePreferences } from '../state/preferences'
 import { useProjectSearch } from '../state/search'
+import type { TranslationKey } from '../lib/i18n'
 
-const NAV_ITEMS = [
-  { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
-  { to: '/create', label: 'Create Project', icon: FolderPlus },
-  { to: '/projects', label: 'My Projects', icon: Folder },
-  { to: '/library', label: 'Video Library', icon: Video },
-  { to: '/clipper', label: 'AI Clipper', icon: Wand2 },
-  { to: '/jobs/new', label: 'New Job', icon: PlusCircle },
-  { to: '/jobs', label: 'My Jobs', icon: ListVideo },
-  { to: '/editor', label: 'Studio Editor', icon: Scissors },
-  { to: '/captions', label: 'Captions Studio', icon: Captions },
-  { to: '/brand-kit', label: 'Brand Kit', icon: Palette },
-  { to: '/exports', label: 'Export History', icon: History },
-  { to: '/usage', label: 'Usage & Credits', icon: CreditCard },
-  { to: '/settings', label: 'Settings', icon: Settings },
-  { to: '/help', label: 'Help & Support', icon: HelpCircle },
+const NAV_ITEMS: { to: string; labelKey: TranslationKey; icon: typeof LayoutDashboard; end?: boolean }[] = [
+  { to: '/', labelKey: 'navDashboard', icon: LayoutDashboard, end: true },
+  { to: '/create', labelKey: 'navCreateProject', icon: FolderPlus },
+  { to: '/projects', labelKey: 'navMyProjects', icon: Folder },
+  { to: '/library', labelKey: 'navVideoLibrary', icon: Video },
+  { to: '/clipper', labelKey: 'navAiClipper', icon: Wand2 },
+  { to: '/jobs/new', labelKey: 'navNewJob', icon: PlusCircle },
+  { to: '/jobs', labelKey: 'navMyJobs', icon: ListVideo },
+  { to: '/editor', labelKey: 'navStudioEditor', icon: Scissors },
+  { to: '/captions', labelKey: 'navCaptionsStudio', icon: Captions },
+  { to: '/brand-kit', labelKey: 'navBrandKit', icon: Palette },
+  { to: '/exports', labelKey: 'navExportHistory', icon: History },
+  { to: '/usage', labelKey: 'navUsageCredits', icon: CreditCard },
+  { to: '/settings', labelKey: 'navSettings', icon: Settings },
+  { to: '/help', labelKey: 'navHelpSupport', icon: HelpCircle },
 ] as const
 
 function Sidebar({ mobileOpen, onClose }: { mobileOpen: boolean; onClose: () => void }) {
   const { user, loading } = useAuth()
+  const { t } = usePreferences()
   // While the stored session is still being verified, show a loading
   // state — never the guest UI. Rendering "Guest User" + Sign in /
   // Register for a signed-in user (even for a second) is the flash
@@ -88,7 +93,7 @@ function Sidebar({ mobileOpen, onClose }: { mobileOpen: boolean; onClose: () => 
             }
           >
             <item.icon className="h-4 w-4 shrink-0" />
-            {item.label}
+            {t(item.labelKey)}
           </NavLink>
         ))}
       </nav>
@@ -104,7 +109,7 @@ function Sidebar({ mobileOpen, onClose }: { mobileOpen: boolean; onClose: () => 
               </span>
               <span className="min-w-0 leading-tight">
                 <span className="block truncate text-sm font-semibold text-white">
-                  {user?.name ?? 'Guest User'}
+                  {user?.name ?? t('guestUser')}
                 </span>
                 <span className="block truncate text-xs capitalize text-[var(--color-text-muted)]">
                   {user ? `${user.plan} Plan` : 'Free Plan · not signed in'}
@@ -116,7 +121,7 @@ function Sidebar({ mobileOpen, onClose }: { mobileOpen: boolean; onClose: () => 
                 to="/settings"
                 className="mt-3 block rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2 text-center text-xs font-medium text-white hover:bg-ink-border"
               >
-                Account settings
+                {t('accountSettings')}
               </Link>
             ) : (
               <div className="mt-3 flex gap-2">
@@ -124,13 +129,13 @@ function Sidebar({ mobileOpen, onClose }: { mobileOpen: boolean; onClose: () => 
                   to="/login"
                   className="flex-1 rounded-xl btn-aurora px-3 py-2 text-center text-xs font-semibold text-white"
                 >
-                  Sign in
+                  {t('signIn')}
                 </Link>
                 <Link
                   to="/register"
                   className="flex-1 rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2 text-center text-xs font-medium text-white hover:bg-ink-border"
                 >
-                  Register
+                  {t('register')}
                 </Link>
               </div>
             )}
@@ -145,6 +150,7 @@ function Sidebar({ mobileOpen, onClose }: { mobileOpen: boolean; onClose: () => 
 function TopBar({ onMenuClick }: { onMenuClick: () => void }) {
   const { query, setQuery } = useProjectSearch()
   const { user, loading } = useAuth()
+  const { theme, language, setTheme, setLanguage, t } = usePreferences()
   const location = useLocation()
   const searchVisible = location.pathname === '/projects'
   const initial = loading ? '…' : (user?.name ?? 'G').trim().charAt(0).toUpperCase() || 'G'
@@ -166,7 +172,7 @@ function TopBar({ onMenuClick }: { onMenuClick: () => void }) {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder={
-            searchVisible ? 'Search projects…' : 'Search projects, videos… (filters My Projects)'
+            searchVisible ? t('searchJobs') : t('searchPlaceholder')
           }
           aria-label="Search projects"
           className="w-full rounded-xl border border-ink-border bg-ink-panel2 py-2.5 pl-10 pr-4 text-sm text-white placeholder:text-[var(--color-text-muted)] focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand"
@@ -174,13 +180,32 @@ function TopBar({ onMenuClick }: { onMenuClick: () => void }) {
       </div>
 
       <div className="ml-auto flex items-center gap-3">
+        {/* Batch 5: theme + language toggles (persisted per user). */}
+        <button
+          type="button"
+          onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+          aria-label={theme === 'dark' ? t('themeToggleLight') : t('themeToggleDark')}
+          title={theme === 'dark' ? t('themeToggleLight') : t('themeToggleDark')}
+          className="flex h-10 w-10 items-center justify-center rounded-xl border border-ink-border bg-ink-panel2 text-white hover:bg-ink-border"
+        >
+          {theme === 'dark' ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
+        </button>
+        <button
+          type="button"
+          onClick={() => setLanguage(language === 'en' ? 'ur' : 'en')}
+          aria-label={t('languageToggle')}
+          title={t('languageToggle')}
+          className="flex h-10 items-center justify-center rounded-xl border border-ink-border bg-ink-panel2 px-3 text-xs font-bold text-white hover:bg-ink-border"
+        >
+          {language === 'en' ? 'UR' : 'EN'}
+        </button>
         <Link
           to="/usage"
           title="Upgrades are not enabled — billing does not exist yet"
           className="btn-aurora hidden items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold text-white transition-colors sm:flex"
         >
           <Wand2 className="h-4 w-4" />
-          Upgrade Plan
+          {t('upgradePlan')}
         </Link>
         <NotificationsBell />
         <Link

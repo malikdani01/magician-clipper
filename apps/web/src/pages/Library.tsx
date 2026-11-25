@@ -8,6 +8,7 @@ import { ClipPlayerModal } from '../components/ClipPlayerModal'
 import { ClipThumbnail } from '../components/ClipThumbnail'
 import { ScoreBreakdown } from '../components/ScoreBreakdown'
 import { useProjects, getProjectFile, getProjectVideoUrl } from '../state/projects'
+import { usePreferences } from '../state/preferences'
 import { downloadClip, downloadClipAudio, downloadClipsZip, listJobs, type Job, type JobClip } from '../lib/jobs'
 import { formatBytes } from '../lib/format'
 import { formatDuration } from '../lib/format'
@@ -39,6 +40,7 @@ export function LibraryPage() {
   const [tab, setTab] = useState<LibraryTab>('all')
   const [query, setQuery] = useState('')
   const { projects } = useProjects()
+  const { t } = usePreferences()
   const [jobs, setJobs] = useState<Job[]>([])
   const [downloadingId, setDownloadingId] = useState<number | null>(null)
   const [downloadError, setDownloadError] = useState<string | null>(null)
@@ -202,7 +204,7 @@ export function LibraryPage() {
 
   return (
     <div>
-      <PageHeader title="Video Library" subtitle="Your uploaded and generated media." />
+      <PageHeader title={t('libraryTitle')} subtitle={t('librarySubtitle')} />
 
       <div className="mb-5 flex flex-wrap items-center gap-3">
         <div className="flex gap-2" role="tablist" aria-label="Library sections">
@@ -229,7 +231,7 @@ export function LibraryPage() {
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search files…"
+            placeholder={t('searchLibrary')}
             aria-label="Search files"
             className="w-64 rounded-xl border border-ink-border bg-ink-panel py-2.5 pl-10 pr-4 text-sm text-white placeholder:text-[var(--color-text-muted)] focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand"
           />
@@ -267,7 +269,7 @@ export function LibraryPage() {
               onChange={(e) => setFavouritesOnly(e.target.checked)}
               className="h-4 w-4 accent-[#7c3aed]"
             />
-            Favourites only
+            {t('favouritesOnly')}
           </label>
           <span className="text-xs text-[var(--color-text-muted)]">
             {filteredClips.length} clip{filteredClips.length === 1 ? '' : 's'}

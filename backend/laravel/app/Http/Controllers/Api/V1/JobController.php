@@ -7,6 +7,7 @@ use App\Models\MediaAsset;
 use App\Models\ProcessingJob;
 use App\Models\Project;
 use App\Support\JobSettingsRules;
+use App\Support\MediaStorage;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -145,13 +146,20 @@ class JobController extends Controller
             $extension = strtolower($file->getClientOriginalExtension());
             $storedFilename = Str::uuid()->toString().'.'.$extension;
             $relativePath = 'uploads/'.$storedFilename;
-            Storage::disk('local')->putFileAs('uploads', $file, $storedFilename);
-            $absolutePath = Storage::disk('local')->path($relativePath);
+            // Batch 5: the source goes to the user's disk — local as
+            // before, or their cloud bucket when configured + enabled.
+            $diskName = MediaStorage::diskNameFor($user);
+            $disk = MediaStorage::disk($diskName, $user);
+            $disk->putFileAs('uploads', $file, $storedFilename);
+            [$absolutePath, $isTemp] = MediaStorage::localPathFor($diskName, $relativePath, $user);
 
             // Validate the upload is a real playable video (spec §13).
             $probe = $this->probeVideo($absolutePath);
+            if ($isTemp) {
+                @unlink($absolutePath);
+            }
             if ($probe === null) {
-                Storage::disk('local')->delete($relativePath);
+                $disk->delete($relativePath);
 
                 return response()->json([
                     'error' => 'validation_error',
@@ -210,6 +218,10 @@ class JobController extends Controller
             'source_type' => $sourceType,
             'source_url' => $sourceUrl,
             'source_path' => $sourcePath,
+            // Batch 5: the disk the source lives on (local, or the
+            // user's cloud bucket). Link jobs have no file; 'local'
+            // is the harmless default there.
+            'disk' => $diskName ?? MediaStorage::DISK_LOCAL,
         ]);
 
         return response()->json(['job' => $job->fresh()->toUserArray()], 201);
@@ -272,12 +284,15 @@ class JobController extends Controller
         }
 
         $jobs = [];
+        // Batch 5: bulk sources go to the user's disk, like single jobs.
+        $diskName = MediaStorage::diskNameFor($user);
+        $disk = MediaStorage::disk($diskName, $user);
         foreach ($files as $index => $file) {
             $probe = $probes[$index];
             $extension = strtolower($file->getClientOriginalExtension());
             $storedFilename = Str::uuid()->toString().'.'.$extension;
             $relativePath = 'uploads/'.$storedFilename;
-            Storage::disk('local')->putFileAs('uploads', $file, $storedFilename);
+            $disk->putFileAs('uploads', $file, $storedFilename);
 
             $jobProject = $project ?? $user->projects()->create([
                 'title' => $validated['title'] ?? pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME),
@@ -317,6 +332,7 @@ class JobController extends Controller
                 'source_type' => 'upload',
                 'source_url' => null,
                 'source_path' => $relativePath,
+                'disk' => $diskName,
             ]);
             $jobs[] = $job->fresh()->toUserArray();
         }

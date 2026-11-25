@@ -2,6 +2,7 @@ import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { AdminLayout } from './layout/AdminLayout'
 import { AppShell } from './layout/AppShell'
 import { AuthProvider } from './state/auth'
+import { PreferencesProvider } from './state/preferences'
 import { ProjectProvider } from './state/projects'
 import { SearchProvider } from './state/search'
 import { BrandKitPage } from './pages/BrandKit'
@@ -30,6 +31,7 @@ export function App() {
       <SearchProvider>
         <ProjectProvider>
           <AuthProvider>
+            <PreferencesProvider>
             <Routes>
               {/* Auth pages — outside the app shell (no sidebar). */}
               <Route path="login" element={<LoginPage />} />
@@ -89,6 +91,7 @@ export function App() {
 
           <Route path="*" element={<NotFoundPage />} />
             </Routes>
+            </PreferencesProvider>
           </AuthProvider>
         </ProjectProvider>
       </SearchProvider>

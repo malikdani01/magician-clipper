@@ -883,6 +883,15 @@ def _mymemory_translate(text: str, source: str, target: str) -> str | None:
         return None
     data = payload.get("responseData") or {}
     translated = (data.get("translatedText") or "").strip()
+    # Batch 5 (2026-11-25): MyMemory sometimes returns TMX markup
+    # inside translatedText (e.g. `<bpt i="0" x="0"/>` — Job #16's
+    # transcript showed it verbatim). Strip every <...> tag and
+    # collapse the leftover double spaces, so captions and the
+    # transcript excerpt never show raw markup. If nothing readable
+    # remains, treat it as a failed translation (caller falls back
+    # to the original text).
+    translated = re.sub(r"<[^>]+>", "", translated)
+    translated = re.sub(r"\s+", " ", translated).strip()
     if not translated:
         return None
     return translated

@@ -8,17 +8,20 @@ import { StatCard } from '../components/StatCard'
 import { formatDuration } from '../lib/format'
 import { listJobs, type Job, type JobStatus } from '../lib/jobs'
 import { useAuth } from '../state/auth'
+import { usePreferences } from '../state/preferences'
 import { useProjects } from '../state/projects'
 
 type StatusFilter = JobStatus | 'all'
 
-const FILTERS: Array<{ id: StatusFilter; label: string }> = [
-  { id: 'all', label: 'All jobs' },
-  { id: 'queued', label: 'Queued' },
-  { id: 'processing', label: 'Processing' },
-  { id: 'ready', label: 'Ready' },
-  { id: 'failed', label: 'Failed' },
-  { id: 'cancelled', label: 'Cancelled' },
+import type { TranslationKey } from '../lib/i18n'
+
+const FILTERS: Array<{ id: StatusFilter; labelKey: TranslationKey }> = [
+  { id: 'all', labelKey: 'allStatuses' },
+  { id: 'queued', labelKey: 'queued' },
+  { id: 'processing', labelKey: 'processing' },
+  { id: 'ready', labelKey: 'ready' },
+  { id: 'failed', labelKey: 'failed' },
+  { id: 'cancelled', labelKey: 'cancelled' },
 ]
 
 function formatCreatedAt(iso: string): string {
@@ -44,6 +47,7 @@ function sourceLabel(job: Job): string {
  */
 export function JobsPage() {
   const { user, loading: authLoading } = useAuth()
+  const { t } = usePreferences()
   const [filter, setFilter] = useState<StatusFilter>('all')
   const [jobs, setJobs] = useState<Job[]>([])
   const [total, setTotal] = useState(0)
@@ -127,14 +131,14 @@ export function JobsPage() {
   return (
     <div>
       <PageHeader
-        title="My Jobs"
-        subtitle="Every clipping job you created, with its real status."
+        title={t('jobsTitle')}
+        subtitle={t('jobsSubtitle')}
         actions={
           <Link
             to="/jobs/new"
             className="rounded-xl btn-aurora px-4 py-2.5 text-sm font-semibold text-white"
           >
-            + New Job
+            + {t('newJobTitle')}
           </Link>
         }
       />
@@ -168,7 +172,7 @@ export function JobsPage() {
       ) : (
         <>
           <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <StatCard label="Total jobs" value={String(total)} icon={<Briefcase className="h-6 w-6" />} />
+            <StatCard label={t('statJobs')} value={String(total)} icon={<Briefcase className="h-6 w-6" />} />
             <StatCard
               label="Active (queued + processing)"
               value={String(activeCount)}
@@ -176,13 +180,13 @@ export function JobsPage() {
               accent="#7c3aed"
             />
             <StatCard
-              label="Ready"
+              label={t('ready')}
               value={String(readyCount)}
               icon={<CheckCircle2 className="h-6 w-6" />}
               accent="#059669"
             />
             <StatCard
-              label="Failed"
+              label={t('failed')}
               value={String(failedCount)}
               icon={<XCircle className="h-6 w-6" />}
               accent="#dc2626"
@@ -196,14 +200,14 @@ export function JobsPage() {
                 type="search"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search by job # or project title…"
+                placeholder={t('searchJobs')}
                 aria-label="Search jobs by job number or project title"
                 className="w-72 rounded-xl border border-ink-border bg-ink-panel py-2.5 pl-10 pr-4 text-sm text-white placeholder:text-[var(--color-text-muted)] focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand"
               />
             </div>
             {searching ? (
               <p className="text-xs text-[var(--color-text-muted)]">
-                Showing {filteredJobs.length} of {jobs.length} loaded job
+                {t('showingJobs')} {filteredJobs.length} of {jobs.length} loaded job
                 {jobs.length === 1 ? '' : 's'} — search covers loaded jobs only.
               </p>
             ) : null}
@@ -222,7 +226,7 @@ export function JobsPage() {
                     : 'border-ink-border bg-ink-panel2 text-white hover:border-brand/60'
                 }`}
               >
-                {f.label}
+                {t(f.labelKey)}
               </button>
             ))}
           </div>

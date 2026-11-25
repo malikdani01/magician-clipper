@@ -138,6 +138,9 @@ class ProcessingJob extends Model
         'source_type',
         'source_url',
         'source_path',
+        // Batch 5: which disk the source file lives on ('local' or
+        // 'cloud'). Defaults to 'local'.
+        'disk',
         'started_at',
         'finished_at',
     ];

@@ -14,6 +14,7 @@ import {
   Globe,
   LayoutDashboard,
   Menu,
+  Moon,
   RefreshCw,
   ScrollText,
   Search,
@@ -21,6 +22,7 @@ import {
   Settings,
   ShieldCheck,
   SlidersHorizontal,
+  Sun,
   Terminal,
   Users,
   Wallet,
@@ -31,6 +33,7 @@ import { AdminRoute } from '../components/AdminRoute'
 import { NotificationsBell } from '../components/NotificationsBell'
 import { API_URL, engineHealth, getToken, type EngineHealth } from '../lib/api'
 import { useAuth } from '../state/auth'
+import { usePreferences } from '../state/preferences'
 
 /** The 21 admin nav items (prompt §8). */
 const ADMIN_NAV_ITEMS = [
@@ -61,6 +64,8 @@ export function AdminLayout() {
   const { user, loading } = useAuth()
   const isAdmin = user?.role === 'admin'
   const navigate = useNavigate()
+  // Batch 5: same theme + language toggles as the user-panel header.
+  const { theme, language, setTheme, setLanguage, t } = usePreferences()
   const [search, setSearch] = useState('')
   const [engine, setEngine] = useState<EngineHealth | null>(null)
   // Real sidebar badge counts (in-flight jobs, failed jobs) from the
@@ -226,6 +231,24 @@ export function AdminLayout() {
           </form>
 
           <div className="ml-auto flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+              aria-label={theme === 'dark' ? t('themeToggleLight') : t('themeToggleDark')}
+              title={theme === 'dark' ? t('themeToggleLight') : t('themeToggleDark')}
+              className="flex h-10 w-10 items-center justify-center rounded-xl border border-ink-border bg-ink-panel2 text-white hover:bg-ink-border"
+            >
+              {theme === 'dark' ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
+            </button>
+            <button
+              type="button"
+              onClick={() => setLanguage(language === 'en' ? 'ur' : 'en')}
+              aria-label={t('languageToggle')}
+              title={t('languageToggle')}
+              className="flex h-10 items-center justify-center rounded-xl border border-ink-border bg-ink-panel2 px-3 text-xs font-bold text-white hover:bg-ink-border"
+            >
+              {language === 'en' ? 'UR' : 'EN'}
+            </button>
             <span
               className={`hidden items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold sm:flex ${
                 engine?.ok

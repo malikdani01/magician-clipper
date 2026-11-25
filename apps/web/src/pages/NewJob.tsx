@@ -47,6 +47,7 @@ import {
 } from '../lib/presets'
 import { formatBytes } from '../lib/format'
 import { useAuth } from '../state/auth'
+import { usePreferences } from '../state/preferences'
 
 const VIDEO_EXTENSIONS = ['mp4', 'mov', 'mkv', 'webm']
 
@@ -156,6 +157,7 @@ const numberClass =
  */
 export function NewJobPage() {
   const { user, token, loading: authLoading } = useAuth()
+  const { t } = usePreferences()
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const inputRef = useRef<HTMLInputElement>(null)
@@ -669,7 +671,7 @@ export function NewJobPage() {
     return (
       <div>
         <PageHeader
-          title="New Job"
+          title={t('newJobTitle')}
           subtitle="Checking sign-in…"
         />
         <div className="flex items-center gap-3 rounded-2xl border border-ink-border bg-ink-panel p-6 text-sm text-white">
@@ -684,8 +686,8 @@ export function NewJobPage() {
     return (
       <div>
         <PageHeader
-          title="New Job"
-          subtitle="Turn a long video into short clips."
+          title={t('newJobTitle')}
+          subtitle={t('newJobSubtitle')}
         />
         <EmptyState
           title="Sign in to create a job"
@@ -719,14 +721,14 @@ export function NewJobPage() {
   return (
     <div>
       <PageHeader
-        title="AI Clipper"
-        subtitle="Let AI find the best moments in your video"
+        title={t('newJobTitle')}
+        subtitle={t('newJobSubtitle')}
         actions={
           <Link
             to="/jobs"
             className="rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white hover:bg-ink-border"
           >
-            My Jobs
+            {t('navMyJobs')}
           </Link>
         }
       />
@@ -897,16 +899,16 @@ export function NewJobPage() {
         <div className="space-y-4 xl:col-span-2">
           {/* Source */}
           <section className="rounded-2xl border border-ink-border bg-ink-panel p-6">
-            <h2 className="text-lg font-semibold text-white">Source video</h2>
+            <h2 className="text-lg font-semibold text-white">{t('sourceVideo')}</h2>
             <div className="mt-4 flex gap-2" role="tablist" aria-label="Source type">
               <ChoiceButton selected={sourceTab === 'upload'} onClick={() => setSourceTab('upload')}>
                 <span className="flex items-center gap-2">
-                  <Upload className="h-4 w-4" /> Upload a file
+                  <Upload className="h-4 w-4" /> {t('uploadVideo')}
                 </span>
               </ChoiceButton>
               <ChoiceButton selected={sourceTab === 'link'} onClick={() => setSourceTab('link')}>
                 <span className="flex items-center gap-2">
-                  <Link2 className="h-4 w-4" /> Paste a link
+                  <Link2 className="h-4 w-4" /> {t('pasteLink')}
                 </span>
               </ChoiceButton>
             </div>
@@ -1016,7 +1018,7 @@ export function NewJobPage() {
             ) : (
               <div className="mt-4">
                 <label className="block">
-                  <span className="text-sm font-medium text-white">Video link</span>
+                  <span className="text-sm font-medium text-white">{t('videoLink')}</span>
                   <input
                     type="url"
                     value={link}
@@ -1044,7 +1046,7 @@ export function NewJobPage() {
 
             <div className="mt-6 grid grid-cols-1 gap-6 md:grid-cols-2">
               <fieldset>
-                <legend className="text-sm font-medium text-white">Platform</legend>
+                <legend className="text-sm font-medium text-white">{t('platform')}</legend>
                 <div className="mt-2 flex flex-wrap gap-2">
                   {PLATFORMS.map((p) => (
                     <ChoiceButton
@@ -1059,7 +1061,7 @@ export function NewJobPage() {
               </fieldset>
 
               <fieldset>
-                <legend className="text-sm font-medium text-white">Aspect ratio</legend>
+                <legend className="text-sm font-medium text-white">{t('aspectRatio')}</legend>
                 <div className="mt-2 flex flex-wrap gap-2">
                   {ASPECT_RATIOS.map((a) => (
                     <ChoiceButton
@@ -1074,7 +1076,7 @@ export function NewJobPage() {
               </fieldset>
 
               <label className="block">
-                <span className="text-sm font-medium text-white">Number of clips</span>
+                <span className="text-sm font-medium text-white">{t('clipCount')}</span>
                 <input
                   type="number"
                   inputMode="numeric"
@@ -1092,7 +1094,7 @@ export function NewJobPage() {
               </label>
 
               <fieldset>
-                <legend className="text-sm font-medium text-white">Clip duration</legend>
+                <legend className="text-sm font-medium text-white">{t('clipDuration')}</legend>
                 <div className="mt-2 flex flex-wrap gap-2">
                   {(['exact', 'minimum', 'maximum'] as const).map((m) => (
                     <ChoiceButton
@@ -1190,7 +1192,7 @@ export function NewJobPage() {
                   </select>
                 </label>
                 <label className="mt-3 block">
-                  <span className="text-sm font-medium text-white">Caption style</span>
+                  <span className="text-sm font-medium text-white">{t('captionStyle')}</span>
                   <select
                     aria-label="Caption style"
                     value={captionStyle}
@@ -1245,7 +1247,7 @@ export function NewJobPage() {
               </label>
 
               <label className="block">
-                <span className="text-sm font-medium text-white">Caption position</span>
+                <span className="text-sm font-medium text-white">{t('captionPosition')}</span>
                 <select
                   value={captionPosition}
                   onChange={(e) => setCaptionPosition(e.target.value as CaptionPosition)}
@@ -1465,7 +1467,7 @@ export function NewJobPage() {
               </label>
 
               <fieldset className="md:col-span-2">
-                <legend className="text-sm font-medium text-white">Job type</legend>
+                <legend className="text-sm font-medium text-white">{t('jobType')}</legend>
                 <div className="mt-2 flex flex-wrap gap-2">
                   <ChoiceButton selected={jobType === 'myself'} onClick={() => setJobType('myself')}>
                     For myself
@@ -1476,7 +1478,7 @@ export function NewJobPage() {
                 </div>
                 {jobType === 'campaign' ? (
                   <label className="mt-3 block">
-                    <span className="text-sm font-medium text-white">Campaign requirements</span>
+                    <span className="text-sm font-medium text-white">{t('campaignRequirements')}</span>
                     <textarea
                       value={campaignRequirements}
                       onChange={(e) => setCampaignRequirements(e.target.value)}
@@ -1493,7 +1495,7 @@ export function NewJobPage() {
               </fieldset>
 
               <label className="block md:col-span-2">
-                <span className="text-sm font-medium text-white">Notes for Muse</span>
+                <span className="text-sm font-medium text-white">{t('notes')}</span>
                 <textarea
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
@@ -1535,7 +1537,7 @@ export function NewJobPage() {
                   <ArrowRight className="h-4 w-4" />
                 )}
                 {submitting
-                  ? 'Creating job…'
+                  ? t('createJob')
                   : sourceTab === 'upload' && bulkMode
                     ? `Create ${bulkFiles.length} job${bulkFiles.length === 1 ? '' : 's'} →`
                     : 'Analyze Video →'}

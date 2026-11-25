@@ -1,22 +1,26 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Bell, CreditCard, HardDrive, ShieldCheck, SlidersHorizontal, User } from 'lucide-react'
+import { Bell, Cloud, CreditCard, HardDrive, ShieldCheck, SlidersHorizontal, User } from 'lucide-react'
 import { API_URL } from '../lib/api'
 import { formatBytes } from '../lib/format'
 import { useAuth } from '../state/auth'
 import { useProjects } from '../state/projects'
 import { NotImplemented } from '../components/NotImplemented'
+import { CloudStorageForm } from '../components/CloudStorageForm'
+import { LANGUAGES, THEMES, type TranslationKey } from '../lib/i18n'
+import { usePreferences } from '../state/preferences'
 import { PageHeader } from '../components/PageHeader'
 
-type SettingsTab = 'profile' | 'security' | 'notifications' | 'preferences' | 'storage' | 'billing'
+type SettingsTab = 'profile' | 'security' | 'notifications' | 'preferences' | 'storage' | 'cloud' | 'billing'
 
-const TABS: { id: SettingsTab; label: string; icon: typeof User }[] = [
-  { id: 'profile', label: 'Profile', icon: User },
-  { id: 'security', label: 'Security', icon: ShieldCheck },
-  { id: 'notifications', label: 'Notifications', icon: Bell },
-  { id: 'preferences', label: 'Preferences', icon: SlidersHorizontal },
-  { id: 'storage', label: 'Storage', icon: HardDrive },
-  { id: 'billing', label: 'Billing', icon: CreditCard },
+const TABS: { id: SettingsTab; labelKey: TranslationKey; icon: typeof User }[] = [
+  { id: 'profile', labelKey: 'tabProfile', icon: User },
+  { id: 'security', labelKey: 'tabSecurity', icon: ShieldCheck },
+  { id: 'notifications', labelKey: 'tabNotifications', icon: Bell },
+  { id: 'preferences', labelKey: 'tabPreferences', icon: SlidersHorizontal },
+  { id: 'storage', labelKey: 'tabStorage', icon: HardDrive },
+  { id: 'cloud', labelKey: 'tabCloudStorage', icon: Cloud },
+  { id: 'billing', labelKey: 'tabBilling', icon: CreditCard },
 ]
 
 const LOCAL_KEY = 'magician-clipper.settings.v1'
@@ -73,6 +77,7 @@ const inputClass =
  */
 export function SettingsPage() {
   const { user, token, refreshUser } = useAuth()
+  const { theme, language, setTheme, setLanguage, t } = usePreferences()
   const { projects } = useProjects()
   const [tab, setTab] = useState<SettingsTab>('profile')
   const [local, setLocal] = useState<LocalSettings>(loadLocal)
@@ -160,7 +165,7 @@ export function SettingsPage() {
 
   return (
     <div>
-      <PageHeader title="Settings" subtitle="Manage your account settings." />
+      <PageHeader title={t('settingsTitle')} subtitle={t('settingsSubtitle')} />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-4">
         <div className="lg:col-span-1">
@@ -169,21 +174,21 @@ export function SettingsPage() {
             role="tablist"
             aria-label="Settings sections"
           >
-            {TABS.map((t) => (
+            {TABS.map((tabItem) => (
               <button
-                key={t.id}
+                key={tabItem.id}
                 type="button"
                 role="tab"
-                aria-selected={tab === t.id}
-                onClick={() => setTab(t.id)}
+                aria-selected={tab === tabItem.id}
+                onClick={() => setTab(tabItem.id)}
                 className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm font-medium transition-colors ${
-                  tab === t.id
+                  tab === tabItem.id
                     ? 'bg-brand text-white'
                     : 'text-[var(--color-text-muted)] hover:bg-ink-panel2 hover:text-white'
                 }`}
               >
-                <t.icon className="h-4 w-4 shrink-0" />
-                {t.label}
+                <tabItem.icon className="h-4 w-4 shrink-0" />
+                {t(tabItem.labelKey)}
               </button>
             ))}
           </div>
@@ -330,6 +335,42 @@ export function SettingsPage() {
               Saved in this browser — account sync pending (sign in).
             </p>
             <div className="mt-5 space-y-4">
+              <div className="rounded-xl border border-ink-border bg-ink-panel2 px-4 py-3">
+                <h3 className="text-sm font-semibold text-white">{t('appearance')}</h3>
+                <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <label className="block">
+                    <span className="text-sm font-medium text-white">{t('themeLabel')}</span>
+                    <select
+                      value={theme}
+                      onChange={(e) => setTheme(e.target.value as 'dark' | 'light')}
+                      className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none"
+                    >
+                      {THEMES.map((th) => (
+                        <option key={th.id} value={th.id}>
+                          {t(th.labelKey)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="block">
+                    <span className="text-sm font-medium text-white">{t('languageLabel')}</span>
+                    <select
+                      value={language}
+                      onChange={(e) => setLanguage(e.target.value as 'en' | 'ur')}
+                      className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none"
+                    >
+                      {LANGUAGES.map((lang) => (
+                        <option key={lang.id} value={lang.id}>
+                          {lang.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                  Saved to your account when you are signed in, and in this browser otherwise.
+                </p>
+              </div>
               <label className="block">
                 <span className="text-sm font-medium text-white">Default export format</span>
                 <select
@@ -382,6 +423,10 @@ export function SettingsPage() {
                 : 'Counted from the real file sizes of your projects in this browser.'}
             </p>
           </div>
+        ) : null}
+
+        {tab === 'cloud' ? (
+          <CloudStorageForm />
         ) : null}
 
         {tab === 'billing' ? (

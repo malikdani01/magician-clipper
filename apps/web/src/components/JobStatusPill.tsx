@@ -1,4 +1,6 @@
 import type { JobStatus } from '../lib/jobs'
+import type { TranslationKey } from '../lib/i18n'
+import { usePreferences } from '../state/preferences'
 
 const PILL_STYLES: Record<JobStatus, string> = {
   queued: 'border-amber-400/40 bg-amber-400/10 text-amber-300',
@@ -8,15 +10,17 @@ const PILL_STYLES: Record<JobStatus, string> = {
   cancelled: 'border-ink-border bg-ink-panel2 text-[var(--color-text-muted)]',
 }
 
-const PILL_LABELS: Record<JobStatus, string> = {
-  queued: 'Queued',
-  processing: 'Processing',
-  ready: 'Ready',
-  failed: 'Failed',
-  cancelled: 'Cancelled',
+/** Status labels go through the UI language (Roman Urdu when on). */
+const PILL_LABELS: Record<JobStatus, TranslationKey> = {
+  queued: 'queued',
+  processing: 'processing',
+  ready: 'ready',
+  failed: 'failed',
+  cancelled: 'cancelled',
 }
 
 export function JobStatusPill({ status }: { status: JobStatus }) {
+  const { t } = usePreferences()
   return (
     <span
       className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-semibold ${PILL_STYLES[status]}`}
@@ -24,7 +28,7 @@ export function JobStatusPill({ status }: { status: JobStatus }) {
       {status === 'processing' || status === 'queued' ? (
         <span className="live-dot" aria-hidden="true" />
       ) : null}
-      {PILL_LABELS[status]}
+      {t(PILL_LABELS[status])}
     </span>
   )
 }

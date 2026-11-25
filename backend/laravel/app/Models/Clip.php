@@ -33,6 +33,10 @@ class Clip extends Model
         'aspect_ratio',
         'status',
         'output_path',
+        // Batch 5: which disk the clip's files live on ('local' or
+        // 'cloud'). Defaults to 'local' — every existing clip keeps
+        // working untouched.
+        'disk',
         'thumbnail_path',
         // Batch 4: up to 3 worker-extracted frames for the thumbnail
         // picker (null on clips rendered before the picker existed),

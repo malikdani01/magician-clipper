@@ -46,6 +46,7 @@ import {
   type ClipSpec,
   type ProjectRecord,
 } from '../state/projects'
+import { usePreferences } from '../state/preferences'
 
 const STEPS = [
   { id: 1, label: 'Import', icon: Upload },
@@ -269,6 +270,7 @@ function Toggle({
  */
 export function ClipperPage() {
   const { addProject, updateProject, getProject } = useProjects()
+  const { t } = usePreferences()
   const navigate = useNavigate()
 
   const [step, setStep] = useState(1)
@@ -1293,7 +1295,7 @@ export function ClipperPage() {
       {step === 2 ? (
         <section aria-label="Step 2 — Style">
           <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
-            <h2 className="text-lg font-semibold text-white">Clipping options</h2>
+            <h2 className="text-lg font-semibold text-white">{t('chooseStyle')}</h2>
             <p className="mt-1 text-sm text-[var(--color-text-muted)]">
               {file ? `Video: ${file.name} · ${formatBytes(file.size)}` : 'Set the style for this job.'}
               {project ? ` · Project: ${project.title}` : ''}
@@ -1822,7 +1824,7 @@ export function ClipperPage() {
       {step === 3 ? (
         <section aria-label="Step 3 — Process">
           <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
-            <h2 className="text-lg font-semibold text-white">Process your video</h2>
+            <h2 className="text-lg font-semibold text-white">{t('processTitle')}</h2>
             <p className="mt-1 text-sm text-[var(--color-text-muted)]">
               {project ? `Project: ${project.title} · ` : ''}{summary}
             </p>
