@@ -19,6 +19,7 @@ import { ClipThumbnail } from '../components/ClipThumbnail'
 import { JobStatusPill, jobSummary } from '../components/JobStatusPill'
 import { PageHeader } from '../components/PageHeader'
 import { ScoreBreakdown } from '../components/ScoreBreakdown'
+import { CaptionStylePicker } from '../components/StylePicker'
 import { CAPTION_STYLES, getCaptionStyle } from '../lib/captionStyles'
 import { formatBytes, formatDuration } from '../lib/format'
 import { VIRAL_TONE_CLASS, viralScore } from '../lib/viralScore'
@@ -177,10 +178,21 @@ function ClipRerenderControl({
 }) {
   const otherStyles = CAPTION_STYLES.filter((s) => s.id !== (clip.caption_style ?? ''))
   const [style, setStyle] = useState<string>(otherStyles[0]?.id ?? 'punchy')
+  const [pickerOpen, setPickerOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [latest, setLatest] = useState<ClipRerender | null>(null)
   const prevStatusRef = useRef<string | null>(null)
+
+  // Escape closes the style picker (same pattern as ClipPlayerModal).
+  useEffect(() => {
+    if (!pickerOpen) return undefined
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPickerOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [pickerOpen])
 
   // Keep the picker on a valid style when the clip changes (new file landed).
   useEffect(() => {
@@ -234,19 +246,15 @@ function ClipRerenderControl({
         <span className="text-xs font-medium text-white">
           Captions: {getCaptionStyle(clip.caption_style).name}
         </span>
-        <select
-          value={style}
-          onChange={(e) => setStyle(e.target.value)}
+        <button
+          type="button"
+          onClick={() => setPickerOpen(true)}
           disabled={submitting || inFlight}
-          aria-label="Caption style for re-render"
+          aria-label="Choose a caption style for re-render"
           className="rounded-lg border border-ink-border bg-ink-panel2 px-2 py-1.5 text-xs text-white disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {otherStyles.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name}
-            </option>
-          ))}
-        </select>
+          Choose a style: {getCaptionStyle(style).name}
+        </button>
         <button
           type="button"
           onClick={() => void submit()}
@@ -261,6 +269,67 @@ function ClipRerenderControl({
           {inFlight ? 'Re-rendering…' : 'Re-render with this style'}
         </button>
       </div>
+      {pickerOpen ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Choose a caption style for re-render"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+          onClick={() => setPickerOpen(false)}
+        >
+          <div
+            className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-ink-border bg-ink-panel p-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="font-semibold text-white">Re-render with a new style</p>
+                <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">
+                  The clip is re-rendered with the same window and replaces
+                  the file in place. The current style cannot be picked —
+                  re-rendering to the same style would change nothing.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPickerOpen(false)}
+                aria-label="Close style picker"
+                className="shrink-0 rounded-lg p-1.5 text-white hover:bg-ink-panel2"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="mt-4">
+              <CaptionStylePicker
+                value={style}
+                onChange={setStyle}
+                currentId={clip.caption_style ?? undefined}
+              />
+            </div>
+            <div className="mt-4 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setPickerOpen(false)
+                  void submit()
+                }}
+                disabled={submitting || inFlight}
+                className="flex flex-1 items-center justify-center gap-2 rounded-xl btn-aurora px-4 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <RotateCcw className="h-4 w-4" />
+                Re-render with {getCaptionStyle(style).name}
+              </button>
+              <button
+                type="button"
+                onClick={() => setPickerOpen(false)}
+                className="rounded-xl border border-ink-border px-4 py-2.5 text-sm font-medium text-white hover:bg-ink-panel2"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {latest ? (
         <p className="mt-1.5 text-xs text-[var(--color-text-muted)]">
           {latest.status === 'ready'

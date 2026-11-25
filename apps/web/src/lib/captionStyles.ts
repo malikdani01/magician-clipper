@@ -71,6 +71,8 @@ export interface CaptionStyle {
   id: CaptionStyleId
   name: string
   description: string
+  /** Short "Best for: …" line, written in our own words (Batch 8). */
+  bestFor: string
   sample: string
   /** Word of the sample rendered in yellow (punchy only). */
   highlightWord?: string
@@ -80,12 +82,28 @@ export interface CaptionStyle {
   wordColors?: string[]
 }
 
+/**
+ * True when the style's preview moves. Title-card, subtitle and the
+ * two still platform styles are static by design (the worker burns
+ * them with no motion either); every other style loops its motion.
+ * Batch 8: drives the Motion / Static badge on the style picker.
+ */
+export function isCaptionStyleAnimated(style: CaptionStyle): boolean {
+  return (
+    style.anim !== 'title' &&
+    style.anim !== 'subs' &&
+    style.anim !== 'reels_clean' &&
+    style.anim !== 'shorts_minimal'
+  )
+}
+
 export const CAPTION_STYLES: CaptionStyle[] = [
   {
     id: 'punchy',
     name: 'Punchy',
     description:
       '2–4 words per screen, huge bold white, key words yellow, centred on the divider.',
+    bestFor: 'Fast hooks and punchy talking-head clips',
     sample: 'THIS IS THE HIGHEST POINT',
     highlightWord: 'HIGHEST',
     anim: 'pop',
@@ -95,6 +113,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Word Pop',
     description:
       'One word at a time, even bigger, white + black outline, on the divider.',
+    bestFor: 'One-word reactions and hype moments',
     sample: 'WOW',
     anim: 'pop',
   },
@@ -103,6 +122,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Title Card',
     description:
       'Hook title in a white box on the divider, then small subtitles at the bottom.',
+    bestFor: 'Story openers and titled segments',
     sample: 'SPEED REACTS TO ENDING OF GTA 6',
     anim: 'title',
   },
@@ -110,6 +130,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     id: 'clean_subs',
     name: 'Clean Subtitles',
     description: 'Small white subtitles at the bottom only.',
+    bestFor: 'Interviews and calm explainers',
     sample: 'If we can get into the water, we swim for it.',
     anim: 'subs',
   },
@@ -117,6 +138,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     id: 'classic',
     name: 'Classic',
     description: 'Full-sentence captions at the bottom (the old behaviour).',
+    bestFor: 'Podcasts and long-form speech',
     sample: 'When you have a five-minute counter, you can easily win the PS5.',
     anim: 'subs',
   },
@@ -125,6 +147,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Karaoke Fill',
     description:
       'Full phrase visible — each word fills yellow exactly as it is spoken.',
+    bestFor: 'Sing-alongs, quotes and read-along lines',
     sample: 'SING IT LOUD TONIGHT',
     anim: 'karaoke',
   },
@@ -133,6 +156,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Bounce In',
     description:
       'Words drop in from above with a springy bounce, one by one.',
+    bestFor: 'Playful edits and lifestyle clips',
     sample: "LET'S GO NOW",
     anim: 'bounce',
   },
@@ -141,6 +165,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Typewriter',
     description:
       'Letters type out one by one, like the story is being written live.',
+    bestFor: 'Storytelling and slow reveals',
     sample: 'THE TRUTH IS...',
     anim: 'typewriter',
   },
@@ -149,6 +174,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Highlight Sweep',
     description:
       'A yellow highlight sweeps across the words as they are spoken.',
+    bestFor: 'Tips, lists and how-to lines',
     sample: 'WATCH THIS NEXT',
     anim: 'sweep',
   },
@@ -157,6 +183,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Neon Glow',
     description:
       'Bright cyan glow with a magenta edge — like a neon sign, gently pulsing.',
+    bestFor: 'Gaming and night-time edits',
     sample: 'NEON NIGHTS',
     anim: 'neon',
   },
@@ -165,6 +192,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Word Slam',
     description:
       'Each word slams in huge, then settles — maximum impact on every beat.',
+    bestFor: 'Hype edits and motivational lines',
     sample: 'BOOM',
     anim: 'slam',
   },
@@ -173,6 +201,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Outline Only',
     description:
       'Hollow white outline letters, no fill — clean, bold, modern.',
+    bestFor: 'Fashion, travel and clean modern clips',
     sample: 'HOLLOW',
     anim: 'outline',
   },
@@ -181,6 +210,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Gradient Pop',
     description:
       'Words pop in, each in a bright gradient colour — yellow, orange, pink, cyan.',
+    bestFor: 'Colourful, upbeat edits',
     sample: 'COLOR RUSH',
     anim: 'gradient',
     wordColors: ['#FACC15', '#FB923C', '#F472B6', '#22D3EE'],
@@ -190,6 +220,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Kinetic Slide',
     description:
       'Words slide in from the left with a scale overshoot — fast, modern, kinetic motion.',
+    bestFor: 'Fast-paced edits and quick cuts',
     sample: 'SLIDE IN FAST',
     anim: 'kinetic',
   },
@@ -198,6 +229,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Glow Pop',
     description:
       'Words pop in with a warm golden glow — bold white with a glowing edge.',
+    bestFor: 'Celebrations and feel-good moments',
     sample: 'GLOW UP',
     anim: 'glow_pop',
   },
@@ -209,6 +241,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Word Zoom',
     description:
       'Each word lands slightly big and settles to full size as it is spoken.',
+    bestFor: 'Emphasis on key words in explainers',
     sample: 'ZOOM IN CLOSE',
     anim: 'word_zoom',
   },
@@ -217,6 +250,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Word Fade',
     description:
       'Each word fades in softly as it is spoken — calm, clean, readable.',
+    bestFor: 'Calm narration and soft stories',
     sample: 'SOFT AND CLEAR',
     anim: 'word_fade',
   },
@@ -225,6 +259,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Highlight Box',
     description:
       'The current word sits in a yellow highlight box that moves word to word.',
+    bestFor: 'Teaching moments and key phrases',
     sample: 'WATCH THIS NOW',
     anim: 'highlight_sweep',
   },
@@ -233,6 +268,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Bounce Pop',
     description:
       'Each word pops in with a small overshoot bounce — springier than Bounce In.',
+    bestFor: 'Fun reactions and energetic clips',
     sample: 'BOUNCE RIGHT IN',
     anim: 'bounce_in',
   },
@@ -241,6 +277,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Glitch Pop',
     description:
       'Each word pops in with a quick magenta-cyan flicker — a subtle glitch feel. (The burn flickers colours; libass cannot do a true RGB channel split.)',
+    bestFor: 'Gaming and edgy edits',
     sample: 'GLITCH IT UP',
     anim: 'glitch_pop',
   },
@@ -251,6 +288,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'TikTok Bold',
     description:
       'The classic TikTok look — big bold white, key words yellow, the whole phrase pops in.',
+    bestFor: 'TikTok hooks and viral-style clips',
     sample: 'THIS IS THE BIGGEST MOMENT',
     highlightWord: 'BIGGEST',
     anim: 'tiktok_bold',
@@ -260,6 +298,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Reels Clean',
     description:
       'Slightly smaller clean white text with a soft shadow — no pop, no fill, stays out of the way.',
+    bestFor: 'Reels that stay clean and readable',
     sample: 'Clean, calm captions.',
     anim: 'reels_clean',
   },
@@ -268,6 +307,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Shorts Minimal',
     description:
       'Minimal and restrained — smaller text, thin outline, no shadow, no motion.',
+    bestFor: 'Shorts where the video does the talking',
     sample: 'Small, quiet captions.',
     anim: 'shorts_minimal',
   },

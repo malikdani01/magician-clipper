@@ -13,12 +13,9 @@ import {
 } from 'lucide-react'
 import { EmptyState } from '../components/EmptyState'
 import { PageHeader } from '../components/PageHeader'
+import { CaptionStylePicker, HeadlineStylePicker } from '../components/StylePicker'
 import { API_URL } from '../lib/api'
-import {
-  CAPTION_STYLES,
-  getCaptionStyle,
-  isCaptionStyleId,
-} from '../lib/captionStyles'
+import { getCaptionStyle, isCaptionStyleId } from '../lib/captionStyles'
 import {
   CAPTION_POSITION_LABELS,
   CAPTION_TRANSLATION_LABELS,
@@ -26,7 +23,6 @@ import {
   createJob,
   EXPORT_RATIO_OPTIONS,
   getJob,
-  HEADLINE_STYLE_DESCRIPTIONS,
   HEADLINE_STYLE_LABELS,
   LAYOUT_LABELS,
   OST_ANIMATION_DESCRIPTIONS,
@@ -1216,7 +1212,7 @@ export function NewJobPage() {
                 </p>
               </fieldset>
 
-              <div>
+              <div className="md:col-span-2">
                 <span className="text-sm font-medium text-white">Captions / subtitles</span>
                 <div className="mt-2 flex items-center gap-3">
                   <Toggle
@@ -1247,25 +1243,16 @@ export function NewJobPage() {
                     ))}
                   </select>
                 </label>
-                <label className="mt-3 block">
+                <div className="mt-3">
                   <span className="text-sm font-medium text-white">{t('captionStyle')}</span>
-                  <select
-                    aria-label="Caption style"
-                    value={captionStyle}
-                    disabled={!captionsEnabled}
-                    onChange={(e) => setCaptionStyle(e.target.value)}
-                    className={`${selectClass} mt-2 disabled:cursor-not-allowed disabled:opacity-50`}
-                  >
-                    {CAPTION_STYLES.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name}
-                      </option>
-                    ))}
-                  </select>
-                  <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
-                    {getCaptionStyle(captionStyle).description}
-                  </span>
-                </label>
+                  <div className="mt-2">
+                    <CaptionStylePicker
+                      value={captionStyle}
+                      onChange={setCaptionStyle}
+                      disabled={!captionsEnabled}
+                    />
+                  </div>
+                </div>
               </div>
 
               <div>
@@ -1283,24 +1270,17 @@ export function NewJobPage() {
               </div>
 
               {/* Batch 2 headline style + caption position — defaults are
-                  the pre-Batch-2 behaviour (bold bar, bottom). */}
-              <label className="block">
+                  the pre-Batch-2 behaviour (bold bar, bottom). Batch 8:
+                  the headline picker is a static card grid (no motion). */}
+              <div className="block md:col-span-2">
                 <span className="text-sm font-medium text-white">Headline style</span>
-                <select
-                  value={headlineStyle}
-                  onChange={(e) => setHeadlineStyle(e.target.value as HeadlineStyle)}
-                  className={`${selectClass} mt-2`}
-                >
-                  {(Object.keys(HEADLINE_STYLE_LABELS) as HeadlineStyle[]).map((s) => (
-                    <option key={s} value={s}>
-                      {HEADLINE_STYLE_LABELS[s]}
-                    </option>
-                  ))}
-                </select>
-                <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
-                  {HEADLINE_STYLE_DESCRIPTIONS[headlineStyle]}
-                </span>
-              </label>
+                <div className="mt-2">
+                  <HeadlineStylePicker
+                    value={headlineStyle}
+                    onChange={setHeadlineStyle}
+                  />
+                </div>
+              </div>
 
               {/* Batch 7 whole-clip on-screen text (2026-11-25). The
                   persistent headline and its animation need on-screen

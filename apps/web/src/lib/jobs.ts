@@ -67,6 +67,13 @@ export const HEADLINE_STYLE_DESCRIPTIONS: Record<HeadlineStyle, string> = {
   big_centre: 'Large centred text in the middle of the frame.',
 }
 
+/** Short "Best for: …" line per headline style, our own words (Batch 8). */
+export const HEADLINE_STYLE_BEST_FOR: Record<HeadlineStyle, string> = {
+  bold_bar: 'Strong hooks that must read at a glance',
+  lower_third: 'Interviews and talking-head clips',
+  big_centre: 'Bold statements and title moments',
+}
+
 /** Where the burn-in captions sit (Batch 2, 2026-11-25). */
 export type CaptionPosition = 'bottom' | 'top' | 'middle'
 

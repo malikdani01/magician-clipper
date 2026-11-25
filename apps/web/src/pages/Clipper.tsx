@@ -21,6 +21,7 @@ import {
   X,
 } from 'lucide-react'
 import { PageHeader } from '../components/PageHeader'
+import { CaptionStylePicker, HeadlineStylePicker } from '../components/StylePicker'
 import { ENGINE_URL, extractAudio, probeVideo, type ProbeResult } from '../lib/api'
 import { formatBytes, formatDuration } from '../lib/format'
 import {
@@ -28,19 +29,16 @@ import {
   CAPTION_TRANSLATION_LABELS,
   createJob,
   EXPORT_RATIO_OPTIONS,
-  HEADLINE_STYLE_DESCRIPTIONS,
-  HEADLINE_STYLE_LABELS,
   OST_ANIMATION_DESCRIPTIONS,
   OST_ANIMATION_LABELS,
   SELECTION_MODE_DESCRIPTIONS,
   SELECTION_MODE_LABELS,
   type CaptionPosition,
   type CaptionTranslation,
-  type HeadlineStyle,
   type OstAnimation,
   type SelectionMode,
 } from '../lib/jobs'
-import { translateLegacyCaptionPreset } from '../lib/captionStyles'
+import { getCaptionStyle, translateLegacyCaptionPreset } from '../lib/captionStyles'
 import { listPresets, type JobPreset } from '../lib/presets'
 import {
   defaultClipSpec,
@@ -138,6 +136,17 @@ const REAL_STYLE_TO_LEGACY_PRESET: Record<string, string> = {
   reels_clean: 'reels-clean',
   shorts_minimal: 'shorts-minimal',
 }
+
+/**
+ * The wizard's 18 legacy presets as REAL styles for the card picker
+ * (Batch 8). Two legacy presets map to the same real style — 'modern'
+ * and 'minimal' are both Clean Subtitles — so the picker shows that
+ * style once (17 cards); picking it stores 'modern', the existing
+ * reverse mapping above. The job still gets clean_subs either way.
+ */
+const WIZARD_CAPTION_OPTIONS = CAPTION_STYLES.map((p) =>
+  getCaptionStyle(translateLegacyCaptionPreset(p.id)),
+).filter((s, i, arr) => arr.findIndex((x) => x.id === s.id) === i)
 
 /** Preset quality → wizard processing mode. */
 const QUALITY_TO_PROCESSING_MODE: Record<string, ClipSpec['processingMode']> = {
@@ -1522,7 +1531,7 @@ export function ClipperPage() {
                 </p>
               </fieldset>
 
-              <div>
+              <div className="md:col-span-2">
                 <span className="text-sm font-medium text-white">Captions</span>
                 <div className="mt-2 flex items-center gap-3">
                   <Toggle
@@ -1534,21 +1543,21 @@ export function ClipperPage() {
                     {spec.captions ? 'Captions on' : 'Captions off'}
                   </span>
                 </div>
-                <label className="mt-3 block">
+                <div className="mt-3">
                   <span className="text-sm font-medium text-white">Caption style</span>
-                  <select
-                    value={captionPreset}
-                    disabled={!spec.captions}
-                    onChange={(e) => setCaptionPreset(e.target.value)}
-                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {CAPTION_STYLES.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                  <div className="mt-2">
+                    <CaptionStylePicker
+                      value={translateLegacyCaptionPreset(captionPreset)}
+                      onChange={(realId) =>
+                        setCaptionPreset(
+                          REAL_STYLE_TO_LEGACY_PRESET[realId] ?? captionPreset,
+                        )
+                      }
+                      options={WIZARD_CAPTION_OPTIONS}
+                      disabled={!spec.captions}
+                    />
+                  </div>
+                </div>
                 <p className="mt-2 text-xs text-[var(--color-text-muted)]">
                   Selected caption style: <span className="font-medium text-white">{captionLabel}</span>
                   {' '}— kept with this wizard session; captions are rendered in Phase 3.
@@ -1570,26 +1579,17 @@ export function ClipperPage() {
               </div>
 
               {/* Batch 2 headline style + caption position — defaults
-                  are the pre-Batch-2 behaviour (bold bar, bottom). */}
-              <label className="block">
+                  are the pre-Batch-2 behaviour (bold bar, bottom).
+                  Batch 8: static card grid, no motion. */}
+              <div className="block md:col-span-2">
                 <span className="text-sm font-medium text-white">Headline style</span>
-                <select
-                  value={spec.headlineStyle ?? 'bold_bar'}
-                  onChange={(e) =>
-                    updateSpec({ headlineStyle: e.target.value as HeadlineStyle })
-                  }
-                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
-                >
-                  {(Object.keys(HEADLINE_STYLE_LABELS) as HeadlineStyle[]).map((s) => (
-                    <option key={s} value={s}>
-                      {HEADLINE_STYLE_LABELS[s]}
-                    </option>
-                  ))}
-                </select>
-                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
-                  {HEADLINE_STYLE_DESCRIPTIONS[spec.headlineStyle ?? 'bold_bar']}
-                </span>
-              </label>
+                <div className="mt-2">
+                  <HeadlineStylePicker
+                    value={spec.headlineStyle ?? 'bold_bar'}
+                    onChange={(s) => updateSpec({ headlineStyle: s })}
+                  />
+                </div>
+              </div>
 
               {/* Batch 7 whole-clip on-screen text (2026-11-25). The
                   persistent headline and its animation need on-screen
