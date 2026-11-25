@@ -72,7 +72,7 @@ const IS_LOCAL_SITE =
   typeof window !== 'undefined' &&
   /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname)
 
-/** The 15 caption presets (same ids as the Captions Studio page). */
+/** The 18 caption presets (same ids as the Captions Studio page). */
 const CAPTION_STYLES = [
   { id: 'bold-pop', label: 'Bold Pop' },
   { id: 'highlight', label: 'Highlight' },
@@ -90,6 +90,10 @@ const CAPTION_STYLES = [
   { id: 'highlight-box', label: 'Highlight Box' },
   { id: 'bounce-pop', label: 'Bounce Pop' },
   { id: 'glitch-pop', label: 'Glitch Pop' },
+  // Batch 6 (2026-11-25): the three platform styles, as wizard presets.
+  { id: 'tiktok-bold', label: 'TikTok Bold' },
+  { id: 'reels-clean', label: 'Reels Clean' },
+  { id: 'shorts-minimal', label: 'Shorts Minimal' },
 ] as const
 
 /**
@@ -109,7 +113,8 @@ const CAPTION_STYLES = [
  * outline, gradient, kinetic, glow_pop) have no wizard option: loading
  * a preset with one of those keeps the wizard's current preset. The
  * Batch 3 styles DO have wizard presets (word-zoom, word-fade,
- * highlight-box, bounce-pop, glitch-pop).
+ * highlight-box, bounce-pop, glitch-pop), as do the Batch 6 platform
+ * styles (tiktok-bold, reels-clean, shorts-minimal).
  */
 const REAL_STYLE_TO_LEGACY_PRESET: Record<string, string> = {
   punchy: 'bold-pop',
@@ -126,6 +131,9 @@ const REAL_STYLE_TO_LEGACY_PRESET: Record<string, string> = {
   highlight_sweep: 'highlight-box',
   bounce_in: 'bounce-pop',
   glitch_pop: 'glitch-pop',
+  tiktok_bold: 'tiktok-bold',
+  reels_clean: 'reels-clean',
+  shorts_minimal: 'shorts-minimal',
 }
 
 /** Preset quality → wizard processing mode. */
@@ -439,6 +447,8 @@ export function ClipperPage() {
     }
     // Batch 4 (2026-11-25): logo overlay.
     if (typeof s.logo_overlay === 'boolean') patch.logoOverlay = s.logo_overlay
+    // Batch 6 (2026-11-25): caption safe zone (default ON).
+    if (typeof s.caption_safe_zone === 'boolean') patch.captionSafeZone = s.caption_safe_zone
     if (CONTENT_TYPES.some((c) => c.id === s.content_type)) {
       patch.contentType = s.content_type as ClipSpec['contentType']
     }
@@ -517,6 +527,7 @@ export function ClipperPage() {
       captionTranslation: spec.captionTranslation ?? 'none',
       exportRatios: spec.exportRatios ?? ['9:16'],
       logoOverlay: spec.logoOverlay ?? false,
+      captionSafeZone: spec.captionSafeZone ?? true,
       jobType: 'myself',
       notes: keywordsAvoid.trim()
         ? `Keywords to avoid: ${keywordsAvoid.trim()}`
@@ -1662,6 +1673,25 @@ export function ClipperPage() {
                   Upload the logo in Brand Kit first. If no logo is
                   uploaded, the job renders without one and says so.
                 </span>
+              </div>
+
+              {/* Batch 6 caption safe zone — default ON. When ON,
+                  captions keep clear of TikTok's right action rail
+                  and the bottom bar; OFF restores full-width centred
+                  captions. */}
+              <div>
+                <span className="text-sm font-medium text-white">Caption safe zone</span>
+                <div className="mt-2 flex items-center gap-3">
+                  <Toggle
+                    checked={spec.captionSafeZone ?? true}
+                    onChange={(v) => updateSpec({ captionSafeZone: v })}
+                    label="Caption safe zone on or off"
+                  />
+                  <span className="text-sm text-[var(--color-text-muted)]">
+                    Caption safe zone — keep captions clear of TikTok's
+                    right action rail and bottom bar
+                  </span>
+                </div>
               </div>
 
               {/* Batch 1 clip enhancements — all default ON. A spec saved

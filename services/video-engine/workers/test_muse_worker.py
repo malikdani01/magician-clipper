@@ -685,8 +685,19 @@ class OnScreenTextTests(unittest.TestCase):
             "FROM THE BRIEF")
 
     def test_transcript_headline_from_emphatic_word(self):
+        # Batch 6 (2026-11-25): the phrase chunker now breaks at real
+        # phrase boundaries instead of a hard 4-word cap, so the
+        # scorer sees the natural phrases — "we climb to the highest
+        # point" / "of the tower" / "the tower view is insane guys" —
+        # and picks the last one (emphasis word "insane", most distinct
+        # content words). The old expectation, "HIGHEST POINT OF THE
+        # TOWER", was a 4-word-cap artefact: the cap split "highest
+        # point of the tower" into "highest point of the" + "tower",
+        # and the <3-word extension rule glued them back together.
+        # The new headline is a complete real phrase from the
+        # transcript, still within the 6-word / 60-char limits.
         headline = muse_worker.derive_on_screen_text(self._clip(), self._segs(), {})
-        self.assertEqual(headline, "HIGHEST POINT OF THE TOWER")
+        self.assertEqual(headline, "THE TOWER VIEW IS INSANE GUYS")
         self.assertLessEqual(len(headline.split()), 6)
         self.assertLessEqual(len(headline), 60)
 
@@ -720,8 +731,10 @@ class CaptionStyleTests(unittest.TestCase):
         self.assertIn("kinetic", muse_worker.CAPTION_STYLES)
         self.assertIn("glow_pop", muse_worker.CAPTION_STYLES)
         # Batch 3 (2026-11-25) adds five more (word_zoom, word_fade,
-        # highlight_sweep, bounce_in, glitch_pop).
-        self.assertEqual(len(muse_worker.CAPTION_STYLES), 20)
+        # highlight_sweep, bounce_in, glitch_pop); Batch 6 (2026-11-25)
+        # adds three platform styles (tiktok_bold, reels_clean,
+        # shorts_minimal).
+        self.assertEqual(len(muse_worker.CAPTION_STYLES), 23)
 
     def test_write_clip_ass_kinetic(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1489,24 +1502,33 @@ class Batch2Tests(unittest.TestCase):
     # --- Caption auto-fit ---
 
     def test_auto_fit_scales_a_long_word(self):
-        # One 28-letter word at punchy size 96 would be ~1400px wide
-        # in a 1080px frame — libass cannot break it, so the event
-        # must carry a smaller {\fs} override (96 -> 65 by the
-        # estimator: 28 chars x 0.52em x 96 = 1398px > 960px).
+        # One 28-letter word at punchy size 96 measures 1643px with
+        # real DejaVu Sans Bold widths (Batch 6) — the old per-glyph
+        # estimator said 1398px and fitted fs 65, which would STILL
+        # overflow the 960px margin (65/96 * 1643 = 1091px). Real
+        # measurement fits it to 56 (96 * 960 / 1643). Safe zone OFF
+        # here so the test pins the fit itself, not the safe-zone width.
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "fit.ass"
             segments = [_segment(10.0, 20.0, "antidisestablishmentarianism")]
             self.assertTrue(muse_worker.write_clip_ass(
-                segments, 10.0, 40.0, "punchy", path, 864, 1080, 1920, "split"))
+                segments, 10.0, 40.0, "punchy", path, 864, 1080, 1920, "split",
+                caption_safe_zone=False))
             text = path.read_text()
-            self.assertIn("{\\fs65}", text)
+            self.assertIn("{\\fs56}", text)
 
     def test_auto_fit_leaves_normal_phrases_alone(self):
+        # "climb the tower" measures 868px at fs 96 (real DejaVu Sans
+        # Bold widths, Batch 6) — inside the 960px margin, so no
+        # {\\fs} override. ("we climb the tower" is 1059px and now
+        # correctly shrinks — the old estimator said 829px and let it
+        # through at full size, 21px from the frame edge.)
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "nofit.ass"
-            segments = [_segment(10.0, 20.0, "we climb the tower")]
+            segments = [_segment(10.0, 20.0, "climb the tower")]
             self.assertTrue(muse_worker.write_clip_ass(
-                segments, 10.0, 40.0, "punchy", path, 864, 1080, 1920, "split"))
+                segments, 10.0, 40.0, "punchy", path, 864, 1080, 1920, "split",
+                caption_safe_zone=False))
             self.assertNotIn("{\\fs", path.read_text())
 
     # --- Headline picking ---
@@ -1557,46 +1579,54 @@ class Batch2Tests(unittest.TestCase):
     # --- Caption position ---
 
     def test_caption_positions_move_captions(self):
+        # Safe zone OFF here so the test pins position (MarginV), not
+        # the Batch 6 safe-zone margins.
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             segments = [_segment(10.0, 20.0, "we climb the tower")]
             # bottom (default): on the split divider (864 - 96/2 = 816).
             path = tmp / "bottom.ass"
             muse_worker.write_clip_ass(segments, 10.0, 40.0, "punchy", path,
-                                       864, 1080, 1920, "split")
+                                       864, 1080, 1920, "split",
+                                       caption_safe_zone=False)
             self.assertIn(",8,40,40,816,1", path.read_text())
             # top: below the headline band.
             path = tmp / "top.ass"
             muse_worker.write_clip_ass(segments, 10.0, 40.0, "punchy", path,
-                                       864, 1080, 1920, "split", "top")
+                                       864, 1080, 1920, "split", "top",
+                                       caption_safe_zone=False)
             self.assertIn(",8,40,40,300,1", path.read_text())
             # middle: vertically centred (1920/2 - 96/2 = 912).
             path = tmp / "middle.ass"
             muse_worker.write_clip_ass(segments, 10.0, 40.0, "punchy", path,
-                                       864, 1080, 1920, "split", "middle")
+                                       864, 1080, 1920, "split", "middle",
+                                       caption_safe_zone=False)
             self.assertIn(",8,40,40,912,1", path.read_text())
             # middle + big_centre headline: dropped to 62% (1190) so
             # the captions never overlap the centred headline.
             path = tmp / "middle_big.ass"
             muse_worker.write_clip_ass(segments, 10.0, 40.0, "punchy", path,
                                        864, 1080, 1920, "split",
-                                       "middle", "big_centre")
+                                       "middle", "big_centre",
+                                       caption_safe_zone=False)
             self.assertIn(",8,40,40,1190,1", path.read_text())
             # Unknown position falls back to bottom.
             path = tmp / "unknown.ass"
             muse_worker.write_clip_ass(segments, 10.0, 40.0, "punchy", path,
-                                       864, 1080, 1920, "split", "sideways")
+                                       864, 1080, 1920, "split", "sideways",
+                                       caption_safe_zone=False)
             self.assertIn(",8,40,40,816,1", path.read_text())
 
     def test_caption_position_bottom_keeps_clean_subs_spot(self):
         # clean_subs keeps its established bottom-centre spot (2, 40)
         # at the default position — it does not move to the divider.
+        # Safe zone OFF so the test pins the spot, not the margins.
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "clean.ass"
             segments = [_segment(10.0, 20.0, "we climb the tower")]
             self.assertTrue(muse_worker.write_clip_ass(
                 segments, 10.0, 40.0, "clean_subs", path,
-                864, 1080, 1920, "split"))
+                864, 1080, 1920, "split", caption_safe_zone=False))
             self.assertIn(",2,40,40,40,1", path.read_text())
 
     # --- Quality boost ---
@@ -1749,7 +1779,9 @@ class Batch3Tests(unittest.TestCase):
     def test_new_styles_in_dict(self):
         for style in self.NEW_STYLES:
             self.assertIn(style, muse_worker.CAPTION_STYLES)
-        self.assertEqual(len(muse_worker.CAPTION_STYLES), 20)
+        # Batch 6 (2026-11-25) adds three platform styles (tiktok_bold,
+        # reels_clean, shorts_minimal): 20 + 3 = 23.
+        self.assertEqual(len(muse_worker.CAPTION_STYLES), 23)
 
     def test_new_styles_render_distinct_ass(self):
         # Every new style must burn real, distinct libass transforms —
@@ -2393,6 +2425,279 @@ class Batch5Tests(unittest.TestCase):
         self.assertEqual(info["status"], "ok")
         self.assertEqual(out[0]["text"], "ہیلو دنیا")
         self.assertNotIn("<", out[0]["text"])
+
+
+class Batch6Tests(unittest.TestCase):
+    """Batch 6 (2026-11-25): caption quality — real font measurement,
+    caption safe zone, word-perfect timing, phrase-boundary wrapping,
+    three platform caption styles."""
+
+    NEW_STYLES = ["tiktok_bold", "reels_clean", "shorts_minimal"]
+
+    def _words_at(self, pairs):
+        return [{"start": s, "end": e, "word": w} for s, e, w in pairs]
+
+    def _manual_segment(self, start, end, pairs):
+        words = self._words_at(pairs)
+        return {"start": start, "end": end,
+                "text": " ".join(w[2] for w in pairs), "words": words}
+
+    @staticmethod
+    def _ass_seconds(stamp: str) -> float:
+        h, m, rest = stamp.split(":")
+        s, cs = rest.split(".")
+        return int(h) * 3600 + int(m) * 60 + int(s) + int(cs) / 100
+
+    def _dialogue_events(self, text: str):
+        events = []
+        for line in text.splitlines():
+            m = re.match(
+                r"Dialogue: 0,(\d+:\d\d:\d\d\.\d\d),"
+                r"(\d+:\d\d:\d\d\.\d\d),(\w+),,0,0,0,,(.*)$", line)
+            if m:
+                events.append((self._ass_seconds(m.group(1)),
+                               self._ass_seconds(m.group(2)),
+                               m.group(3), m.group(4)))
+        return events
+
+    # --- Real font measurement ---
+
+    def test_measured_width_is_real_and_fallback_works(self):
+        # The 28-letter word: the old estimator said 1398px at fs 96;
+        # DejaVu Sans Bold really measures 1643px (2% safety included).
+        # The estimator UNDER-measured it — which is why the old fit
+        # (fs 65) still overflowed the margin.
+        self.assertAlmostEqual(
+            muse_worker._estimate_text_width_px(
+                "antidisestablishmentarianism", 96), 1397.76, places=1)
+        self.assertAlmostEqual(
+            muse_worker._measure_text_width_px(
+                "antidisestablishmentarianism", 96), 1643.4, delta=2.0)
+        self.assertIsNotNone(muse_worker._load_measure_font())
+        # No Pillow / no font: the estimator is the fallback, so a
+        # machine without either still renders (just less precisely).
+        with mock.patch.object(muse_worker, "_load_measure_font",
+                               return_value=None):
+            self.assertAlmostEqual(
+                muse_worker._measure_text_width_px(
+                    "antidisestablishmentarianism", 96), 1397.76, places=1)
+
+    # --- Caption safe zone ---
+
+    def test_safe_zone_caps_width_and_shifts_margins(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            segments = [_segment(10.0, 20.0, "climb the tower")]
+            # ON (default): 9:16 — right margin reserves 22% of the
+            # width (197 = int(1080*0.22) - 40), so the caption block
+            # is the left ~78% of the frame, centred at ~43%.
+            path = tmp / "on.ass"
+            muse_worker.write_clip_ass(segments, 10.0, 40.0, "punchy", path,
+                                       864, 1080, 1920, "split")
+            self.assertIn(",8,40,197,816,1", path.read_text())
+            # OFF: the old 40px margins on both sides.
+            path = tmp / "off.ass"
+            muse_worker.write_clip_ass(segments, 10.0, 40.0, "punchy", path,
+                                       864, 1080, 1920, "split",
+                                       caption_safe_zone=False)
+            self.assertIn(",8,40,40,816,1", path.read_text())
+            # 16:9 — right margin 382 (= int(1920*0.22) - 40).
+            path = tmp / "wide.ass"
+            muse_worker.write_clip_ass(segments, 10.0, 40.0, "punchy", path,
+                                       None, 1920, 1080, "center_crop")
+            self.assertIn(",2,40,382,140,1", path.read_text())
+            # 1:1 — same margins as 9:16 (both are 1080 wide).
+            path = tmp / "square.ass"
+            muse_worker.write_clip_ass(segments, 10.0, 40.0, "punchy", path,
+                                       None, 1080, 1080, "center_crop")
+            self.assertIn(",2,40,197,140,1", path.read_text())
+
+    def test_safe_zone_fit_uses_the_safe_width(self):
+        # The 28-letter word under the safe zone (max 822px at 9:16)
+        # fits to fs 48 (96 * 822 / 1643) — not 56 (the full-frame
+        # fit), because the fit width is the safe area.
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "safe-fit.ass"
+            segments = [_segment(10.0, 20.0, "antidisestablishmentarianism")]
+            muse_worker.write_clip_ass(segments, 10.0, 40.0, "punchy", path,
+                                       864, 1080, 1920, "split")
+            self.assertIn("{\\fs48}", path.read_text())
+
+    # --- Word-perfect timing ---
+
+    def test_karaoke_durations_match_word_durations(self):
+        # Varied durations, including a 50ms word: the old max(10, ...)
+        # floor forced every short word's fill to last 100ms. \k is
+        # centisecond precision by format, so the values must match
+        # round(duration * 100) exactly.
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "karaoke.ass"
+            segments = [self._manual_segment(0.0, 5.0, [
+                (0.50, 0.55, "go"), (0.60, 1.00, "now"),
+                (1.10, 1.34, "fast")])]
+            self.assertTrue(muse_worker.write_clip_ass(
+                segments, 0.0, 5.0, "karaoke", path, 864, 1080, 1920, "split"))
+            text = path.read_text()
+            self.assertIn("{\\k5}go", text)
+            self.assertIn("{\\k40}now", text)
+            self.assertIn("{\\k24}fast", text)
+            # The event starts exactly at the first word's start.
+            events = self._dialogue_events(text)
+            self.assertEqual(len(events), 1)
+            self.assertAlmostEqual(events[0][0], 0.50, delta=0.01)
+
+    def test_word_events_start_at_word_starts(self):
+        # Word-at-a-time styles: each event must start at its word's
+        # Whisper start within ±10ms (ASS centisecond rounding is the
+        # only error allowed — no 100ms rounding anywhere).
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "wordpop.ass"
+            segments = [self._manual_segment(0.0, 5.0, [
+                (0.512, 0.712, "go"), (1.007, 1.207, "now"),
+                (1.500, 1.700, "fast")])]
+            self.assertTrue(muse_worker.write_clip_ass(
+                segments, 0.0, 5.0, "word_pop", path, 864, 1080, 1920, "split"))
+            events = self._dialogue_events(path.read_text())
+            self.assertEqual(len(events), 3)
+            for event, want in zip(events, (0.512, 1.007, 1.500)):
+                self.assertAlmostEqual(event[0], want, delta=0.011)
+
+    # --- Phrase-boundary wrapping ---
+
+    def test_phrase_chunking_breaks_only_at_boundaries(self):
+        # Punctuated speech: breaks after the comma, before "and",
+        # before "so" — never mid-phrase. The old chunker cut at 4
+        # words wherever the count ran out ("we went to the | club").
+        words = self._words_at([
+            (0.0, 0.35, "we"), (0.4, 0.75, "went"), (0.8, 1.15, "to"),
+            (1.2, 1.55, "the"), (1.6, 1.95, "club,"),
+            (2.0, 2.35, "and"), (2.4, 2.75, "we"), (2.8, 3.15, "danced"),
+            (3.2, 3.55, "all"), (3.6, 3.95, "night"),
+            (4.0, 4.35, "so"), (4.4, 4.75, "it"), (4.8, 5.15, "was"),
+            (5.2, 5.55, "amazing."),
+        ])
+        phrases = muse_worker._group_phrases(words)
+        self.assertEqual(
+            [[" ".join(w["word"] for w in p)] for p in phrases],
+            [["we went to the club,"], ["and we danced all night"],
+             ["so it was amazing."]])
+        # Same boundaries for plain text (the no-timings fallback).
+        self.assertEqual(
+            muse_worker._split_text_phrases(
+                "we went to the club, and we danced all night so it was amazing."),
+            [["we", "went", "to", "the", "club,"],
+             ["and", "we", "danced", "all", "night"],
+             ["so", "it", "was", "amazing."]])
+        # Run-on speech with no punctuation at all still chunks — the
+        # 6-word cap is the last resort, and no chunk exceeds it.
+        run_on = self._words_at([
+            (i * 0.4, i * 0.4 + 0.35, w) for i, w in enumerate(
+                "one two three four five six seven eight nine ten".split())])
+        chunks = muse_worker._group_phrases(run_on)
+        self.assertEqual([len(c) for c in chunks], [6, 4])
+
+    def test_phrase_lines_split_at_boundary_and_balance(self):
+        # "and we danced all night" (1323px at fs 96) does not fit the
+        # 822px safe width: it splits into two lines at the middle
+        # (no comma/conjunction inside to split on), and the font is
+        # fitted on the longest line (892px -> fs 88), not the whole
+        # phrase (which would shrink to 59).
+        words = self._words_at([
+            (0.0, 0.35, "and"), (0.4, 0.75, "we"), (0.8, 1.15, "danced"),
+            (1.2, 1.55, "all"), (1.6, 1.95, "night")])
+        lines = muse_worker._phrase_lines(
+            [{"word": w["word"], "start": w["start"], "end": w["end"]}
+             for w in words], 96, 822)
+        self.assertEqual(
+            [[w["word"] for w in line] for line in lines],
+            [["and", "we"], ["danced", "all", "night"]])
+        # A phrase WITH a comma splits at the comma, not the middle.
+        comma_words = self._words_at([
+            (0.0, 0.35, "we"), (0.4, 0.75, "went"), (0.8, 1.15, "to"),
+            (1.2, 1.55, "the"), (1.6, 1.95, "club,"),
+            (2.0, 2.35, "and"), (2.4, 2.75, "we"), (2.8, 3.15, "danced")])
+        lines = muse_worker._phrase_lines(comma_words, 96, 500)
+        self.assertEqual(
+            [[w["word"] for w in line] for line in lines],
+            [["we", "went", "to", "the", "club,"],
+             ["and", "we", "danced"]])
+        # End to end: the punchy event for the 5-word phrase carries
+        # ONE line break (two lines, never more) and the fs 88 fit.
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "lines.ass"
+            segments = [self._manual_segment(0.0, 5.0, [
+                (0.0, 0.35, "and"), (0.4, 0.75, "we"),
+                (0.8, 1.15, "danced"), (1.2, 1.55, "all"),
+                (1.6, 1.95, "night")])]
+            self.assertTrue(muse_worker.write_clip_ass(
+                segments, 0.0, 5.0, "punchy", path, 864, 1080, 1920, "split"))
+            events = self._dialogue_events(path.read_text())
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0][3].count("\\N"), 1)
+            self.assertIn("{\\fs88}", events[0][3])
+
+    # --- Three platform styles ---
+
+    def test_new_platform_styles_in_dict(self):
+        for style in self.NEW_STYLES:
+            self.assertIn(style, muse_worker.CAPTION_STYLES)
+        self.assertEqual(len(muse_worker.CAPTION_STYLES), 23)
+
+    def test_new_platform_styles_render_distinct_ass(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            texts = {}
+            for style in self.NEW_STYLES:
+                segments = [self._manual_segment(
+                    0.0, 5.0, [(0.5, 0.9, "hello"), (1.0, 1.4, "brave"),
+                               (1.5, 1.9, "new"), (2.0, 2.4, "world")])]
+                path = tmp / f"{style}.ass"
+                self.assertTrue(muse_worker.write_clip_ass(
+                    segments, 0.0, 5.0, style, path, 864, 1080, 1920, "split"))
+                texts[style] = path.read_text()
+            # Each style's file differs from the others.
+            self.assertEqual(len(set(texts.values())), 3)
+            # tiktok_bold: phrase-based, bigger (fs 104), pops the
+            # whole phrase in, keyword in yellow.
+            self.assertIn("Style: TikTokBold,DejaVu Sans,104,", texts["tiktok_bold"])
+            self.assertIn("\\fscx108\\fscy108\\t(0,120,\\fscx100\\fscy100)",
+                          texts["tiktok_bold"])
+            self.assertIn("\\1c&H00FFFF&", texts["tiktok_bold"])
+            # reels_clean: smaller (fs 84), outline 2, soft shadow 1.
+            self.assertIn("Style: ReelsClean,DejaVu Sans,84,", texts["reels_clean"])
+            self.assertIn(",1,2,1,8,", texts["reels_clean"])
+            # shorts_minimal: smallest (fs 72), outline 1, no shadow.
+            self.assertIn("Style: ShortsMinimal,DejaVu Sans,72,", texts["shorts_minimal"])
+            self.assertIn(",1,1,0,8,", texts["shorts_minimal"])
+
+    def test_tiktok_bold_two_line_phrase_burns_through_real_ffmpeg(self):
+        # The riskiest Batch 6 burn: a 2-line phrase event (with \N)
+        # plus the pop transform must survive a real subtitles burn.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = tmp / "src.mp4"
+            cmd = [muse_worker.FFMPEG, "-y", "-v", "error",
+                   "-f", "lavfi", "-i", "color=c=green:s=640x360:d=5:r=30",
+                   "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                   "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                   "-shortest", str(src)]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            words = [(0.5 + i * 0.4, 0.85 + i * 0.4, w) for i, w in
+                     enumerate(["and", "we", "danced", "all", "night"])]
+            segments = [self._manual_segment(0.0, 5.0, words)]
+            settings = _settings(layout="center_crop", captions_enabled=True,
+                                 caption_style="tiktok_bold",
+                                 duration_mode="maximum", duration_seconds=5)
+            out = tmp / "out.mp4"
+            info = muse_worker.probe_summary(src)
+            muse_worker.render_clip(src, {"start": 0.0, "end": 5.0},
+                                    settings, segments, out, info, tmp)
+            rendered = muse_worker.probe_summary(out)
+            self.assertEqual((rendered["width"], rendered["height"]),
+                             (1080, 1920))
+            self.assertAlmostEqual(rendered["duration"], 5.0, delta=0.4)
 
 
 if __name__ == "__main__":

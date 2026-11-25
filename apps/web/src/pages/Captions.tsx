@@ -33,9 +33,10 @@ const ANIMATION_OPTIONS: { id: AnimationChoice; label: string }[] = [
  * The control only offers none/bounce/pop/karaoke/glow, so styles
  * with no close equivalent seed the nearest motion (sweep → karaoke
  * fill; title/subs/typewriter → none; slam/outline/gradient/kinetic
- * → pop; word_zoom/glitch_pop → pop; word_fade → none; highlight
- * box → karaoke; bounce pop → bounce). The burned-in look is the
- * style's own anim, not this seed.
+ * → pop; word_zoom/glitch_pop/tiktok_bold → pop; word_fade →
+ * none; highlight box → karaoke; bounce pop → bounce; reels_clean /
+ * shorts_minimal → none — they have no motion by design). The
+ * burned-in look is the style's own anim, not this seed.
  */
 const ANIMATION_FOR_STYLE: Record<CaptionPreviewAnim, AnimationChoice> = {
   pop: 'pop',
@@ -56,6 +57,9 @@ const ANIMATION_FOR_STYLE: Record<CaptionPreviewAnim, AnimationChoice> = {
   highlight_sweep: 'karaoke',
   bounce_in: 'bounce',
   glitch_pop: 'pop',
+  tiktok_bold: 'pop',
+  reels_clean: 'none',
+  shorts_minimal: 'none',
 }
 
 type StudioTab = 'styles' | 'customize' | 'preview'
@@ -303,6 +307,39 @@ function CaptionStylePreview({ style }: { style: CaptionStyle }) {
       {style.anim === 'glitch_pop' ? (
         <span className={`${frameClass} text-[15px]`} style={{ textShadow: OUTLINE_SHADOW }}>
           {animatedWords('cap-word-glitch-pop', 0.32)}
+        </span>
+      ) : null}
+
+      {/* Batch 6 (2026-11-25): platform styles — TikTok Bold pops the
+          whole phrase in, bigger than Punchy, keyword in yellow;
+          Reels Clean and Shorts Minimal are still by design (the
+          worker burns them with no motion either). */}
+      {style.anim === 'tiktok_bold' ? (
+        <span
+          className={frameClass}
+          style={{ fontSize: 18, textShadow: OUTLINE_SHADOW }}
+        >
+          {animatedWords('cap-word-pop', 0.32, (word) =>
+            word === style.highlightWord ? { color: '#FACC15' } : {},
+          )}
+        </span>
+      ) : null}
+
+      {style.anim === 'reels_clean' ? (
+        <span
+          className="absolute inset-x-2 top-1/2 -translate-y-1/2 text-center text-[13px] font-bold leading-snug text-white"
+          style={{ textShadow: SOFT_SHADOW }}
+        >
+          {style.sample}
+        </span>
+      ) : null}
+
+      {style.anim === 'shorts_minimal' ? (
+        <span
+          className="absolute inset-x-2 top-1/2 -translate-y-1/2 text-center text-[11px] font-semibold leading-snug text-white"
+          style={{ textShadow: SOFT_SHADOW }}
+        >
+          {style.sample}
         </span>
       ) : null}
 

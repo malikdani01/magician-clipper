@@ -54,6 +54,12 @@ class JobSettingsRules
             'caption_translation' => ['sometimes', 'string', Rule::in(['none', 'ur', 'hi', 'en'])],
             'export_ratios' => ['sometimes', 'array', 'max:3'],
             'export_ratios.*' => ['string', Rule::in(['9:16', '1:1', '16:9'])],
+            // Batch 6 (2026-11-25): caption safe zone (default ON) —
+            // captions keep clear of TikTok's right action rail and
+            // the bottom bar (worker caps the block at ~78% of frame
+            // width, left-of-centre); OFF restores full-width centred
+            // captions. The worker also treats a missing key as ON.
+            'caption_safe_zone' => ['sometimes', 'boolean'],
             // Batch 4 (2026-11-25): logo overlay (default OFF — a
             // watermark must never surprise the user).
             'logo_overlay' => ['sometimes', 'boolean'],

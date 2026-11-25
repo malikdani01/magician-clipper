@@ -122,6 +122,9 @@ function settingRows(job: Job): Array<[string, string]> {
     // Batch 4 (2026-11-25) — absent on older jobs means OFF (the
     // worker treats a missing key as OFF), which is what this shows.
     ['Logo overlay', s.logo_overlay ? 'On' : 'Off'],
+    // Batch 6 (2026-11-25) — absent on older jobs means ON (the
+    // worker treats a missing key as ON), which is what this shows.
+    ['Caption safe zone', s.caption_safe_zone === false ? 'Off' : 'On'],
     ['Job type', s.job_type === 'campaign' ? 'For a campaign' : 'For myself'],
     [
       'Layout',

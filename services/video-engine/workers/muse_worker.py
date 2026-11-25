@@ -1776,10 +1776,11 @@ def write_clip_srt(segments: list[dict], start: float, end: float,
 
 
 # ---------------------------------------------------------------------------
-# Caption styles (20 total: 5 original + 10 CapCut-style animated,
+# Caption styles (23 total: 5 original + 10 CapCut-style animated,
 # added 2026-11-22, kinetic + glow_pop 2026-11-24, Batch 3's five
 # 2026-11-25: word_zoom, word_fade, highlight_sweep, bounce_in,
-# glitch_pop)
+# glitch_pop, Batch 6's three platform styles 2026-11-25: tiktok_bold,
+# reels_clean, shorts_minimal)
 #
 # The styles are a DATA table shared with the frontend
 # (apps/web/src/lib/captionStyles.ts) — the Captions Studio page shows
@@ -1831,6 +1832,14 @@ CAPTION_STYLES = {
     "highlight_sweep": "Highlight Box",
     "bounce_in": "Bounce Pop",
     "glitch_pop": "Glitch Pop",
+    # Batch 6 (2026-11-25): one style per platform. tiktok_bold is the
+    # classic TikTok look (phrase-based like punchy, bigger, with a pop
+    # entrance and the yellow keyword); reels_clean is smaller, clean
+    # white with a soft shadow; shorts_minimal is the smallest, most
+    # restrained — white, thin outline, no entrance, no shadow.
+    "tiktok_bold": "TikTok Bold",
+    "reels_clean": "Reels Clean",
+    "shorts_minimal": "Shorts Minimal",
 }
 
 # One bright colour per word, cycled (ASS BGR hex) — the Gradient Pop
@@ -1872,12 +1881,13 @@ def _estimate_text_width_px(text: str, fs: int) -> float:
     """Conservative rendered width of one line of DejaVu Sans Bold at
     font size ``fs`` (pixels), from per-character width factors.
 
-    No PIL in the worker venv, so this is a heuristic — deliberately
-    pessimistic (caps 0.68em, lowercase 0.52em, digits 0.56em, space
-    0.28em, other punctuation 0.32em), so a line judged to fit has
-    real headroom and a line judged too wide is scaled down. Used by
-    the Batch 2 caption auto-fit: a long word must never overflow the
-    frame just because libass cannot break it.
+    This is the FALLBACK for _measure_text_width_px (below) when Pillow
+    or the font file is unavailable. It is deliberately pessimistic —
+    but not perfectly so: it UNDER-measures wide words (28-letter
+    "antidisestablishmentarianism": estimator 1398px at fs 96, real
+    1611px — the old fit of fs 65 still overflowed the 960px margin).
+    Real measurement is the primary path; this stays only as a
+    no-Pillow fallback.
     """
     total = 0.0
     for ch in text:
@@ -1894,15 +1904,70 @@ def _estimate_text_width_px(text: str, fs: int) -> float:
     return total * fs
 
 
+# Batch 6 (2026-11-25): real caption measurement. libass renders the
+# ASS styles below with FontName "DejaVu Sans" Bold, so the widths that
+# matter are DejaVu Sans Bold's. Pillow reads the same .ttf and returns
+# true glyph advances (kerning included), which the per-glyph estimator
+# above cannot. The font is loaded once at 100px and scaled linearly
+# (glyph advances scale exactly with size in FreeType).
+_DEJAVU_BOLD_CANDIDATES = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+    "/usr/local/share/fonts/DejaVuSans-Bold.ttf",
+)
+_measure_font = None  # PIL ImageFont at 100px, or False when unavailable
+_MEASURE_FONT_TRIED = False
+
+
+def _load_measure_font():
+    """DejaVu Sans Bold at 100px via Pillow, or None (cached).
+
+    Returns None when Pillow is not installed or the font file cannot
+    be found — the caller then falls back to _estimate_text_width_px.
+    """
+    global _measure_font, _MEASURE_FONT_TRIED
+    if _MEASURE_FONT_TRIED:
+        return _measure_font or None
+    _MEASURE_FONT_TRIED = True
+    try:
+        from PIL import ImageFont
+    except ImportError:
+        _measure_font = False
+        return None
+    for candidate in _DEJAVU_BOLD_CANDIDATES:
+        try:
+            _measure_font = ImageFont.truetype(candidate, 100)
+            return _measure_font
+        except (OSError, IOError):
+            continue
+    _measure_font = False
+    return None
+
+
+def _measure_text_width_px(text: str, fs: int) -> float:
+    """Real rendered width of one line of DejaVu Sans Bold at ``fs``.
+
+    Primary path for caption auto-fit: Pillow measures the exact glyph
+    advances of the same font libass renders. A 2% safety margin covers
+    libass's own rounding (its advances are integer pixels). Falls back
+    to the per-glyph estimator when Pillow or the font is unavailable.
+    """
+    font = _load_measure_font()
+    if font is None:
+        return _estimate_text_width_px(text, fs)
+    return font.getlength(text) * fs / 100 * 1.02
+
+
 def _fit_font_size(text: str, fs: int, max_width: float) -> int | None:
     """Smaller font size that fits ``text`` in ``max_width`` px, or
     None when ``fs`` already fits. Floored at 24 so captions stay
     readable — a word that still would not fit at 24 is left at 24
     (libass then wraps it; a 24pt overflow is a one-word edge case,
-    not a silent clip of the frame)."""
-    if _estimate_text_width_px(text, fs) <= max_width:
+    not a silent clip of the frame). Widths are real measurements
+    (Batch 6) with the estimator as fallback."""
+    if _measure_text_width_px(text, fs) <= max_width:
         return None
-    fitted = int(fs * max_width / _estimate_text_width_px(text, fs))
+    fitted = int(fs * max_width / _measure_text_width_px(text, fs))
     return max(24, fitted)
 
 
@@ -1950,10 +2015,22 @@ def _clip_words(segments: list[dict], start: float, end: float) -> list[dict]:
     return words
 
 
-def _group_phrases(words: list[dict], max_words: int = 4) -> list[list[dict]]:
-    """Group words into 1-4 word phrases (punchy caption units).
+# Words a caption chunk may START with — breaking BEFORE one of these
+# keeps the clause together ("we went to the club, | and we danced").
+_CONJUNCTIONS = {"and", "but", "so", "or", "yet", "because", "then"}
 
-    Breaks at sentence punctuation, at a >0.9s gap, or at max_words.
+
+def _group_phrases(words: list[dict], max_words: int = 6) -> list[list[dict]]:
+    """Group words into caption phrases (Batch 6 rework).
+
+    A chunk ends ONLY at a phrase boundary: sentence punctuation
+    (.?!), a comma/semicolon/colon, the start of a conjunction
+    (and/but/so/or/yet/because/then), or a >0.9s speech gap — never
+    mid-phrase. ``max_words`` is a last resort for run-on speech with
+    no punctuation at all (6 words, split into two lines at render
+    time — see _phrase_lines). The old chunker cut at 4 words wherever
+    the count ran out, so a phrase could end mid-clause ("we went to
+    the | club and we danced").
     """
     phrases: list[list[dict]] = []
     current: list[dict] = []
@@ -1961,16 +2038,85 @@ def _group_phrases(words: list[dict], max_words: int = 4) -> list[list[dict]]:
         if current:
             prev = current[-1]
             gap = w["start"] - prev["end"]
-            if gap > 0.9 or len(current) >= max_words:
+            prev_last = prev["word"][-1:]
+            cur_clean = w["word"].strip(_PUNCT).lower()
+            boundary = (
+                gap > 0.9
+                or prev_last in ".?!"
+                or prev_last in ",;:"
+                or (cur_clean in _CONJUNCTIONS and len(current) >= 2)
+                or len(current) >= max_words
+            )
+            if boundary:
                 phrases.append(current)
                 current = []
         current.append(w)
-        if w["word"][-1:] in ".?!":
-            phrases.append(current)
-            current = []
     if current:
         phrases.append(current)
     return phrases
+
+
+def _split_text_phrases(text: str, max_words: int = 6) -> list[list[str]]:
+    """Phrase-boundary chunking for plain text (the no-word-timings
+    fallback paths): same boundaries as _group_phrases, on words
+    instead of timed dicts. A chunk never ends mid-phrase."""
+    words = text.split()
+    phrases: list[list[str]] = []
+    current: list[str] = []
+    for w in words:
+        if current:
+            prev_last = current[-1][-1:]
+            cur_clean = w.strip(_PUNCT).lower()
+            boundary = (
+                prev_last in ".?!"
+                or prev_last in ",;:"
+                or (cur_clean in _CONJUNCTIONS and len(current) >= 2)
+                or len(current) >= max_words
+            )
+            if boundary:
+                phrases.append(current)
+                current = []
+        current.append(w)
+    if current:
+        phrases.append(current)
+    return phrases
+
+
+def _phrase_lines(phrase: list[dict], fs: int,
+                  max_width: float) -> list[list[dict]]:
+    """Split one phrase into 1–2 rendered lines (Batch 6).
+
+    One line when the whole phrase fits ``max_width`` at ``fs``.
+    Otherwise split at the phrase boundary that best balances the two
+    lines (after a comma/semicolon/colon, or before a conjunction);
+    with no boundary inside, split at the middle word. The caller fits
+    the font on the LONGEST line, so a 2-line phrase keeps the full
+    font size instead of shrinking — a 6-word phrase at fs 96 becomes
+    two 3-word lines, not a tiny one-liner.
+    """
+    text = " ".join(w["word"] for w in phrase)
+    if _measure_text_width_px(text, fs) <= max_width:
+        return [phrase]
+    n = len(phrase)
+    if n < 2:
+        return [phrase]
+    candidates: list[int] = []
+    for i in range(1, n):
+        if phrase[i - 1]["word"][-1:] in ",;:":
+            candidates.append(i)
+        elif phrase[i]["word"].strip(_PUNCT).lower() in _CONJUNCTIONS:
+            candidates.append(i)
+    if not candidates:
+        candidates = [n // 2]
+    best_i, best_max = candidates[0], float("inf")
+    for i in candidates:
+        w1 = _measure_text_width_px(
+            " ".join(w["word"] for w in phrase[:i]), fs)
+        w2 = _measure_text_width_px(
+            " ".join(w["word"] for w in phrase[i:]), fs)
+        if max(w1, w2) < best_max:
+            best_max, best_i = max(w1, w2), i
+    return [phrase[:best_i], phrase[best_i:]]
 
 
 def _pick_keyword(phrase: list[dict]) -> str | None:
@@ -1993,6 +2139,13 @@ def _punchy_text(phrase: list[dict]) -> str:
         else:
             parts.append(text)
     return " ".join(parts)
+
+
+def _punchy_lines_text(lines: list[list[dict]]) -> str:
+    """Punchy text for 1–2 rendered lines: the keyword override rides
+    on its word, lines join with ASS \\N (a real line break, not a
+    space) — the event stays one event with one timing."""
+    return r"\N".join(_punchy_text(line) for line in lines)
 
 
 # On-screen text: stopwords for headline derivation (small, generic).
@@ -2267,7 +2420,8 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                    style_id: str, ass_path: Path,
                    divider_y: int | None, tw: int, th: int,
                    layout: str, caption_position: str = "bottom",
-                   headline_style: str = "bold_bar") -> bool:
+                   headline_style: str = "bold_bar",
+                   caption_safe_zone: bool = True) -> bool:
     """Write an ASS caption file for the clip window (0-based times).
 
     ``divider_y`` is the y of the streamer/gameplay divider in output
@@ -2283,12 +2437,21 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
     line for the big single-line styles (punchy, word pop, animated),
     the longest word only for full-sentence styles (clean_subs), which
     may wrap. A fitted size never goes below 24.
+    Batch 6 ``caption_safe_zone`` (default ON): the caption block is
+    capped at ~78% of the frame width and kept left-of-centre, clear of
+    TikTok's right action rail (~15% of the frame) and the bottom bar —
+    the right margin reserves 22% of the width and the fit width is
+    the safe area, not the full frame. OFF restores the pre-Batch-6
+    behaviour (full-width centred captions, max_w = tw - 120). The
+    phrase is split into 2 lines at a phrase boundary before the font
+    is shrunk, so safe-zone captions keep the big font size.
     """
     duration = end - start
     big = tw >= 1080
     split = layout == "split" and divider_y is not None
     position = caption_position if caption_position in CAPTION_POSITIONS else "bottom"
     headline_style = headline_style if headline_style in HEADLINE_STYLES else "bold_bar"
+    safe_zone = bool(caption_safe_zone)
 
     def margin_for(font_size: int) -> tuple[int, int]:
         """(alignment, marginV) — Batch 2 caption position; "bottom"
@@ -2297,14 +2460,28 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
         return _caption_align_mv(position, font_size, tw, th, divider_y,
                                  layout, headline_style)
 
-    # Batch 2 auto-fit: scale a line down so it fits the frame.
-    # max_w is the frame minus the caption side margins plus safety.
-    max_w = tw - 120
+    # Batch 6 safe zone: the caption text area is the left ~78% of the
+    # frame (right margin reserves 22% for the action rail); its centre
+    # sits at ~43% of the frame width — left-of-centre, never under the
+    # rail. OFF: the old 40px margins on both sides.
+    if safe_zone:
+        ml = 40
+        mr = max(40, int(tw * 0.22) - 40)
+        max_w = int(tw * 0.78) - 20
+    else:
+        ml, mr = 40, 40
+        # Batch 2 auto-fit: scale a line down so it fits the frame.
+        # max_w is the frame minus the caption side margins plus safety.
+        max_w = tw - 120
+    # Centre of the caption text area — the kinetic slide lands here,
+    # not at the frame centre, when the safe zone is on.
+    center_x = ml + (tw - ml - mr) // 2
 
     def fit(text: str, fs: int, whole_line: bool = True) -> str:
         """"{\\fsN}" prefix when ``text`` would overflow at ``fs`` —
         the whole line for single-line styles, the longest word only
-        for full-sentence styles. "" when it already fits."""
+        for full-sentence styles. "" when it already fits. Widths are
+        real DejaVu Sans Bold measurements (Batch 6)."""
         probe = text
         if not whole_line:
             words = text.split()
@@ -2312,27 +2489,48 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
         fitted = _fit_font_size(probe, fs, max_w)
         return f"{{\\fs{fitted}}}" if fitted is not None else ""
 
+    def fit_lines(lines: list[list[dict]], fs: int) -> str:
+        """{\\fsN} prefix fitted on the LONGEST rendered line of a
+        1–2 line phrase — a phrase split into two lines keeps the full
+        font size (Batch 6); only a line that still overflows shrinks."""
+        longest = ""
+        for line in lines:
+            text = " ".join(w["word"] for w in line)
+            if _measure_text_width_px(text, fs) > _measure_text_width_px(longest, fs):
+                longest = text
+        return fit(longest, fs)
+
     styles: dict[str, str] = {}
     if style_id == "punchy":
         fs = 96 if big else 68
         align, mv = margin_for(fs)
         styles["Punchy"] = (
             f"Style: Punchy,DejaVu Sans,{fs},&H00FFFFFF,&H000000FF,&H00000000,"
-            f"&H80000000,-1,0,0,0,100,100,0,0,1,3,0,{align},40,40,{mv},1"
+            f"&H80000000,-1,0,0,0,100,100,0,0,1,3,0,{align},{ml},{mr},{mv},1"
+        )
+    elif style_id == "tiktok_bold":
+        # Batch 6: the classic TikTok look — phrase-based like punchy,
+        # bigger, with a pop entrance on the whole phrase and the same
+        # yellow keyword. The pop prefix is added per event below.
+        fs = 104 if big else 76
+        align, mv = margin_for(fs)
+        styles["TikTokBold"] = (
+            f"Style: TikTokBold,DejaVu Sans,{fs},&H00FFFFFF,&H000000FF,&H00000000,"
+            f"&H80000000,-1,0,0,0,100,100,0,0,1,4,0,{align},{ml},{mr},{mv},1"
         )
     elif style_id == "word_pop":
         fs = 130 if big else 92
         align, mv = margin_for(fs)
         styles["WordPop"] = (
             f"Style: WordPop,DejaVu Sans,{fs},&H00FFFFFF,&H000000FF,&H00000000,"
-            f"&H80000000,-1,0,0,0,100,100,0,0,1,4,0,{align},40,40,{mv},1"
+            f"&H80000000,-1,0,0,0,100,100,0,0,1,4,0,{align},{ml},{mr},{mv},1"
         )
     elif style_id == "title_card":
         fs = 60 if big else 44
         align, mv = (8, max(0, divider_y - 40)) if split else (8, int(th * 0.40))
         styles["Title"] = (
             f"Style: Title,DejaVu Sans,{fs},&H00000000,&H000000FF,&H00FFFFFF,"
-            f"&H00FFFFFF,-1,0,0,0,100,100,0,0,3,0,0,{align},40,40,{mv},1"
+            f"&H00FFFFFF,-1,0,0,0,100,100,0,0,3,0,0,{align},{ml},{mr},{mv},1"
         )
         # The Title event is the hook title (its own spot); only the
         # CleanSubs captions follow the position setting — and "bottom"
@@ -2342,7 +2540,7 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                                              layout, headline_style))
         styles["CleanSubs"] = (
             "Style: CleanSubs,DejaVu Sans,36,&H00FFFFFF,&H000000FF,&H00000000,"
-            f"&H80000000,0,0,0,0,100,100,0,0,1,2,0,{cs_align},40,40,{cs_mv},1"
+            f"&H80000000,0,0,0,0,100,100,0,0,1,2,0,{cs_align},{ml},{mr},{cs_mv},1"
         )
     elif style_id == "clean_subs":
         cs_align, cs_mv = ((2, 40) if position == "bottom" else
@@ -2350,13 +2548,14 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                                              layout, headline_style))
         styles["CleanSubs"] = (
             "Style: CleanSubs,DejaVu Sans,36,&H00FFFFFF,&H000000FF,&H00000000,"
-            f"&H80000000,0,0,0,0,100,100,0,0,1,2,0,{cs_align},40,40,{cs_mv},1"
+            f"&H80000000,0,0,0,0,100,100,0,0,1,2,0,{cs_align},{ml},{mr},{cs_mv},1"
         )
     elif style_id in ("karaoke", "bounce", "typewriter", "sweep",
                       "neon", "slam", "outline", "gradient",
                       "kinetic", "glow_pop",
                       "word_zoom", "word_fade", "highlight_sweep",
-                      "bounce_in", "glitch_pop"):
+                      "bounce_in", "glitch_pop",
+                      "reels_clean", "shorts_minimal"):
         # (name, fs_big, fs_small, primary, secondary, outline_colour,
         #  back_colour, bold, border_style, outline, shadow)
         # Colours are ASS &HAABBGGRR. Neon shadow is BackColour magenta,
@@ -2404,6 +2603,16 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                           "&H00000000", "&H80000000", -1, 1, 4, 0),
             "glitch_pop": ("GlitchPop", 110, 78, "&H00FFFFFF", "&H0000FFFF",
                            "&H00000000", "&H80000000", -1, 1, 4, 0),
+            # Batch 6: reels_clean is smaller, clean white with a soft
+            # shadow (outline 2, shadow 1); shorts_minimal is the
+            # smallest, most restrained — thin outline, no shadow, no
+            # entrance. Both are word-at-a-time like the other
+            # animated styles, with no entrance override.
+            "reels_clean": ("ReelsClean", 84, 60, "&H00FFFFFF", "&H0000FFFF",
+                            "&H00000000", "&H80000000", -1, 1, 2, 1),
+            "shorts_minimal": ("ShortsMinimal", 72, 52, "&H00FFFFFF",
+                               "&H0000FFFF", "&H00000000", "&H80000000",
+                               -1, 1, 1, 0),
         }
         (sname, fs_big, fs_small, primary, secondary, outline_c, back_c,
          bold, border, outline_w, shadow) = _NEW_STYLE_PARAMS[style_id]
@@ -2412,16 +2621,21 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
         styles[sname] = (
             f"Style: {sname},DejaVu Sans,{fs},{primary},{secondary},"
             f"{outline_c},{back_c},{bold},0,0,0,100,100,0,0,{border},"
-            f"{outline_w},{shadow},{align},40,40,{mv},1"
+            f"{outline_w},{shadow},{align},{ml},{mr},{mv},1"
         )
     else:
         return False
 
     events: list[str] = []
     words = _clip_words(segments, start, end)
-    if style_id in ("punchy", "word_pop"):
+    if style_id in ("punchy", "tiktok_bold", "word_pop"):
         if words:
-            if style_id == "punchy":
+            if style_id in ("punchy", "tiktok_bold"):
+                sname = "Punchy" if style_id == "punchy" else "TikTokBold"
+                # Batch 6: TikTok Bold pops the whole phrase in
+                # (108% -> 100% over its first 120ms).
+                pop = ("{\\fscx108\\fscy108\\t(0,120,\\fscx100\\fscy100)}"
+                       if style_id == "tiktok_bold" else "")
                 phrases = _group_phrases(words)
                 for i, phrase in enumerate(phrases):
                     s, e = phrase[0]["start"], phrase[-1]["end"]
@@ -2432,10 +2646,14 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                     e = min(e, duration)
                     if e <= s:
                         continue
-                    phrase_text = " ".join(w["word"] for w in phrase)
+                    # Batch 6: split into 1-2 lines at a phrase
+                    # boundary first; the font is fitted on the
+                    # longest line, so a split phrase keeps full size.
+                    lines = _phrase_lines(phrase, fs, max_w)
                     events.append(
                         f"Dialogue: 0,{_fmt_ass_time(s)},{_fmt_ass_time(e)},"
-                        f"Punchy,,0,0,0,,{fit(phrase_text, fs)}{_punchy_text(phrase)}"
+                        f"{sname},,0,0,0,,{fit_lines(lines, fs)}{pop}"
+                        f"{_punchy_lines_text(lines)}"
                     )
             else:
                 for i, w in enumerate(words):
@@ -2452,73 +2670,98 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                         f"WordPop,,0,0,0,,{fit(w['word'], fs)}{_ass_escape(w['word'])}"
                     )
         if not events:
-            # No word timings: fall back to segment text, chunked 4 words.
+            # No word timings: fall back to segment text, chunked at
+            # phrase boundaries (Batch 6 — never mid-phrase).
+            sname = ("TikTokBold" if style_id == "tiktok_bold" else "Punchy")
+            pop = ("{\\fscx108\\fscy108\\t(0,120,\\fscx100\\fscy100)}"
+                   if style_id == "tiktok_bold" else "")
             for seg in segments:
                 s, e = max(seg["start"], start), min(seg["end"], end)
                 if e <= s or not seg["text"]:
                     continue
-                chunks = [seg["text"].split()[i:i + 4]
-                          for i in range(0, len(seg["text"].split()), 4)]
+                chunks = _split_text_phrases(seg["text"])
                 span = (e - start) / max(1, len(chunks))
                 for j, chunk in enumerate(chunks):
                     cs, ce = s - start + j * span, s - start + (j + 1) * span
                     phrase = [{"word": w, "start": cs, "end": ce} for w in chunk]
+                    lines = _phrase_lines(phrase, fs, max_w)
                     events.append(
                         f"Dialogue: 0,{_fmt_ass_time(cs)},{_fmt_ass_time(ce)},"
-                        f"Punchy,,0,0,0,,{fit(' '.join(chunk), fs)}{_punchy_text(phrase)}"
+                        f"{sname},,0,0,0,,{fit_lines(lines, fs)}{pop}"
+                        f"{_punchy_lines_text(lines)}"
                     )
     elif style_id in ("karaoke", "bounce", "typewriter", "sweep",
                       "neon", "slam", "outline", "gradient",
                       "kinetic", "glow_pop",
                       "word_zoom", "word_fade", "highlight_sweep",
-                      "bounce_in", "glitch_pop"):
+                      "bounce_in", "glitch_pop",
+                      "reels_clean", "shorts_minimal"):
         # CapCut-style animated captions. Every branch produces events
         # in the SAME style the Captions Studio preview loops.
         sname = _NEW_STYLE_PARAMS[style_id][0]
         if style_id == "karaoke":
             # Full phrase visible; each word fills with the secondary
             # (yellow) colour as it is spoken — ASS \k, centiseconds.
+            # Batch 6: the \k duration is the word's OWN duration in
+            # centiseconds. The old max(10, ...) floor forced every
+            # short word's fill to last 100ms regardless of how fast it
+            # was spoken (a 50ms word filled for twice its length);
+            # \k is centisecond precision by format, so round() here is
+            # exact within ±5ms. The floor is now 1cs so a word never
+            # gets \k0.
             for phrase in _group_phrases(words):
                 s, e = phrase[0]["start"], phrase[-1]["end"]
                 if e <= s:
                     continue
-                phrase_text = " ".join(w["word"] for w in phrase)
-                parts = []
-                for w in phrase:
-                    cs = max(10, int(round((w["end"] - w["start"]) * 100)))
-                    parts.append("{\\k%d}%s" % (cs, _ass_escape(w["word"])))
+                lines = _phrase_lines(phrase, fs, max_w)
+                line_parts = []
+                for line in lines:
+                    line_parts.append(" ".join(
+                        "{\\k%d}%s" % (
+                            max(1, int(round((w["end"] - w["start"]) * 100))),
+                            _ass_escape(w["word"]))
+                        for w in line))
                 events.append(
                     f"Dialogue: 0,{_fmt_ass_time(s)},{_fmt_ass_time(min(e, duration))},"
-                    f"Karaoke,,0,0,0,,{fit(phrase_text, fs)}{' '.join(parts)}"
+                    f"Karaoke,,0,0,0,,{fit_lines(lines, fs)}{'\\N'.join(line_parts)}"
                 )
         elif style_id == "sweep":
             # Full phrase always visible; one event per word, with the
             # active word coloured yellow — the highlight sweeps across.
             for phrase in _group_phrases(words):
-                phrase_text = " ".join(w["word"] for w in phrase)
+                lines = _phrase_lines(phrase, fs, max_w)
                 for i, w in enumerate(phrase):
                     s = w["start"]
                     e = (phrase[i + 1]["start"] if i + 1 < len(phrase)
                          else phrase[-1]["end"])
                     if e <= s:
                         continue
-                    parts = []
-                    for j, pw in enumerate(phrase):
-                        text = _ass_escape(pw["word"])
-                        if j == i:
-                            parts.append("{\\1c&H00FFFF&}" + text + "{\\1c&HFFFFFF&}")
-                        else:
-                            parts.append(text)
+                    # Walk the phrase's lines, keeping the active-word
+                    # override on word i (global index across lines).
+                    idx = 0
+                    line_texts = []
+                    for line in lines:
+                        parts = []
+                        for pw in line:
+                            text = _ass_escape(pw["word"])
+                            if idx == i:
+                                parts.append("{\\1c&H00FFFF&}" + text + "{\\1c&HFFFFFF&}")
+                            else:
+                                parts.append(text)
+                            idx += 1
+                        line_texts.append(" ".join(parts))
                     events.append(
                         f"Dialogue: 0,{_fmt_ass_time(s)},{_fmt_ass_time(min(e, duration))},"
-                        f"Sweep,,0,0,0,,{fit(phrase_text, fs)}{' '.join(parts)}"
+                        f"Sweep,,0,0,0,,{fit_lines(lines, fs)}{'\\N'.join(line_texts)}"
                     )
         elif style_id == "typewriter":
             # Letters appear one by one: each event holds the phrase
             # typed so far, ending when the phrase ends. The fit is
             # computed on the FULL phrase, once, so the size never
-            # jumps as letters appear.
-            for phrase in _group_phrases(words):
+            # jumps as letters appear. Phrases stay at 4 words (the
+            # established typing unit) — a 6-word phrase would take
+            # too long to type out.
+            for phrase in _group_phrases(words, max_words=4):
                 text = " ".join(w["word"] for w in phrase)
                 s, e = phrase[0]["start"], phrase[-1]["end"]
                 if e <= s or not text:
@@ -2564,10 +2807,12 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                     # anchor is the caption line's own position
                     # (divider-centred when split, bottom-centre
                     # otherwise), so the slide lands exactly where the
-                    # plain caption would sit.
+                    # plain caption would sit. Batch 6: the slide
+                    # lands at the safe-zone centre (center_x), not
+                    # the frame centre, when the safe zone is on.
                     k_align, k_mv = margin_for(fs)
                     anchor_y = k_mv if k_align == 8 else th - k_mv
-                    cx = tw // 2
+                    cx = center_x
                     prefix = ("{\\move(%d,%d,%d,%d,0,250)"
                               "\\t(0,250,\\fscx110\\fscy110)"
                               "\\t(250,350,\\fscx100\\fscy100)}"
@@ -2614,21 +2859,25 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                     f"{sname},,0,0,0,,{fit(w['word'], fs)}{prefix}{_ass_escape(w['word'])}"
                 )
         if not events:
-            # No word timings: fall back to segment text, chunked into
-            # 4-word phrases, rendered in this style (plain, no entrance
-            # overrides — the look still matches).
+            # No word timings: fall back to segment text, chunked at
+            # phrase boundaries (Batch 6), rendered in this style
+            # (plain, no entrance overrides — the look still matches).
             for seg in segments:
                 s, e = max(seg["start"], start), min(seg["end"], end)
                 if e <= s or not seg["text"]:
                     continue
-                chunks = [seg["text"].split()[i:i + 4]
-                          for i in range(0, len(seg["text"].split()), 4)]
+                chunks = _split_text_phrases(seg["text"])
                 span = (e - start) / max(1, len(chunks))
                 for j, chunk in enumerate(chunks):
                     cs, ce = s - start + j * span, s - start + (j + 1) * span
+                    phrase = [{"word": w, "start": cs, "end": ce} for w in chunk]
+                    lines = _phrase_lines(phrase, fs, max_w)
+                    text = "\\N".join(
+                        " ".join(_ass_escape(w["word"]) for w in line)
+                        for line in lines)
                     events.append(
                         f"Dialogue: 0,{_fmt_ass_time(cs)},{_fmt_ass_time(ce)},"
-                        f"{sname},,0,0,0,,{fit(' '.join(chunk), fs)}{_ass_escape(' '.join(chunk))}"
+                        f"{sname},,0,0,0,,{fit_lines(lines, fs)}{text}"
                     )
     elif style_id == "title_card":
         # Hook title: the clip's first 8 words, uppercased, on the divider
@@ -3788,6 +4037,12 @@ def render_clip(source: Path, clip: dict, settings: dict,
     caption_position = (settings.get("caption_position") or "bottom")
     if caption_position not in CAPTION_POSITIONS:
         caption_position = "bottom"
+    # Batch 6: caption safe zone (default ON — a missing key means ON,
+    # like the Batch 1 enhancements, so jobs made before it get the
+    # safer captions too; OFF restores the old full-width captions).
+    caption_safe_zone = settings.get("caption_safe_zone", True)
+    if not isinstance(caption_safe_zone, bool):
+        caption_safe_zone = str(caption_safe_zone).lower() in ("true", "1", "yes")
     captions_path: Path | None = None
     captions_is_ass = False
     if captions_on:
@@ -3799,7 +4054,8 @@ def render_clip(source: Path, clip: dict, settings: dict,
             candidate = job_dir / f"clip_{uuid.uuid4().hex}.ass"
             divider = 864 if (layout == "split" and ratio == "9:16") else None
             if write_clip_ass(render_segments, render_start, render_end, style_id, candidate,
-                              divider, tw, th, layout, caption_position, headline_style):
+                              divider, tw, th, layout, caption_position, headline_style,
+                              caption_safe_zone):
                 captions_path = candidate
                 captions_is_ass = True
 

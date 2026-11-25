@@ -140,6 +140,13 @@
 [data-theme='light'] .text-red-200 {
   color: #991b1b;
 }
+/* Opacity variants (e.g. text-red-200/90) are DIFFERENT class names
+   from their base (text-red-200), so the rule above does not match
+   them — they stayed pastel on white. Same fix as amber below. */
+[data-theme='light'] .text-red-200\/90,
+[data-theme='light'] .text-red-200\/70 {
+  color: #991b1b;
+}
 [data-theme='light'] .text-red-400 {
   color: #dc2626;
 }
@@ -149,6 +156,10 @@
 [data-theme='light'] .text-emerald-200 {
   color: #065f46;
 }
+[data-theme='light'] .text-emerald-200\/80,
+[data-theme='light'] .text-emerald-200\/70 {
+  color: #065f46;
+}
 [data-theme='light'] .text-emerald-400 {
   color: #059669;
 }
@@ -156,6 +167,14 @@
   color: #b45309;
 }
 [data-theme='light'] .text-amber-200 {
+  color: #92400e;
+}
+/* The worker-note body uses text-amber-200/90 — a different class
+   name from text-amber-200, so the rule above never matched it and
+   the note stayed pale amber on white (reported on Job #17 in light
+   theme, 2026-11-25). The /80 variant has the same gap. */
+[data-theme='light'] .text-amber-200\/90,
+[data-theme='light'] .text-amber-200\/80 {
   color: #92400e;
 }
 [data-theme='light'] .text-blue-300 {

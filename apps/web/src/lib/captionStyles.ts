@@ -12,7 +12,8 @@
  * preview loops the same motion the worker burns onto the video
  * (pop / karaoke fill / bounce / typewriter / sweep / neon pulse /
  * slam / outline pop / gradient pop / kinetic slide / glow pop /
- * word zoom / word fade / highlight box / bounce pop / glitch pop).
+ * word zoom / word fade / highlight box / bounce pop / glitch pop /
+ * tiktok bold pop / reels clean / shorts minimal).
  * The preview and the burned-in captions must match: same
  * words-per-screen, same colours, same motion. `wordColors` (gradient
  * only) cycles one colour per word.
@@ -39,6 +40,9 @@ export type CaptionStyleId =
   | 'highlight_sweep'
   | 'bounce_in'
   | 'glitch_pop'
+  | 'tiktok_bold'
+  | 'reels_clean'
+  | 'shorts_minimal'
 
 export type CaptionPreviewAnim =
   | 'pop'
@@ -59,6 +63,9 @@ export type CaptionPreviewAnim =
   | 'highlight_sweep'
   | 'bounce_in'
   | 'glitch_pop'
+  | 'tiktok_bold'
+  | 'reels_clean'
+  | 'shorts_minimal'
 
 export interface CaptionStyle {
   id: CaptionStyleId
@@ -237,6 +244,33 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     sample: 'GLITCH IT UP',
     anim: 'glitch_pop',
   },
+  // Batch 6 (2026-11-25): platform styles — the classic TikTok look,
+  // a clean Reels look, and a minimal Shorts look.
+  {
+    id: 'tiktok_bold',
+    name: 'TikTok Bold',
+    description:
+      'The classic TikTok look — big bold white, key words yellow, the whole phrase pops in.',
+    sample: 'THIS IS THE BIGGEST MOMENT',
+    highlightWord: 'BIGGEST',
+    anim: 'tiktok_bold',
+  },
+  {
+    id: 'reels_clean',
+    name: 'Reels Clean',
+    description:
+      'Slightly smaller clean white text with a soft shadow — no pop, no fill, stays out of the way.',
+    sample: 'Clean, calm captions.',
+    anim: 'reels_clean',
+  },
+  {
+    id: 'shorts_minimal',
+    name: 'Shorts Minimal',
+    description:
+      'Minimal and restrained — smaller text, thin outline, no shadow, no motion.',
+    sample: 'Small, quiet captions.',
+    anim: 'shorts_minimal',
+  },
 ]
 
 /** The matching style, or Punchy for unknown / missing ids. */
@@ -270,6 +304,10 @@ export const LEGACY_CAPTION_PRESET_TO_STYLE: Record<string, CaptionStyleId> = {
   'highlight-box': 'highlight_sweep',
   'bounce-pop': 'bounce_in',
   'glitch-pop': 'glitch_pop',
+  // Batch 6 (2026-11-25): the three platform styles, same treatment.
+  'tiktok-bold': 'tiktok_bold',
+  'reels-clean': 'reels_clean',
+  'shorts-minimal': 'shorts_minimal',
 }
 
 /**

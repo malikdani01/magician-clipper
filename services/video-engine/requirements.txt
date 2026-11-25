@@ -17,3 +17,8 @@ opencv-python-headless>=4.10,<5
 # NOTE: opencv 5.x headless builds ship no cv2.CascadeClassifier (no
 # objdetect submodule), so the bundled Haar cascade cannot run there.
 # Pin to 4.x until the worker is rewritten for a 5.x detector.
+# Batch 6 (2026-11-25): Pillow measures the real DejaVu Sans Bold
+# glyph widths for caption auto-fit (see _measure_text_width_px).
+# The worker falls back to the per-glyph estimator when Pillow or the
+# font file is missing, so an install without it still renders.
+Pillow>=10

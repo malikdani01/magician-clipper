@@ -127,6 +127,9 @@ export interface JobSettings {
   /** Batch 4 logo overlay (2026-11-25); absent means OFF — the
    * worker treats a missing key as OFF. */
   logo_overlay?: boolean
+  /** Batch 6 caption safe zone (2026-11-25); absent means ON — the
+   * worker treats a missing key as ON. */
+  caption_safe_zone?: boolean
   job_type: 'myself' | 'campaign'
   campaign_requirements: string | null
   /** Free-text notes for Muse (campaign brief, extra instructions). */
@@ -236,6 +239,9 @@ export interface CreateJobInput {
   /** Batch 4 logo overlay (default OFF) — watermark the Brand Kit
    * logo onto every clip, bottom-right. */
   logoOverlay: boolean
+  /** Batch 6 caption safe zone (default ON) — keep captions clear
+   * of TikTok's right action rail and the bottom bar. */
+  captionSafeZone: boolean
   jobType: 'myself' | 'campaign'
   campaignRequirements?: string
   /** Free-text notes for Muse (campaign brief, extra instructions). */
@@ -333,6 +339,7 @@ function appendSettingsForm(form: FormData, input: CreateJobInput): void {
     form.append('export_ratios[]', ratio)
   }
   form.append('logo_overlay', String(input.logoOverlay))
+  form.append('caption_safe_zone', String(input.captionSafeZone))
   form.append('job_type', input.jobType)
   if (input.jobType === 'campaign' && input.campaignRequirements) {
     form.append('campaign_requirements', input.campaignRequirements)
@@ -390,6 +397,7 @@ export async function createJob(input: CreateJobInput): Promise<JobResult> {
           caption_translation: input.captionTranslation,
           export_ratios: input.exportRatios,
           logo_overlay: input.logoOverlay,
+          caption_safe_zone: input.captionSafeZone,
           job_type: input.jobType,
           campaign_requirements:
             input.jobType === 'campaign' ? (input.campaignRequirements ?? null) : null,

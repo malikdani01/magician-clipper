@@ -56,6 +56,9 @@ export interface ClipSpec {
   exportRatios: string[]
   /** Batch 4 logo overlay (2026-11-25); default OFF. */
   logoOverlay: boolean
+  /** Batch 6 caption safe zone (2026-11-25); default ON — keep
+   * captions clear of TikTok's right action rail and bottom bar. */
+  captionSafeZone: boolean
   /** How clips are picked: best parts only, or any parts to fill the count. */
   selectionMode: 'interesting_only' | 'fill_any'
   contentType:
@@ -89,6 +92,7 @@ export function defaultClipSpec(): ClipSpec {
     captionTranslation: 'none',
     exportRatios: ['9:16'],
     logoOverlay: false,
+    captionSafeZone: true,
     selectionMode: 'interesting_only',
     contentType: 'general',
     keywords: '',

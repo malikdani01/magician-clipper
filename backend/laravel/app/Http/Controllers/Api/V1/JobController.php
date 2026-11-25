@@ -78,7 +78,7 @@ class JobController extends Controller
         // (JSON clients send real booleans and are unaffected.)
         foreach (['captions_enabled', 'on_screen_text', 'auto_zoom',
                   'face_tracking', 'silence_removal', 'filler_removal',
-                  'beat_sync', 'logo_overlay'] as $boolField) {
+                  'beat_sync', 'logo_overlay', 'caption_safe_zone'] as $boolField) {
             if ($request->has($boolField) && is_string($request->input($boolField))) {
                 $request->merge([
                     $boolField => filter_var($request->input($boolField), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE)
@@ -411,6 +411,10 @@ class JobController extends Controller
                 $validated['export_ratios'] ?? null,
                 $validated['aspect_ratio'],
             ),
+            // Batch 6: caption safe zone ON unless explicitly off
+            // (the worker treats a missing key as ON too); OFF keeps
+            // the pre-Batch-6 full-width centred captions.
+            'caption_safe_zone' => $validated['caption_safe_zone'] ?? true,
             // Batch 4: logo overlay OFF unless explicitly on — a
             // watermark must never surprise the user (the worker also
             // treats a missing key as OFF).

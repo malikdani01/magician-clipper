@@ -259,6 +259,10 @@ export function NewJobPage() {
   // the user. When ON and a logo is uploaded in Brand Kit, the worker
   // overlays it bottom-right on every clip of this job.
   const [logoOverlay, setLogoOverlay] = useState(false)
+  // Batch 6 caption safe zone — default ON: captions keep clear of
+  // TikTok's right action rail and the bottom bar. OFF restores
+  // full-width centred captions.
+  const [captionSafeZone, setCaptionSafeZone] = useState(true)
   // Batch 4 bulk jobs — up to 5 files, one job per file with the same
   // settings. Off by default; the wizard stays single-file only.
   const [bulkMode, setBulkMode] = useState(false)
@@ -465,6 +469,8 @@ export function NewJobPage() {
     }
     // Batch 4 (2026-11-25): logo overlay.
     if (typeof s.logo_overlay === 'boolean') setLogoOverlay(s.logo_overlay)
+    // Batch 6 (2026-11-25): caption safe zone (default ON).
+    if (typeof s.caption_safe_zone === 'boolean') setCaptionSafeZone(s.caption_safe_zone)
     if (s.job_type === 'myself' || s.job_type === 'campaign') setJobType(s.job_type)
     if (typeof s.campaign_requirements === 'string') setCampaignRequirements(s.campaign_requirements)
     if (typeof s.notes === 'string') setNotes(s.notes)
@@ -508,6 +514,7 @@ export function NewJobPage() {
     caption_translation: captionTranslation,
     export_ratios: exportRatios,
     logo_overlay: logoOverlay,
+    caption_safe_zone: captionSafeZone,
     job_type: jobType,
     campaign_requirements: campaignRequirements.trim() ? campaignRequirements : null,
     notes: notes.trim() ? notes : null,
@@ -634,6 +641,7 @@ export function NewJobPage() {
       captionTranslation,
       exportRatios,
       logoOverlay,
+      captionSafeZone,
       jobType,
       campaignRequirements: campaignRequirements.trim(),
       notes: notes.trim(),
@@ -1355,6 +1363,25 @@ export function NewJobPage() {
                 </span>
               </div>
 
+              {/* Batch 6 caption safe zone — default ON. When ON,
+                  captions keep clear of TikTok's right action rail
+                  and the bottom bar; OFF restores full-width centred
+                  captions. */}
+              <div>
+                <span className="text-sm font-medium text-white">Caption safe zone</span>
+                <div className="mt-2 flex items-center gap-3">
+                  <Toggle
+                    checked={captionSafeZone}
+                    onChange={setCaptionSafeZone}
+                    label="Caption safe zone on or off"
+                  />
+                  <span className="text-sm text-[var(--color-text-muted)]">
+                    {captionSafeZone ? 'Caption safe zone on' : 'Caption safe zone off'} — keep
+                    captions clear of TikTok's right action rail and bottom bar
+                  </span>
+                </div>
+              </div>
+
               {/* Batch 1 clip enhancements — all default ON. */}
               <div>
                 <span className="text-sm font-medium text-white">Clip enhancements</span>
@@ -1567,6 +1594,7 @@ export function NewJobPage() {
                 ['Translate captions', CAPTION_TRANSLATION_LABELS[captionTranslation]],
                 ['Export ratios', exportRatios.join(', ')],
                 ['Logo overlay', logoOverlay ? 'On' : 'Off'],
+                ['Caption safe zone', captionSafeZone ? 'On' : 'Off'],
                 ['Auto zoom', autoZoom ? 'On' : 'Off'],
                 ['Face tracking', faceTracking ? 'On' : 'Off'],
                 ['Silence removal', silenceRemoval ? 'On' : 'Off'],

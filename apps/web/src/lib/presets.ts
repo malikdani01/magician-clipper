@@ -39,6 +39,8 @@ export interface PresetSettings {
   export_ratios: string[]
   /** Batch 4 logo overlay (2026-11-25); default OFF. */
   logo_overlay: boolean
+  /** Batch 6 caption safe zone (2026-11-25); default ON. */
+  caption_safe_zone: boolean
   job_type: 'myself' | 'campaign'
   campaign_requirements: string | null
   notes: string | null
