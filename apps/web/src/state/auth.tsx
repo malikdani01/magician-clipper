@@ -36,7 +36,7 @@ interface AuthState {
   loading: boolean
   /** True when the Laravel backend answered its health check. */
   authAvailable: boolean
-  login: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>
+  login: (email: string, password: string) => Promise<{ ok: boolean; error?: string; user?: AuthUser }>
   register: (
     name: string,
     email: string,
@@ -154,7 +154,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     storeSession(result.token, authUser)
     setTokenState(result.token)
     setUser(authUser)
-    return { ok: true as const }
+    return { ok: true as const, user: authUser }
   }, [])
 
   const register = useCallback(

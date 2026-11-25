@@ -39,7 +39,11 @@ export function LoginPage() {
       setError(result.error ?? 'Sign-in failed.')
       return
     }
-    navigate('/')
+    // Batch 9 (2026-11-25): admin access is through this same login
+    // page — an admin sign-in unlocks the Admin Panel directly. The
+    // /admin guard (AdminLayout) stays the enforcement; this redirect
+    // is convenience only.
+    navigate(result.user?.role === 'admin' ? '/admin' : '/')
   }
 
   return (

@@ -7,7 +7,7 @@
  */
 
 import { API_URL, getToken } from './api'
-import type { CaptionPosition, ClipLayout, HeadlineStyle, SelectionMode } from './jobs'
+import type { CaptionPosition, ClipLayout, ColourGrade, HeadlineStyle, OstLanguage, OstPosition, SelectionMode, Sfx, TranslationLanguageCode } from './jobs'
 
 export interface PresetSettings {
   platform: 'tiktok' | 'instagram'
@@ -31,10 +31,22 @@ export interface PresetSettings {
    * bold_bar / bottom. */
   headline_style: HeadlineStyle
   caption_position: CaptionPosition
+  /** Batch 9 OST position (2026-11-25); absent on old presets, where
+   * the job default derives from the headline style. */
+  ost_position?: OstPosition
+  /** Batch 9 OST language (2026-11-25); absent on old presets,
+   * where the headline stays in the source language. */
+  ost_language?: OstLanguage
+  /** Batch 9 SFX sting (2026-11-25); absent means 'none'. */
+  sfx?: Sfx
+  /** Batch 9 colour grade (2026-11-25); absent means 'none' —
+   * no filter, the render pipeline is untouched. */
+  colour_grade?: ColourGrade
   /** Batch 3 beat sync (2026-11-25); default ON. */
   beat_sync: boolean
-  /** Batch 3 caption translation (2026-11-25); default 'none'. */
-  caption_translation: 'none' | 'ur' | 'hi' | 'en'
+  /** Batch 3 caption translation (2026-11-25; broadened Batch 9);
+   * default 'none'. */
+  caption_translation: 'none' | TranslationLanguageCode
   /** Batch 3 export ratios (2026-11-25); default ['9:16']. */
   export_ratios: string[]
   /** Batch 4 logo overlay (2026-11-25); default OFF. */

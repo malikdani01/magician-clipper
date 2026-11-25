@@ -119,6 +119,28 @@ class MuseJobController extends Controller
         );
     }
 
+    /**
+     * GET /api/v1/muse/jobs/{job}/music-bed
+     * Streams the job's uploaded music bed to the worker (muse-guarded,
+     * like the source endpoint). A job with no bed is a 404, never a
+     * fabricated file; the worker only ever gets a URL for a bed that
+     * exists (see toWorkerArray).
+     */
+    public function musicBed(ProcessingJob $job)
+    {
+        if ($job->music_bed_path === null
+            || ! Storage::disk('local')->exists($job->music_bed_path)) {
+            return response()->json([
+                'error' => 'not_found',
+                'message' => 'This job has no music bed uploaded.',
+            ], 404);
+        }
+
+        return Storage::disk('local')->download(
+            $job->music_bed_path, $job->music_bed_name ?? basename($job->music_bed_path)
+        );
+    }
+
     /** Full job representation for the worker (settings + source included). */
     private function toWorkerArray(ProcessingJob $job): array
     {
@@ -136,9 +158,22 @@ class MuseJobController extends Controller
             // reclaiming it (see index()). The worker clears any
             // partial clips and re-runs it from the start.
             'stale' => $this->isStale($job),
+            // Batch 9: the settings array carries ost_position,
+            // sfx and colour_grade verbatim (JobController::
+            // buildSettings always sets them); the worker reads
+            // them from here, unchanged.
             'settings' => $job->settings,
             'source_type' => $job->source_type,
             'source_url' => $job->source_url,
+            // Batch 9: the music-bed download URL is present ONLY
+            // when a bed is actually stored — never a URL for a job
+            // with no bed. The worker downloads + mixes it; SFX are
+            // mixed from the engine's own assets/sfx files.
+            'music_bed_url' => ($job->music_bed_path !== null
+                    && Storage::disk('local')->exists($job->music_bed_path))
+                ? url("/api/v1/muse/jobs/{$job->id}/music-bed")
+                : null,
+            'music_bed_name' => $job->music_bed_name,
             // Relative path under Laravel storage/app (upload source).
             'source_path' => $job->source_path,
             // Absolute local path — only meaningful because the worker runs
@@ -158,6 +193,10 @@ class MuseJobController extends Controller
                 'aspect_ratio' => $clip->aspect_ratio,
                 'file_size_bytes' => $clip->file_size_bytes,
                 'output_path' => $clip->output_path,
+                // Batch 9: face tracking as reported, and the
+                // Variant B link (null = original clip).
+                'face_tracked' => (bool) $clip->face_tracked,
+                'variant_of_clip_id' => $clip->variant_of_clip_id,
             ])->all(),
             'error_code' => $job->error_code,
             'error_message' => $job->error_message,
@@ -480,6 +519,15 @@ class MuseJobController extends Controller
             ], 422);
         }
 
+        // Multipart sends booleans as strings; normalise "true"/"false"
+        // like JobController::store does for job settings.
+        if ($request->has('face_tracked') && is_string($request->input('face_tracked'))) {
+            $request->merge([
+                'face_tracked' => filter_var($request->input('face_tracked'), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE)
+                    ?? $request->input('face_tracked'),
+            ]);
+        }
+
         $validated = $request->validate([
             'file' => ['required', 'file', 'mimes:mp4', 'max:2097152'],
             'thumbnail' => ['sometimes', 'nullable', 'file', 'mimes:jpeg,jpg,png', 'max:2048'],
@@ -497,6 +545,12 @@ class MuseJobController extends Controller
             'reason' => ['sometimes', 'nullable', 'string', 'max:2000'],
             'transcript_excerpt' => ['sometimes', 'nullable', 'string', 'max:5000'],
             'caption_style' => ['sometimes', 'nullable', 'string', Rule::in(UserSetting::CAPTION_STYLES)],
+            // Batch 9: whether the face was tracked through this clip
+            // (default false when the worker does not send it) and,
+            // for an A/B variant render, the Variant A clip this is
+            // Variant B of — it must be an existing clip of THIS job.
+            'face_tracked' => ['sometimes', 'boolean'],
+            'variant_of_clip_id' => ['sometimes', 'nullable', 'integer', 'exists:clips,id'],
             // Batch 3 multi-ratio: the worker sends the ratio this clip
             // was actually rendered in; it wins over the job's ratio so
             // each ratio variant stores its own row.
@@ -507,6 +561,17 @@ class MuseJobController extends Controller
             // below; malformed input is a 422, never a stored guess.
             'score_breakdown' => ['sometimes', 'nullable', 'string'],
         ]);
+
+        $variantOf = null;
+        if (! empty($validated['variant_of_clip_id'])) {
+            $variantOf = Clip::find($validated['variant_of_clip_id']);
+            if ($variantOf === null || $variantOf->job_id !== $job->id) {
+                return response()->json([
+                    'error' => 'validation_error',
+                    'message' => 'variant_of_clip_id must be an existing clip of this job.',
+                ], 422);
+            }
+        }
 
         $scoreBreakdown = null;
         if ($request->filled('score_breakdown')) {
@@ -613,6 +678,10 @@ class MuseJobController extends Controller
             'transcript_excerpt' => $validated['transcript_excerpt'] ?? null,
             'caption_style' => $validated['caption_style']
                 ?? ($settings['caption_style'] ?? null),
+            // Batch 9: face tracking as reported (false when the
+            // worker does not send it) + the Variant B link.
+            'face_tracked' => $validated['face_tracked'] ?? false,
+            'variant_of_clip_id' => $variantOf?->id,
         ]);
 
         return response()->json(['clip' => $clip->fresh()], 201);
@@ -884,6 +953,135 @@ class MuseJobController extends Controller
 
         return response()->json([
             'clip' => $clip->fresh(),
+            'rerender' => $rerender->fresh()->toWorkerArray(),
+        ]);
+    }
+
+    /**
+     * Batch 9: upload a rendered A/B variant as a NEW clip row
+     * (Variant B) instead of replacing the original in place.
+     * Multipart: file (MP4) + rerender_id + optional thumbnail /
+     * candidates / duration_seconds / face_tracked. The variant copies
+     * the original clip's window, score, reason and transcript (the
+     * window is identical — only the caption/headline style differs),
+     * is titled "<original title> (Variant B)", and is linked via
+     * variant_of_clip_id. The re-render is marked ready in the same
+     * request. Unlike storeClip, the parent job does NOT need to be
+     * Processing: a variant targets a finished job's clip.
+     */
+    public function uploadVariantClip(Request $request, Clip $clip)
+    {
+        // Multipart sends booleans as strings; normalise like storeClip.
+        if ($request->has('face_tracked') && is_string($request->input('face_tracked'))) {
+            $request->merge([
+                'face_tracked' => filter_var($request->input('face_tracked'), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE)
+                    ?? $request->input('face_tracked'),
+            ]);
+        }
+
+        $validated = $request->validate([
+            'file' => ['required', 'file', 'mimes:mp4', 'max:2097152'],
+            'thumbnail' => ['sometimes', 'nullable', 'file', 'mimes:jpeg,jpg,png', 'max:2048'],
+            'candidate_1' => ['sometimes', 'nullable', 'file', 'mimes:jpeg,jpg,png', 'max:2048'],
+            'candidate_2' => ['sometimes', 'nullable', 'file', 'mimes:jpeg,jpg,png', 'max:2048'],
+            'candidate_3' => ['sometimes', 'nullable', 'file', 'mimes:jpeg,jpg,png', 'max:2048'],
+            'rerender_id' => ['required', 'integer'],
+            'duration_seconds' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'face_tracked' => ['sometimes', 'boolean'],
+        ]);
+
+        $rerender = ClipRerender::find($validated['rerender_id']);
+        if ($rerender === null || $rerender->clip_id !== $clip->id) {
+            return response()->json([
+                'error' => 'not_found',
+                'message' => 'No such re-render for this clip.',
+            ], 404);
+        }
+        if (! $rerender->is_variant) {
+            return response()->json([
+                'error' => 'invalid_state',
+                'message' => 'This re-render is not a variant (use the replacement upload).',
+            ], 422);
+        }
+        if ($rerender->status !== ClipRerender::STATUS_PROCESSING) {
+            return response()->json([
+                'error' => 'invalid_state',
+                'message' => "Re-render must be processing to upload a variant file (current status: {$rerender->status}).",
+            ], 422);
+        }
+
+        $jobId = $clip->job_id ?? $clip->project_id;
+        $file = $request->file('file');
+        $filename = Str::uuid()->toString().'.mp4';
+        $relativePath = "clips/{$jobId}/{$filename}";
+        $disk = MediaStorage::disk($clip->disk ?? MediaStorage::DISK_LOCAL, $clip->job?->user);
+        $disk->putFileAs("clips/{$jobId}", $file, $filename);
+        [$absolutePath, $isTemp] = MediaStorage::localPathFor(
+            $clip->disk ?? MediaStorage::DISK_LOCAL, $relativePath, $clip->job?->user
+        );
+
+        $probe = $this->probeClip($absolutePath);
+        if ($isTemp) {
+            @unlink($absolutePath);
+        }
+        if ($probe === null) {
+            $disk->delete($relativePath);
+
+            return response()->json([
+                'error' => 'validation_error',
+                'message' => 'The variant clip is not a playable MP4 (FFprobe could not read a video stream).',
+            ], 422);
+        }
+
+        $thumbnailPath = null;
+        if ($request->hasFile('thumbnail')) {
+            $thumbFilename = 'thumb-'.Str::uuid()->toString().'.jpg';
+            $disk->putFileAs(
+                "clips/{$jobId}", $request->file('thumbnail'), $thumbFilename
+            );
+            $thumbnailPath = "clips/{$jobId}/{$thumbFilename}";
+        }
+
+        $candidatePaths = [];
+        foreach (['candidate_1', 'candidate_2', 'candidate_3'] as $field) {
+            if (! $request->hasFile($field)) {
+                continue;
+            }
+            $candFilename = 'cand-'.Str::uuid()->toString().'.jpg';
+            $disk->putFileAs(
+                "clips/{$jobId}", $request->file($field), $candFilename
+            );
+            $candidatePaths[] = "clips/{$jobId}/{$candFilename}";
+        }
+
+        $variant = Clip::create([
+            'project_id' => $clip->project_id,
+            'job_id' => $clip->job_id,
+            'title' => ($clip->title ?? 'Clip').' (Variant B)',
+            'start_seconds' => $clip->start_seconds,
+            'end_seconds' => $clip->end_seconds,
+            'duration_seconds' => (float) ($validated['duration_seconds'] ?? $probe['duration']),
+            'aspect_ratio' => $clip->aspect_ratio,
+            'status' => Clip::STATUS_READY,
+            'output_path' => $relativePath,
+            'disk' => $clip->disk ?? MediaStorage::DISK_LOCAL,
+            'thumbnail_path' => $thumbnailPath,
+            'thumbnail_candidates' => $candidatePaths !== [] ? $candidatePaths : null,
+            'file_size_bytes' => $disk->size($relativePath),
+            // The window is identical to the original, so its score,
+            // reason and transcript carry over; only the style differs.
+            'score' => $clip->score,
+            'score_breakdown' => $clip->score_breakdown,
+            'reason' => $clip->reason,
+            'transcript_excerpt' => $clip->transcript_excerpt,
+            'caption_style' => $rerender->caption_style,
+            'face_tracked' => (bool) ($validated['face_tracked'] ?? false),
+            'variant_of_clip_id' => $clip->id,
+        ]);
+        $rerender->update(['status' => ClipRerender::STATUS_READY, 'error_message' => null]);
+
+        return response()->json([
+            'clip' => $variant->fresh(),
             'rerender' => $rerender->fresh()->toWorkerArray(),
         ]);
     }

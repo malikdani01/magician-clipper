@@ -18,11 +18,9 @@ export type Theme = 'dark' | 'light'
 
 export type TranslationKey =
   | 'navDashboard'
-  | 'navCreateProject'
   | 'navMyProjects'
   | 'navVideoLibrary'
   | 'navAiClipper'
-  | 'navNewJob'
   | 'navMyJobs'
   | 'navStudioEditor'
   | 'navCaptionsStudio'
@@ -31,6 +29,7 @@ export type TranslationKey =
   | 'navUsageCredits'
   | 'navSettings'
   | 'navHelpSupport'
+  | 'navAdminPanel'
   | 'searchPlaceholder'
   | 'upgradePlan'
   | 'accountSettings'
@@ -166,11 +165,9 @@ export type TranslationKey =
 
 const EN: Record<TranslationKey, string> = {
   navDashboard: 'Dashboard',
-  navCreateProject: 'Create Project',
   navMyProjects: 'My Projects',
   navVideoLibrary: 'Video Library',
   navAiClipper: 'AI Clipper',
-  navNewJob: 'New Job',
   navMyJobs: 'My Jobs',
   navStudioEditor: 'Studio Editor',
   navCaptionsStudio: 'Captions Studio',
@@ -179,6 +176,7 @@ const EN: Record<TranslationKey, string> = {
   navUsageCredits: 'Usage & Credits',
   navSettings: 'Settings',
   navHelpSupport: 'Help & Support',
+  navAdminPanel: 'Admin Panel',
   searchPlaceholder: 'Search projects, videos… (filters My Projects)',
   upgradePlan: 'Upgrade Plan',
   accountSettings: 'Account settings',
@@ -223,7 +221,7 @@ const EN: Record<TranslationKey, string> = {
   noJobsYet: 'No jobs yet',
   createFirstJob: 'Create your first job',
   mostViralClip: 'Most viral clip',
-  jobsTitle: 'My Jobs',
+  jobsTitle: 'My Projects',
   jobsSubtitle: 'Every job you created, newest first.',
   searchJobs: 'Search jobs…',
   statusFilter: 'Status',
@@ -317,11 +315,9 @@ const EN: Record<TranslationKey, string> = {
 /** Roman Urdu (Latin script). Keys not listed here fall back to English. */
 const UR: Partial<Record<TranslationKey, string>> = {
   navDashboard: 'Dashboard',
-  navCreateProject: 'Naya Project',
   navMyProjects: 'Mere Projects',
   navVideoLibrary: 'Video Library',
   navAiClipper: 'AI Clipper',
-  navNewJob: 'Nayi Job',
   navMyJobs: 'Meri Jobs',
   navStudioEditor: 'Studio Editor',
   navCaptionsStudio: 'Captions Studio',
@@ -330,6 +326,7 @@ const UR: Partial<Record<TranslationKey, string>> = {
   navUsageCredits: 'Usage aur Credits',
   navSettings: 'Settings',
   navHelpSupport: 'Madad aur Support',
+  navAdminPanel: 'Admin Panel',
   searchPlaceholder: 'Projects, videos talaash karein… (Mere Projects filter karta hai)',
   upgradePlan: 'Plan Upgrade karein',
   accountSettings: 'Account settings',
@@ -374,7 +371,7 @@ const UR: Partial<Record<TranslationKey, string>> = {
   noJobsYet: 'Abhi koi job nahi',
   createFirstJob: 'Apni pehli job banayein',
   mostViralClip: 'Sab se viral clip',
-  jobsTitle: 'Meri Jobs',
+  jobsTitle: 'Mere Projects',
   jobsSubtitle: 'Aap ki har job, nayi pehle.',
   searchJobs: 'Jobs talaash karein…',
   statusFilter: 'Status',

@@ -13,8 +13,9 @@ class UserSetting extends Model
     public const ASPECT_RATIOS = ['9:16', '16:9', '1:1', '4:5'];
     public const QUALITIES = ['draft', 'standard', 'high'];
     // Batch 6 (2026-11-25) adds three platform styles: tiktok_bold,
-    // reels_clean, shorts_minimal (23 total).
-    public const CAPTION_STYLES = ['punchy', 'word_pop', 'title_card', 'clean_subs', 'classic', 'karaoke', 'bounce', 'typewriter', 'sweep', 'neon', 'slam', 'outline', 'gradient', 'kinetic', 'glow_pop', 'word_zoom', 'word_fade', 'highlight_sweep', 'bounce_in', 'glitch_pop', 'tiktok_bold', 'reels_clean', 'shorts_minimal'];
+    // reels_clean, shorts_minimal (23 total). Batch 9 (2026-11-25)
+    // adds Comic Pop and Marker (25 total).
+    public const CAPTION_STYLES = ['punchy', 'word_pop', 'title_card', 'clean_subs', 'classic', 'karaoke', 'bounce', 'typewriter', 'sweep', 'neon', 'slam', 'outline', 'gradient', 'kinetic', 'glow_pop', 'word_zoom', 'word_fade', 'highlight_sweep', 'bounce_in', 'glitch_pop', 'tiktok_bold', 'reels_clean', 'shorts_minimal', 'comic', 'marker'];
 
     /** Batch 5 (2026-11-25): appearance + language preferences. */
     public const THEMES = ['dark', 'light'];

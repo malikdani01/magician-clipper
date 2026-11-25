@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Clapperboard, Download, FileVideo, Image, Music, Play, Search, Video } from 'lucide-react'
 import { EmptyState } from '../components/EmptyState'
+import { BulkRerenderBar } from '../components/BulkRerenderBar'
 import { PageHeader } from '../components/PageHeader'
 import { ClipFavouriteButton, ClipThumbnailPicker } from '../components/ClipActions'
 import { ClipPlayerModal } from '../components/ClipPlayerModal'
@@ -305,6 +306,13 @@ export function LibraryPage() {
             Clear selection
           </button>
         </div>
+      ) : null}
+
+      {/* Batch 9: bulk re-render uses the same selection as the ZIP
+          download — one style for all selected clips, per-clip
+          progress polled from the rerenders endpoint. */}
+      {selected.size > 0 ? (
+        <BulkRerenderBar clipIds={[...selected]} onDone={() => void loadJobs()} />
       ) : null}
 
       {zipMessage ? (

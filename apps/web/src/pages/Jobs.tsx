@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Briefcase, CheckCircle2, Clock, ListVideo, Loader2, Search, XCircle } from 'lucide-react'
+import { Briefcase, CheckCircle2, Clock, ListVideo, Loader2, Pencil, Search, Trash2, XCircle } from 'lucide-react'
 import { EmptyState } from '../components/EmptyState'
 import { JobStatusPill, jobSummary } from '../components/JobStatusPill'
 import { PageHeader } from '../components/PageHeader'
 import { StatCard } from '../components/StatCard'
 import { formatDuration } from '../lib/format'
 import { listJobs, type Job, type JobStatus } from '../lib/jobs'
+import { listLaravelProjects } from '../lib/projects-api'
 import { useAuth } from '../state/auth'
 import { usePreferences } from '../state/preferences'
-import { useProjects } from '../state/projects'
+import { useProjects, type ProjectRecord } from '../state/projects'
 
 type StatusFilter = JobStatus | 'all'
 
@@ -58,7 +59,32 @@ export function JobsPage() {
   const [loadError, setLoadError] = useState(false)
   const [counts, setCounts] = useState<Record<JobStatus, number> | null>(null)
   const [query, setQuery] = useState('')
-  const { projects } = useProjects()
+  const { projects, updateProject, removeProject } = useProjects()
+  // Batch 9 (2026-11-25): /projects was hidden and its rename + delete
+  // moved here. Exact server counts per project (jobs + clips) for the
+  // delete warning — the loaded page alone can under-count a project
+  // whose jobs span several pages.
+  const [serverCounts, setServerCounts] = useState<Map<number, { jobs: number; clips: number }>>(new Map())
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    void listLaravelProjects()
+      .then((laravel) => {
+        if (cancelled) return
+        setServerCounts(
+          new Map(laravel.map((p) => [p.id, { jobs: p.processing_jobs_count, clips: p.clips_count }])),
+        )
+      })
+      .catch(() => {
+        // Counts are a nicety for the delete warning — the generic
+        // warning covers it when they fail to load.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   // Project title per Laravel project id — for searching jobs by their
   // project's title (same pattern as the Library page).
@@ -83,6 +109,63 @@ export function JobsPage() {
     )
   }, [jobs, query, projectTitleById])
   const searching = query.trim() !== ''
+
+  // Group the loaded jobs by their project so each project can be
+  // renamed / deleted from this page. Jobs whose project is not in
+  // the store (or has no project) fall into an "Other jobs" group
+  // with no project actions.
+  const jobGroups = useMemo(() => {
+    const groups: Array<{ project: ProjectRecord | null; jobs: Job[] }> = []
+    const byProject = new Map<string, Job[]>()
+    const other: Job[] = []
+    for (const job of filteredJobs) {
+      const project = projects.find((p) => p.laravelId !== null && p.laravelId === job.project_id)
+      if (project) {
+        const list = byProject.get(project.id) ?? []
+        list.push(job)
+        byProject.set(project.id, list)
+      } else {
+        other.push(job)
+      }
+    }
+    for (const project of projects) {
+      const list = byProject.get(project.id)
+      if (list) groups.push({ project, jobs: list })
+    }
+    if (other.length > 0) groups.push({ project: null, jobs: other })
+    return groups
+  }, [filteredJobs, projects])
+
+  function startRename(p: ProjectRecord) {
+    setRenamingId(p.id)
+    setRenameValue(p.title)
+  }
+
+  function saveRename(p: ProjectRecord) {
+    const title = renameValue.trim()
+    if (title && title !== p.title) updateProject(p.id, { title })
+    setRenamingId(null)
+  }
+
+  function confirmDeleteProject(p: ProjectRecord) {
+    // Deleting a project cascades to its jobs and clips on the server
+    // (foreign keys). Name the exact counts when they are known;
+    // otherwise warn generically. The Jobs list is filtered locally
+    // at once; the server state re-syncs on the next load.
+    const counts = p.laravelId !== null ? serverCounts.get(p.laravelId) : undefined
+    const detail =
+      counts !== undefined
+        ? ` This will also delete its ${counts.jobs} job${counts.jobs === 1 ? '' : 's'} and ${counts.clips} clip${counts.clips === 1 ? '' : 's'}.`
+        : ' Its jobs and clips will be deleted too.'
+    if (window.confirm(`Delete project "${p.title}"?${detail} This cannot be undone.`)) {
+      const laravelId = p.laravelId
+      removeProject(p.id)
+      if (laravelId !== null) {
+        setJobs((current) => current.filter((j) => j.project_id !== laravelId))
+        setTotal((current) => Math.max(0, current - (counts?.jobs ?? 0)))
+      }
+    }
+  }
 
   const load = useCallback(async (status: StatusFilter, pageToLoad: number, append: boolean) => {
     if (append) setLoadingMore(true)
@@ -135,7 +218,7 @@ export function JobsPage() {
         subtitle={t('jobsSubtitle')}
         actions={
           <Link
-            to="/jobs/new"
+            to="/clipper"
             className="rounded-xl btn-aurora px-4 py-2.5 text-sm font-semibold text-white"
           >
             + {t('newJobTitle')}
@@ -268,7 +351,7 @@ export function JobsPage() {
               action={
                 searching ? undefined : (
                   <Link
-                    to="/jobs/new"
+                    to="/clipper"
                     className="rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white"
                   >
                     Create your first job
@@ -278,8 +361,76 @@ export function JobsPage() {
             />
           ) : (
             <>
+              {/* Jobs grouped by project — each project header carries
+                  the rename + delete actions the old /projects page had. */}
+              {jobGroups.map((group) => (
+                <section key={group.project?.id ?? 'other'} className="mb-6">
+                  <div className="mb-3 flex flex-wrap items-center gap-3">
+                    {group.project && renamingId === group.project.id ? (
+                      <div className="flex min-w-0 flex-1 items-center gap-2">
+                        <input
+                          type="text"
+                          value={renameValue}
+                          onChange={(e) => setRenameValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') saveRename(group.project as ProjectRecord)
+                            if (e.key === 'Escape') setRenamingId(null)
+                          }}
+                          aria-label="Project title"
+                          autoFocus
+                          className="min-w-0 flex-1 rounded-lg border border-ink-border bg-ink-panel2 px-3 py-2 text-sm text-white focus:border-brand focus:outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => saveRename(group.project as ProjectRecord)}
+                          className="rounded-lg btn-aurora px-3 py-2 text-sm font-semibold text-white"
+                        >
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setRenamingId(null)}
+                          className="rounded-lg border border-ink-border px-3 py-2 text-sm text-[var(--color-text-muted)] hover:text-white"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <h2 className="min-w-0 flex-1 truncate text-base font-semibold text-white">
+                          {group.project ? group.project.title : 'Other jobs'}
+                        </h2>
+                        <span className="text-xs text-[var(--color-text-muted)]">
+                          {group.jobs.length} job{group.jobs.length === 1 ? '' : 's'}
+                          {group.project && group.project.laravelId !== null && serverCounts.has(group.project.laravelId)
+                            ? ` · ${serverCounts.get(group.project.laravelId)?.clips ?? 0} clips`
+                            : ''}
+                        </span>
+                        {group.project ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => startRename(group.project as ProjectRecord)}
+                              aria-label={`Rename ${group.project.title}`}
+                              className="rounded-lg border border-ink-border p-2 text-[var(--color-text-muted)] hover:text-white"
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => confirmDeleteProject(group.project as ProjectRecord)}
+                              aria-label={`Delete ${group.project.title}`}
+                              className="rounded-lg border border-ink-border p-2 text-[var(--color-text-muted)] hover:text-red-300"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </>
+                        ) : null}
+                      </>
+                    )}
+                  </div>
               <ul className="space-y-3">
-                {filteredJobs.map((job) => (
+                {group.jobs.map((job) => (
                   <li key={job.id}>
                     <Link
                       to={`/jobs/${job.id}`}
@@ -326,6 +477,8 @@ export function JobsPage() {
                   </li>
                 ))}
               </ul>
+                </section>
+              ))}
               <p className="mt-4 text-sm text-[var(--color-text-muted)]">
                 Showing {jobs.length} of {total} job{total === 1 ? '' : 's'}.
               </p>

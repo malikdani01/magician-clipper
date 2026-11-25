@@ -1,14 +1,11 @@
-import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { AdminLayout } from './layout/AdminLayout'
 import { AppShell } from './layout/AppShell'
 import { AuthProvider } from './state/auth'
 import { PreferencesProvider } from './state/preferences'
 import { ProjectProvider } from './state/projects'
-import { SearchProvider } from './state/search'
 import { BrandKitPage } from './pages/BrandKit'
-import { CaptionsPage } from './pages/Captions'
 import { ClipperPage } from './pages/Clipper'
-import { CreateProjectPage } from './pages/CreateProject'
 import { DashboardPage } from './pages/Dashboard'
 import { EditorPage } from './pages/Editor'
 import { ExportsPage } from './pages/Exports'
@@ -17,21 +14,30 @@ import { JobDetailPage } from './pages/JobDetail'
 import { JobsPage } from './pages/Jobs'
 import { LibraryPage } from './pages/Library'
 import { LoginPage } from './pages/Login'
-import { NewJobPage } from './pages/NewJob'
 import { NotFoundPage } from './pages/NotFound'
-import { ProjectsPage } from './pages/Projects'
 import { RegisterPage } from './pages/Register'
 import { SettingsPage } from './pages/Settings'
 import { UsagePage } from './pages/Usage'
-import { AdminDashboardPage, AdminGenericPage } from './pages/admin/AdminPages'
+import { AdminDashboardPage, AdminGenericPage, AdminSettingsPage } from './pages/admin/AdminPages'
+
+/**
+ * Batch 9 (2026-11-25): the hidden creation/list pages redirect to
+ * their replacements, preserving the query string so old bookmarks
+ * keep working — /jobs/new?clone=12 lands in the wizard with the
+ * clone loaded, ?source=link&url=… lands with the link pre-filled.
+ * The components themselves were deleted; only these redirects remain.
+ */
+function RedirectToClipper() {
+  const { search } = useLocation()
+  return <Navigate to={{ pathname: '/clipper', search }} replace />
+}
 
 export function App() {
   return (
     <BrowserRouter>
-      <SearchProvider>
-        <ProjectProvider>
-          <AuthProvider>
-            <PreferencesProvider>
+      <ProjectProvider>
+        <AuthProvider>
+          <PreferencesProvider>
             <Routes>
               {/* Auth pages — outside the app shell (no sidebar). */}
               <Route path="login" element={<LoginPage />} />
@@ -40,15 +46,15 @@ export function App() {
               {/* User panel */}
               <Route element={<AppShell />}>
                 <Route index element={<DashboardPage />} />
-                <Route path="create" element={<CreateProjectPage />} />
-                <Route path="projects" element={<ProjectsPage />} />
+                <Route path="create" element={<Navigate to="/clipper" replace />} />
+                <Route path="projects" element={<Navigate to="/jobs" replace />} />
                 <Route path="library" element={<LibraryPage />} />
                 <Route path="clipper" element={<ClipperPage />} />
                 <Route path="jobs" element={<JobsPage />} />
-                <Route path="jobs/new" element={<NewJobPage />} />
+                <Route path="jobs/new" element={<RedirectToClipper />} />
                 <Route path="jobs/:id" element={<JobDetailPage />} />
                 <Route path="editor" element={<EditorPage />} />
-                <Route path="captions" element={<CaptionsPage />} />
+                <Route path="captions" element={<Navigate to="/settings" replace />} />
                 <Route path="brand-kit" element={<BrandKitPage />} />
                 <Route path="exports" element={<ExportsPage />} />
                 <Route path="usage" element={<UsagePage />} />
@@ -86,15 +92,14 @@ export function App() {
             <Route path="logs" element={<AdminGenericPage title="System Logs" subtitle="Application and worker logs." />} />
             <Route path="monitor" element={<AdminGenericPage title="Server Monitor" subtitle="CPU, RAM, disk and queue health." />} />
             <Route path="reports" element={<AdminGenericPage title="Reports & Analytics" subtitle="Usage, revenue and growth reports." />} />
-            <Route path="settings" element={<AdminGenericPage title="Admin Settings" subtitle="Platform-wide admin configuration." />} />
+            <Route path="settings" element={<AdminSettingsPage />} />
           </Route>
 
           <Route path="*" element={<NotFoundPage />} />
             </Routes>
-            </PreferencesProvider>
-          </AuthProvider>
-        </ProjectProvider>
-      </SearchProvider>
+          </PreferencesProvider>
+        </AuthProvider>
+      </ProjectProvider>
     </BrowserRouter>
   )
 }

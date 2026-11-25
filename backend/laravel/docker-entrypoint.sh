@@ -6,8 +6,10 @@
 # manually created Render service has no pre-deploy command field
 # (it is a gated feature), so render.yaml's preDeployCommand never
 # runs there. Both commands are safe to re-run: migrate applies only
-# pending migrations, and the seeder creates the admin user with
-# firstOrCreate (only when ADMIN_EMAIL + ADMIN_PASSWORD are set).
+# pending migrations, and the seeder is CREATE-ONLY BY ROLE — it does
+# nothing at all when an admin already exists, so panel-changed admin
+# credentials and every saved setting survive every deploy (see
+# DatabaseSeeder + tests/Feature/DeploySafetyTest.php).
 set -e
 
 php artisan migrate --force

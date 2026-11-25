@@ -22,13 +22,22 @@ import { API_URL, getToken } from './api'
 
 export type JobStatus = 'queued' | 'processing' | 'ready' | 'failed' | 'cancelled'
 
-/** Clip layout (9:16 only — other ratios fall back to centre crop). */
+/** Clip layout (9:16 only — other ratios fall back to centre crop).
+ * Batch 9 (2026-11-25): five more layouts — gradient_fill, stacked,
+ * letterbox, face_closeup, framed. Single source of truth: the wizard
+ * picker, JobDetail "Settings used", and the backend validation all
+ * read this list (the worker has its own matching branches). */
 export type ClipLayout =
   | 'center_crop'
   | 'split'
   | 'pip_facecam'
   | 'blur_fill'
   | 'streamer_full'
+  | 'gradient_fill'
+  | 'stacked'
+  | 'letterbox'
+  | 'face_closeup'
+  | 'framed'
 
 export const LAYOUT_LABELS: Record<ClipLayout, string> = {
   center_crop: 'Centre crop (full frame)',
@@ -36,6 +45,11 @@ export const LAYOUT_LABELS: Record<ClipLayout, string> = {
   pip_facecam: 'Gameplay full + facecam corner',
   blur_fill: 'Blurred background fill',
   streamer_full: 'Streamer full frame',
+  gradient_fill: 'Gradient fill — video centred on a smooth gradient',
+  stacked: 'Podcast stack — video top, dark panel below',
+  letterbox: 'Letterbox — cinematic black bars',
+  face_closeup: 'Face close-up — tight crop following the speaker',
+  framed: 'Framed — video inset with a clean border',
 }
 
 /** How clips are picked from the source (per job). */
@@ -80,7 +94,53 @@ export type CaptionPosition = 'bottom' | 'top' | 'middle'
 export const CAPTION_POSITION_LABELS: Record<CaptionPosition, string> = {
   bottom: 'Bottom',
   top: 'Top',
-  middle: 'Middle',
+  // Batch 9: the UI label is "Centre" (the user's word); the stored
+  // value stays "middle" — only the label changed, never the value.
+  middle: 'Centre',
+}
+
+/** OST position — WHERE the headline sits (Batch 9, 2026-11-25).
+ * Independent of headline_style (the LOOK). Defaults derive from
+ * the style server-side: bold_bar -> top, lower_third -> bottom,
+ * big_centre -> centre. */
+export type OstPosition = 'top' | 'centre' | 'bottom'
+
+export const OST_POSITION_LABELS: Record<OstPosition, string> = {
+  top: 'Top',
+  centre: 'Centre',
+  bottom: 'Bottom',
+}
+
+export function defaultOstPosition(headlineStyle: HeadlineStyle): OstPosition {
+  return headlineStyle === 'lower_third'
+    ? 'bottom'
+    : headlineStyle === 'big_centre'
+      ? 'centre'
+      : 'top'
+}
+
+/** Sound-effect sting over clip cuts (Batch 9, 2026-11-25). */
+export type Sfx = 'none' | 'whoosh' | 'pop' | 'whoosh_pop'
+
+export const SFX_LABELS: Record<Sfx, string> = {
+  none: 'None',
+  whoosh: 'Whoosh',
+  pop: 'Pop',
+  whoosh_pop: 'Whoosh + Pop',
+}
+
+/** Per-job colour grade (Batch 9, 2026-11-25). The worker applies
+ * the grade as a video filter on the final render only; 'none'
+ * adds no filter — the render pipeline is untouched. No preview
+ * is shown in the UI; the dropdown only selects the grade. */
+export type ColourGrade = 'none' | 'vibrant' | 'warm' | 'cool' | 'cinematic'
+
+export const COLOUR_GRADE_LABELS: Record<ColourGrade, string> = {
+  none: 'None (default)',
+  vibrant: 'Vibrant',
+  warm: 'Warm',
+  cool: 'Cool',
+  cinematic: 'Cinematic',
 }
 
 /** Headline entrance animation (Batch 7, 2026-11-25). Applies to the
@@ -101,16 +161,81 @@ export const OST_ANIMATION_DESCRIPTIONS: Record<OstAnimation, string> = {
   pop: 'The headline pops in from 60% size over its first 0.15s.',
 }
 
-/** Captions auto-translate target (Batch 3, 2026-11-25). 'none' means
- * the captions stay in the transcript's original language. */
-export type CaptionTranslation = 'none' | 'ur' | 'hi' | 'en'
+/** Output languages for caption + headline translation (Batch 9,
+ * 2026-11-25). MyMemory ISO 639-1 codes (zh-CN for Simplified
+ * Chinese). A code MyMemory does not support falls back honestly —
+ * the segment keeps its original text and the job note says so. */
+export const TRANSLATION_LANGUAGES = {
+  en: 'English',
+  ur: 'Urdu',
+  hi: 'Hindi',
+  es: 'Spanish',
+  fr: 'French',
+  de: 'German',
+  pt: 'Portuguese',
+  ar: 'Arabic',
+  tr: 'Turkish',
+  id: 'Indonesian',
+  bn: 'Bengali',
+  pa: 'Punjabi',
+  ta: 'Tamil',
+  te: 'Telugu',
+  ml: 'Malayalam',
+  mr: 'Marathi',
+  gu: 'Gujarati',
+  ru: 'Russian',
+  ja: 'Japanese',
+  ko: 'Korean',
+  'zh-CN': 'Chinese (Simplified)',
+  it: 'Italian',
+  nl: 'Dutch',
+  pl: 'Polish',
+  uk: 'Ukrainian',
+  vi: 'Vietnamese',
+  th: 'Thai',
+  fa: 'Persian',
+  ps: 'Pashto',
+  sd: 'Sindhi',
+  ne: 'Nepali',
+  si: 'Sinhala',
+} as const
+
+export type TranslationLanguageCode = keyof typeof TRANSLATION_LANGUAGES
+
+/** Captions auto-translate target (Batch 3, 2026-11-25; broadened
+ * Batch 9). 'none' means the captions stay in the transcript's
+ * original language. */
+export type CaptionTranslation = 'none' | TranslationLanguageCode
 
 export const CAPTION_TRANSLATION_LABELS: Record<CaptionTranslation, string> = {
   none: 'None (original language)',
-  ur: 'Urdu',
-  hi: 'Hindi',
-  en: 'English',
+  ...TRANSLATION_LANGUAGES,
 }
+
+/** On-screen headline language (Batch 9, 2026-11-25). 'source'
+ * means the headline stays in the video's own language (today's
+ * behaviour); any other value translates the DERIVED headline
+ * (campaign verbatim first, else the transcript headline) through
+ * the same MyMemory path as captions. The end-card text and
+ * lower-third tag are the user's own words and are never
+ * translated; keyword pop-ups match the spoken words and are
+ * never translated either. */
+export type OstLanguage = 'source' | TranslationLanguageCode
+
+export const OST_LANGUAGE_LABELS: Record<OstLanguage, string> = {
+  source: 'Source language',
+  ...TRANSLATION_LANGUAGES,
+}
+
+/** Transcription/source language for captions (Batch 3) — which
+ * language the speech is in. This is NOT the output language: the
+ * output language is caption_translation / ost_language. */
+export const CAPTION_LANGUAGES = [
+  { id: 'auto', label: 'Auto-detect' },
+  { id: 'english', label: 'English' },
+  { id: 'roman_urdu', label: 'Roman Urdu' },
+  { id: 'hindi', label: 'Hindi' },
+] as const
 
 /** Ratios a job renders in (Batch 3, 2026-11-25). 9:16 is always on;
  * 1:1 and 16:9 are optional extras — the same clips in each ratio. */
@@ -141,6 +266,18 @@ export interface JobSettings {
    * older jobs, where the worker uses bold_bar / bottom. */
   headline_style?: string
   caption_position?: string
+  /** Batch 9 OST position (2026-11-25); absent on older jobs, where
+   * the worker uses the style default (bold_bar -> top,
+   * lower_third -> bottom, big_centre -> centre). */
+  ost_position?: string
+  /** Batch 9 OST language (2026-11-25); absent means 'source' —
+   * the headline stays in the video's own language. */
+  ost_language?: string
+  /** Batch 9 SFX sting (2026-11-25); absent means 'none'. */
+  sfx?: string
+  /** Batch 9 colour grade (2026-11-25); absent means 'none' —
+   * no filter, the render pipeline is untouched. */
+  colour_grade?: string
   /** Batch 3 beat sync (2026-11-25); absent on older jobs, where the
    * worker treats it as ON. */
   beat_sync?: boolean
@@ -202,6 +339,11 @@ export interface JobClip {
   is_favourite: boolean
   /** Caption style burned into this clip (null when rendered before styles were stored). */
   caption_style: string | null
+  /** Batch 9: whether the worker tracked the face through this clip
+   * (false when it did not report it) and, for a Variant B clip, the
+   * Variant A clip id it was rendered from (null = original). */
+  face_tracked?: boolean
+  variant_of_clip_id?: number | null
   created_at: string
 }
 
@@ -222,6 +364,8 @@ export interface Job {
    * on jobs rendered before suggestions existed. */
   title_suggestion?: string | null
   hashtags?: string[] | null
+  /** Batch 9: the music bed's original file name (null = no bed). */
+  music_bed_name?: string | null
   settings: JobSettings | null
   source_type: 'upload' | 'link'
   source_url: string | null
@@ -246,7 +390,7 @@ export interface CreateJobInput {
   aspectRatio: '9:16' | '16:9' | '1:1' | '4:5'
   clipCount: number
   durationMode: 'exact' | 'minimum' | 'maximum'
-  /** Exact length, or the min/max bound per mode (see NewJobPage). */
+  /** Exact length, or the min/max bound per mode (see the wizard, Clipper.tsx). */
   durationSeconds: number
   durationMinSeconds?: number | null
   durationMaxSeconds?: number | null
@@ -266,6 +410,20 @@ export interface CreateJobInput {
   headlineStyle: HeadlineStyle
   /** Batch 2 caption position; default 'bottom'. */
   captionPosition: CaptionPosition
+  /** Batch 9 OST position (see OST_POSITION_LABELS); default follows
+   * the headline style (bold_bar -> top, lower_third -> bottom,
+   * big_centre -> centre). */
+  ostPosition: OstPosition
+  /** Batch 9 OST language (see OST_LANGUAGE_LABELS); default
+   * 'source' — the headline stays in the video's own language. */
+  ostLanguage: OstLanguage
+  /** Batch 9 SFX sting (default 'none'). */
+  sfx: Sfx
+  /** Batch 9 colour grade (default 'none' — no filter). */
+  colourGrade: ColourGrade
+  /** Batch 9 music bed file (mp3/wav/m4a, max 50 MB) — uploaded with
+   * the job; null = no music bed. */
+  musicBed?: File | null
   /** Batch 3 beat sync (default ON) — snap cuts and zoom to the beat. */
   beatSync: boolean
   /** Batch 3 caption translation (default 'none'). */
@@ -384,6 +542,13 @@ function appendSettingsForm(form: FormData, input: CreateJobInput): void {
   form.append('filler_removal', String(input.fillerRemoval))
   form.append('headline_style', input.headlineStyle)
   form.append('caption_position', input.captionPosition)
+  form.append('ost_position', input.ostPosition)
+  form.append('ost_language', input.ostLanguage)
+  form.append('sfx', input.sfx)
+  form.append('colour_grade', input.colourGrade)
+  if (input.musicBed) {
+    form.append('music_bed', input.musicBed)
+  }
   form.append('beat_sync', String(input.beatSync))
   form.append('caption_translation', input.captionTranslation)
   for (const ratio of input.exportRatios) {
@@ -455,6 +620,10 @@ export async function createJob(input: CreateJobInput): Promise<JobResult> {
           filler_removal: input.fillerRemoval,
           headline_style: input.headlineStyle,
           caption_position: input.captionPosition,
+          ost_position: input.ostPosition,
+          ost_language: input.ostLanguage,
+          sfx: input.sfx,
+          colour_grade: input.colourGrade,
           beat_sync: input.beatSync,
           caption_translation: input.captionTranslation,
           export_ratios: input.exportRatios,
@@ -814,6 +983,10 @@ export interface ClipRerender {
   id: number
   clip_id: number
   caption_style: string
+  /** Batch 9: true when this row renders a NEW Variant B clip
+   * instead of replacing the original file in place. */
+  is_variant?: boolean
+  variant_headline_style?: string | null
   status: 'queued' | 'processing' | 'ready' | 'failed'
   error_message: string | null
   created_at: string
@@ -865,6 +1038,121 @@ export async function requestClipRerender(
         : err instanceof Error
           ? err.message
           : 'Could not queue the re-render.',
+    }
+  } finally {
+    cancel()
+  }
+}
+
+export type BulkRerenderResult =
+  | {
+      ok: true
+      rerenders: ClipRerender[]
+      skipped: { clip_id: number; reason: string }[]
+    }
+  | { ok: false; error: string; status?: number }
+
+/**
+ * POST /api/v1/clips/bulk-rerender — queue a re-render of several
+ * clips with one caption style. Returns the created rows plus any
+ * clips skipped (no file yet, already on that style, or a re-render
+ * already in flight) with the reason for each.
+ */
+export async function requestBulkRerender(
+  clipIds: number[],
+  captionStyle: string,
+): Promise<BulkRerenderResult> {
+  if (!getToken()) {
+    return { ok: false, error: 'Sign in to re-render clips.' }
+  }
+  if (clipIds.length === 0) {
+    return { ok: false, error: 'Select at least one clip first.' }
+  }
+  const { signal, cancel } = timeoutSignal(15000)
+  try {
+    const res = await fetch(`${API_URL}/clips/bulk-rerender`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clip_ids: clipIds, caption_style: captionStyle }),
+      signal,
+    })
+    const body: unknown = await res.json().catch(() => null)
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: serverMessage(body, `Could not queue the re-renders (HTTP ${res.status})`),
+        status: res.status,
+      }
+    }
+    const parsed = body as {
+      rerenders?: ClipRerender[]
+      skipped?: { clip_id: number; reason: string }[]
+    }
+    return {
+      ok: true,
+      rerenders: Array.isArray(parsed.rerenders) ? parsed.rerenders : [],
+      skipped: Array.isArray(parsed.skipped) ? parsed.skipped : [],
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      error: isUnreachable(err)
+        ? 'Backend is not reachable.'
+        : err instanceof Error
+          ? err.message
+          : 'Could not queue the re-renders.',
+    }
+  } finally {
+    cancel()
+  }
+}
+
+/**
+ * POST /api/v1/clips/{id}/variants — queue an A/B variant of one
+ * clip. The worker renders the SAME window with the chosen caption
+ * style (+ optional headline style) and uploads it as a NEW clip
+ * (Variant B) instead of replacing the original file.
+ */
+export async function createClipVariant(
+  clipId: number,
+  captionStyle: string,
+  headlineStyle?: string | null,
+): Promise<RerenderResult> {
+  if (!getToken()) {
+    return { ok: false, error: 'Sign in to create a variant.' }
+  }
+  const { signal, cancel } = timeoutSignal(15000)
+  try {
+    const res = await fetch(`${API_URL}/clips/${clipId}/variants`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        caption_style: captionStyle,
+        headline_style: headlineStyle ?? null,
+      }),
+      signal,
+    })
+    const body: unknown = await res.json().catch(() => null)
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: serverMessage(body, `Could not queue the variant (HTTP ${res.status})`),
+        status: res.status,
+      }
+    }
+    const rerender = (body as { rerender?: ClipRerender }).rerender
+    if (!rerender || typeof rerender.id !== 'number') {
+      return { ok: false, error: 'The server did not return the queued variant.' }
+    }
+    return { ok: true, rerender }
+  } catch (err) {
+    return {
+      ok: false,
+      error: isUnreachable(err)
+        ? 'Backend is not reachable.'
+        : err instanceof Error
+          ? err.message
+          : 'Could not queue the variant.',
     }
   } finally {
     cancel()

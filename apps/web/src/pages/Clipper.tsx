@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   AlertTriangle,
   ArrowLeft,
@@ -21,25 +21,38 @@ import {
   X,
 } from 'lucide-react'
 import { PageHeader } from '../components/PageHeader'
+import { LayoutPicker } from '../components/LayoutPicker'
 import { CaptionStylePicker, HeadlineStylePicker } from '../components/StylePicker'
-import { ENGINE_URL, extractAudio, probeVideo, type ProbeResult } from '../lib/api'
+import { API_URL, ENGINE_URL, extractAudio, probeVideo, type ProbeResult } from '../lib/api'
 import { formatBytes, formatDuration } from '../lib/format'
 import {
+  CAPTION_LANGUAGES,
   CAPTION_POSITION_LABELS,
   CAPTION_TRANSLATION_LABELS,
+  COLOUR_GRADE_LABELS,
   createJob,
+  defaultOstPosition,
   EXPORT_RATIO_OPTIONS,
-  OST_ANIMATION_DESCRIPTIONS,
-  OST_ANIMATION_LABELS,
+  getJob,
+  LAYOUT_LABELS,
+  OST_LANGUAGE_LABELS,
+  OST_POSITION_LABELS,
   SELECTION_MODE_DESCRIPTIONS,
   SELECTION_MODE_LABELS,
+  SFX_LABELS,
   type CaptionPosition,
   type CaptionTranslation,
-  type OstAnimation,
+  type ColourGrade,
+  type HeadlineStyle,
+  type JobSettings,
+  type OstLanguage,
+  type OstPosition,
   type SelectionMode,
+  type Sfx,
 } from '../lib/jobs'
-import { getCaptionStyle, translateLegacyCaptionPreset } from '../lib/captionStyles'
-import { listPresets, type JobPreset } from '../lib/presets'
+import { getCaptionStyle, isCaptionStyleId, translateLegacyCaptionPreset } from '../lib/captionStyles'
+import { createPreset, listPresets, type JobPreset, type PresetSettings } from '../lib/presets'
+import { useAuth } from '../state/auth'
 import {
   defaultClipSpec,
   setProjectFile,
@@ -73,80 +86,15 @@ const IS_LOCAL_SITE =
   typeof window !== 'undefined' &&
   /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname)
 
-/** The 18 caption presets (same ids as the Captions Studio page). */
-const CAPTION_STYLES = [
-  { id: 'bold-pop', label: 'Bold Pop' },
-  { id: 'highlight', label: 'Highlight' },
-  { id: 'bounce', label: 'Bounce' },
-  { id: 'karaoke', label: 'Karaoke' },
-  { id: 'neon-glow', label: 'Neon Glow' },
-  { id: 'word-slam', label: 'Word Slam' },
-  { id: 'modern', label: 'Modern' },
-  { id: 'podcast', label: 'Podcast' },
-  { id: 'cinematic', label: 'Cinematic' },
-  { id: 'minimal', label: 'Minimal' },
-  // Batch 3 (2026-11-25): the five new styles, as wizard presets.
-  { id: 'word-zoom', label: 'Word Zoom' },
-  { id: 'word-fade', label: 'Word Fade' },
-  { id: 'highlight-box', label: 'Highlight Box' },
-  { id: 'bounce-pop', label: 'Bounce Pop' },
-  { id: 'glitch-pop', label: 'Glitch Pop' },
-  // Batch 6 (2026-11-25): the three platform styles, as wizard presets.
-  { id: 'tiktok-bold', label: 'TikTok Bold' },
-  { id: 'reels-clean', label: 'Reels Clean' },
-  { id: 'shorts-minimal', label: 'Shorts Minimal' },
-] as const
-
 /**
- * These preset ids predate the real caption styles the worker burns in
- * (see lib/captionStyles). The mapping lives there now —
- * translateLegacyCaptionPreset maps each legacy preset to the real style
- * it most resembles — the job API rejects unknown style ids, so the
- * preset must never be sent as-is.
+ * Batch 9 (2026-11-25): the caption picker is UNIFIED with New Job —
+ * it stores REAL style ids (punchy, word_pop, …) and offers ALL 25
+ * styles via the shared StylePicker (no `options` prop = the full
+ * set). The old wizard-local LEGACY preset ids (bold-pop, highlight,
+ * …) are gone from the picker. translateLegacyCaptionPreset survives
+ * ONLY for loading old saved presets that stored a legacy id
+ * (back-compat — real ids pass through unchanged).
  */
-
-/**
- * Real caption style id → the wizard's legacy preset id. The wizard's
- * caption-style select holds LEGACY ids (bold-pop, highlight, …) while
- * presets store REAL style ids (punchy, word_pop, …) — translateLegacy-
- * CaptionPreset passes real ids through unchanged, so it cannot bridge
- * the two. Styles with no legacy equivalent (typewriter, sweep,
- * outline, gradient, kinetic, glow_pop) have no wizard option: loading
- * a preset with one of those keeps the wizard's current preset. The
- * Batch 3 styles DO have wizard presets (word-zoom, word-fade,
- * highlight-box, bounce-pop, glitch-pop), as do the Batch 6 platform
- * styles (tiktok-bold, reels-clean, shorts-minimal).
- */
-const REAL_STYLE_TO_LEGACY_PRESET: Record<string, string> = {
-  punchy: 'bold-pop',
-  word_pop: 'highlight',
-  bounce: 'bounce',
-  karaoke: 'karaoke',
-  neon: 'neon-glow',
-  slam: 'word-slam',
-  clean_subs: 'modern',
-  classic: 'podcast',
-  title_card: 'cinematic',
-  word_zoom: 'word-zoom',
-  word_fade: 'word-fade',
-  highlight_sweep: 'highlight-box',
-  bounce_in: 'bounce-pop',
-  glitch_pop: 'glitch-pop',
-  tiktok_bold: 'tiktok-bold',
-  reels_clean: 'reels-clean',
-  shorts_minimal: 'shorts-minimal',
-}
-
-/**
- * The wizard's 18 legacy presets as REAL styles for the card picker
- * (Batch 8). Two legacy presets map to the same real style — 'modern'
- * and 'minimal' are both Clean Subtitles — so the picker shows that
- * style once (17 cards); picking it stores 'modern', the existing
- * reverse mapping above. The job still gets clean_subs either way.
- */
-const WIZARD_CAPTION_OPTIONS = CAPTION_STYLES.map((p) =>
-  getCaptionStyle(translateLegacyCaptionPreset(p.id)),
-).filter((s, i, arr) => arr.findIndex((x) => x.id === s.id) === i)
 
 /** Preset quality → wizard processing mode. */
 const QUALITY_TO_PROCESSING_MODE: Record<string, ClipSpec['processingMode']> = {
@@ -155,11 +103,18 @@ const QUALITY_TO_PROCESSING_MODE: Record<string, ClipSpec['processingMode']> = {
   high: 'fast',
 }
 
-/** Processing mode → job quality (the worker renders at 'standard' unless told otherwise). */
+/**
+ * Processing mode → job quality. This MUST be the exact inverse of
+ * QUALITY_TO_PROCESSING_MODE — the old map sent 'fast' back to
+ * 'standard', so a High-quality preset silently became Standard at
+ * submit. The quality dropdown and the processing-mode buttons set
+ * both fields together (see updateQuality / updateProcessingMode),
+ * so the two can never disagree.
+ */
 const PROCESSING_MODE_TO_QUALITY: Record<string, 'draft' | 'standard' | 'high'> = {
   eco: 'draft',
   balanced: 'standard',
-  fast: 'standard',
+  fast: 'high',
 }
 
 const CONTENT_TYPES = [
@@ -315,11 +270,15 @@ export function ClipperPage() {
   const [probeUnreachable, setProbeUnreachable] = useState(false)
   const [projectId, setProjectId] = useState<string | null>(null)
 
-  // Step 1 — link import (goes through the New Job wizard, which the
-  // worker serves end to end: the backend accepts source_url and the
-  // worker downloads it with yt-dlp).
+  // Step 1 — link import (wizard-internal since the New Job page
+  // was hidden: a validated link becomes this wizard's source and
+  // the job is created from Step 3 with sourceUrl, like a file job
+  // — the worker downloads it with yt-dlp).
   const [linkUrl, setLinkUrl] = useState('')
   const [linkError, setLinkError] = useState<string | null>(null)
+  // A validated link source (no file/probe — Step 1's Continue and
+  // Step 3's Start Processing accept it in place of a project).
+  const [linkSource, setLinkSource] = useState<string | null>(null)
 
   // Step 3 — real processing: creates a Job via the API and navigates
   // to the job page, where the worker renders the clips.
@@ -337,10 +296,47 @@ export function ClipperPage() {
   const [clipCountError, setClipCountError] = useState<string | null>(null)
   const [durationText, setDurationText] = useState(() => String(spec.durationSeconds))
   const [durationError, setDurationError] = useState<string | null>(null)
-  // No captionPreset / keywords-to-avoid field exists on ClipSpec —
-  // these live in wizard-local state only and are shown as selected text.
-  const [captionPreset, setCaptionPreset] = useState<string>('bold-pop')
+  // Batch 9: the duration min/max pair for minimum/maximum modes
+  // (defaults 30–90s, like New Job; the backend caps all three at
+  // 180s).
+  const [durationMinText, setDurationMinText] = useState(() => String(spec.durationMinSeconds))
+  const [durationMaxText, setDurationMaxText] = useState(() => String(spec.durationMaxSeconds))
+  const [durationRangeError, setDurationRangeError] = useState<string | null>(null)
+  // The caption style lives on ClipSpec now (a REAL style id) — the
+  // old wizard-local legacy preset state is gone (Batch 9 unification).
   const [keywordsAvoid, setKeywordsAvoid] = useState('')
+  // Batch 9: the music bed file lives in wizard-local state only
+  // (a File cannot live in the stored ClipSpec); it is uploaded
+  // with the job at submit. No file = no music bed.
+  const [musicBed, setMusicBed] = useState<File | null>(null)
+  const [musicBedError, setMusicBedError] = useState<string | null>(null)
+  const musicBedInputRef = useRef<HTMLInputElement>(null)
+  // Batch 9: whether the user picked an OST position explicitly.
+  // Until then, changing the headline style moves the position to
+  // that style's default.
+  const ostPositionTouchedRef = useRef(false)
+  const pickHeadlineStyle = (s: HeadlineStyle) => {
+    if (!ostPositionTouchedRef.current) {
+      updateSpec({ headlineStyle: s, ostPosition: defaultOstPosition(s) })
+    } else {
+      updateSpec({ headlineStyle: s })
+    }
+  }
+  const handleMusicBed = (f: File | undefined) => {
+    if (!f) return
+    const ext = f.name.split('.').pop()?.toLowerCase() ?? ''
+    if (!['mp3', 'wav', 'm4a'].includes(ext)) {
+      setMusicBedError(`"${f.name}" is not an audio file. Choose an MP3, WAV or M4A file.`)
+      return
+    }
+    if (f.size > 50 * 1024 * 1024) {
+      setMusicBedError(`"${f.name}" is over the 50 MB music-bed limit.`)
+      return
+    }
+    setMusicBedError(null)
+    setMusicBed(f)
+    if (musicBedInputRef.current) musicBedInputRef.current.value = ''
+  }
 
   // Job presets (GET /api/v1/presets) — load a saved settings snapshot
   // into the Step 2 form. Presets hold settings only; the source is
@@ -348,6 +344,20 @@ export function ClipperPage() {
   const [presets, setPresets] = useState<JobPreset[]>([])
   const [selectedPresetId, setSelectedPresetId] = useState('')
   const [presetMessage, setPresetMessage] = useState<string | null>(null)
+  // Batch 9: saving a preset from this wizard (the New Job page had
+  // the save UI; the wizard is the only creation flow now, so the
+  // save lives here too — same endpoint, same settings snapshot).
+  const [presetName, setPresetName] = useState('')
+  const [presetSaving, setPresetSaving] = useState(false)
+  // Batch 9: clone (?clone=<id>) — settings copied from an earlier
+  // job; the source is never reused (same banner as New Job had).
+  const [clonedFrom, setClonedFrom] = useState<number | null>(null)
+  const [cloneError, setCloneError] = useState<string | null>(null)
+  // Set once a preset/clone has applied settings, so the saved-default
+  // caption style effect below does not clobber them afterwards.
+  const settingsAppliedRef = useRef(false)
+  const { token } = useAuth()
+  const [searchParams] = useSearchParams()
 
   useEffect(() => {
     let cancelled = false
@@ -359,6 +369,84 @@ export function ClipperPage() {
     }
   }, [])
 
+  // Link prefill: the user (or an old bookmark) arrives with
+  // ?source=link&url=… — open Step 1 with the URL already pasted
+  // (same behaviour New Job had). Only on first mount.
+  useEffect(() => {
+    if (searchParams.get('source') === 'link') {
+      const url = searchParams.get('url') ?? ''
+      if (url) setLinkUrl(url)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Clone (?clone=<jobId>): copy an earlier job's settings into Step 2.
+  // The source is never copied — the user picks the video/link again
+  // (the banner says so). Same error handling New Job had for
+  // bad/missing ids.
+  useEffect(() => {
+    const cloneId = searchParams.get('clone')
+    if (!cloneId) return
+    const id = Number(cloneId)
+    if (!Number.isFinite(id) || id <= 0) {
+      setCloneError(`Could not clone job "${cloneId}" — that is not a valid job id.`)
+      return
+    }
+    let cancelled = false
+    getJob(id)
+      .then((result) => {
+        if (cancelled) return
+        if (!result.ok) {
+          setCloneError(`Could not clone job #${id} — ${result.error}`)
+          return
+        }
+        if (!result.job.settings) {
+          setCloneError(`Could not clone job #${id} — the job has no settings to copy.`)
+          return
+        }
+        applySettings(result.job.settings)
+        settingsAppliedRef.current = true
+        setClonedFrom(id)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCloneError(`Could not clone job #${id} — the job could not be loaded.`)
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Default caption style from the user's saved settings (Settings →
+  // Preferences saves it via PATCH /api/v1/settings). 'punchy' when
+  // nothing is saved. Skipped once a preset/clone has applied
+  // settings — theirs wins. Same behaviour New Job had.
+  useEffect(() => {
+    if (!token || settingsAppliedRef.current) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch(`${API_URL}/settings`, {
+          headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
+        })
+        if (!res.ok) return
+        const body = (await res.json()) as { settings?: { caption_style?: unknown } }
+        const saved = body.settings?.caption_style
+        if (!cancelled && !settingsAppliedRef.current && isCaptionStyleId(saved)) {
+          updateSpec({ captionStyle: saved })
+        }
+      } catch {
+        // Backend unreachable — keep the 'punchy' default.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token])
+
   const inputRef = useRef<HTMLInputElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   // Stale-response guards: a probe/audio call that finishes after a newer
@@ -367,7 +455,15 @@ export function ClipperPage() {
   const audioRequestRef = useRef(0)
 
   const project = projectId ? getProject(projectId) : undefined
-  const specValid = clipCountError === null && durationError === null
+  /** Campaign jobs need requirements (same rule as New Job) — the
+   * derived flag blocks Continue until they are filled in. */
+  const campaignInvalid =
+    spec.jobType === 'campaign' && spec.campaignRequirements.trim() === ''
+  const specValid =
+    clipCountError === null &&
+    durationError === null &&
+    durationRangeError === null &&
+    !campaignInvalid
   // Stepper: step 1 is always reachable; later steps need a probed project
   // and must have been visited (or be the immediate next step, so every
   // step stays reachable even though Step 4's Continue is disabled).
@@ -389,20 +485,32 @@ export function ClipperPage() {
   }
 
   /**
-   * Load a saved job preset into the Step 2 form. Every field is
-   * validated against what this wizard accepts first — a value outside
-   * the wizard's range (e.g. clip count above 20, duration outside
-   * 5–300s) is skipped, not forced in. The caption style maps through
-   * the legacy-preset table above; a real style with no wizard option
-   * keeps the wizard's current preset and says so. Preset fields with
-   * no wizard equivalent (layout is derived at submit, job type is
-   * always "for myself" here, captions language is always Auto) are
-   * not applied.
+   * Quality and processing mode are two controls for one choice, so
+   * they always move together — picking a quality sets the matching
+   * processing mode and vice versa (the maps are exact inverses, so
+   * a High preset can no longer silently become Standard at submit).
    */
-  const handleLoadPreset = (id: number) => {
-    const preset = presets.find((p) => p.id === id)
-    if (!preset) return
-    const s = preset.settings
+  const updateQuality = (q: ClipSpec['quality']) => {
+    const mode = QUALITY_TO_PROCESSING_MODE[q]
+    updateSpec(mode ? { quality: q, processingMode: mode } : { quality: q })
+  }
+  const updateProcessingMode = (m: ClipSpec['processingMode']) => {
+    const q = PROCESSING_MODE_TO_QUALITY[m]
+    updateSpec(q ? { processingMode: m, quality: q } : { processingMode: m })
+  }
+
+  /**
+   * Apply a saved settings snapshot (preset or cloned job) to the
+   * Step 2 form. Every field is validated against what this wizard
+   * accepts first — a value outside the wizard's range (e.g. clip
+   * count above 20, duration outside 5–300s) is skipped, not forced
+   * in. A caption style with no real id keeps the wizard's current
+   * style and says so. The wizard has no notes field, so a preset's
+   * notes are not applied (they stay in the preset). Sets
+   * settingsAppliedRef so the saved-default caption style effect
+   * does not clobber these settings afterwards.
+   */
+  const applySettings = (s: PresetSettings | JobSettings) => {
     const skipped: string[] = []
     const patch: Partial<ClipSpec> = {}
     if (s.platform === 'tiktok' || s.platform === 'instagram') {
@@ -427,6 +535,23 @@ export function ClipperPage() {
       } else if (typeof s.duration_seconds === 'number') {
         skipped.push(`clip duration (${s.duration_seconds}s is outside this wizard's 5–300s)`)
       }
+      // Batch 9: the min/max pair for minimum/maximum modes
+      // (defaults 30–90s; the backend caps all three at 180s).
+      if (
+        typeof s.duration_min_seconds === 'number' &&
+        typeof s.duration_max_seconds === 'number' &&
+        s.duration_min_seconds >= 5 && s.duration_min_seconds <= 180 &&
+        s.duration_max_seconds >= 5 && s.duration_max_seconds <= 180 &&
+        s.duration_min_seconds < s.duration_max_seconds
+      ) {
+        patch.durationMinSeconds = Math.round(s.duration_min_seconds)
+        patch.durationMaxSeconds = Math.round(s.duration_max_seconds)
+        setDurationMinText(String(Math.round(s.duration_min_seconds)))
+        setDurationMaxText(String(Math.round(s.duration_max_seconds)))
+        setDurationRangeError(null)
+      } else if (typeof s.duration_min_seconds === 'number' || typeof s.duration_max_seconds === 'number') {
+        skipped.push('duration range (min/max outside 5–180s, or min not below max)')
+      }
     }
     if (typeof s.captions_enabled === 'boolean') patch.captions = s.captions_enabled
     if (s.selection_mode === 'interesting_only' || s.selection_mode === 'fill_any') {
@@ -445,14 +570,15 @@ export function ClipperPage() {
       patch.captionPosition = s.caption_position
     }
     // Batch 3 (2026-11-25): beat sync, caption translation, export ratios.
+    // Batch 9: the translation list is broad now (32 languages) —
+    // any label in the shared list validates.
     if (typeof s.beat_sync === 'boolean') patch.beatSync = s.beat_sync
     if (
       s.caption_translation === 'none' ||
-      s.caption_translation === 'ur' ||
-      s.caption_translation === 'hi' ||
-      s.caption_translation === 'en'
+      (typeof s.caption_translation === 'string' &&
+        s.caption_translation in CAPTION_TRANSLATION_LABELS)
     ) {
-      patch.captionTranslation = s.caption_translation
+      patch.captionTranslation = s.caption_translation as CaptionTranslation
     }
     if (Array.isArray(s.export_ratios)) {
       const ratios = s.export_ratios.filter((r) => r === '9:16' || r === '1:1' || r === '16:9')
@@ -465,16 +591,35 @@ export function ClipperPage() {
     // Batch 6 (2026-11-25): caption safe zone (default ON).
     if (typeof s.caption_safe_zone === 'boolean') patch.captionSafeZone = s.caption_safe_zone
     // Batch 7 (2026-11-25): whole-clip on-screen text (defaults OFF).
+    // Batch 9: ost_animation is no longer a control — OST is always
+    // static, so an old preset's animation value is ignored here.
     if (typeof s.ost_persistent === 'boolean') patch.ostPersistent = s.ost_persistent
-    if (
-      s.ost_animation === 'none' ||
-      s.ost_animation === 'slide' ||
-      s.ost_animation === 'fade' ||
-      s.ost_animation === 'pop'
-    ) {
-      patch.ostAnimation = s.ost_animation
-    }
     if (typeof s.end_card === 'boolean') patch.endCard = s.end_card
+    // Batch 9 (2026-11-25): OST position + SFX. An old preset
+    // without ost_position keeps the style default.
+    if (s.ost_position === 'top' || s.ost_position === 'centre' || s.ost_position === 'bottom') {
+      patch.ostPosition = s.ost_position
+      ostPositionTouchedRef.current = true
+    } else if (s.headline_style === 'bold_bar' || s.headline_style === 'lower_third' || s.headline_style === 'big_centre') {
+      patch.ostPosition = defaultOstPosition(s.headline_style)
+      ostPositionTouchedRef.current = false
+    }
+    if (s.sfx === 'none' || s.sfx === 'whoosh' || s.sfx === 'pop' || s.sfx === 'whoosh_pop') {
+      patch.sfx = s.sfx
+    }
+    // Batch 9 (2026-11-25): OST language. An old preset without it
+    // keeps 'source' (the video's own language).
+    if (
+      s.ost_language === 'source' ||
+      (typeof s.ost_language === 'string' && s.ost_language in OST_LANGUAGE_LABELS)
+    ) {
+      patch.ostLanguage = s.ost_language as OstLanguage
+    }
+    // Batch 9 (2026-11-25): colour grade. An old preset without
+    // it keeps 'none' (no filter).
+    if (s.colour_grade === 'none' || s.colour_grade === 'vibrant' || s.colour_grade === 'warm' || s.colour_grade === 'cool' || s.colour_grade === 'cinematic') {
+      patch.colourGrade = s.colour_grade
+    }
     if (typeof s.end_card_text === 'string') patch.endCardText = s.end_card_text
     if (typeof s.keyword_popups === 'boolean') patch.keywordPopups = s.keyword_popups
     if (typeof s.lower_third_text === 'string') patch.lowerThirdText = s.lower_third_text
@@ -482,29 +627,151 @@ export function ClipperPage() {
     if (CONTENT_TYPES.some((c) => c.id === s.content_type)) {
       patch.contentType = s.content_type as ClipSpec['contentType']
     }
-    const processingMode = QUALITY_TO_PROCESSING_MODE[s.quality]
-    if (processingMode) patch.processingMode = processingMode
-    updateSpec(patch)
-    const legacyPresetId =
-      typeof s.caption_style === 'string' ? REAL_STYLE_TO_LEGACY_PRESET[s.caption_style] : undefined
-    if (legacyPresetId) {
-      setCaptionPreset(legacyPresetId)
-    } else if (typeof s.caption_style === 'string') {
-      skipped.push(
-        `caption style (“${s.caption_style}” has no option in this wizard — kept the current preset)`,
-      )
+    // Batch 9 (2026-11-25): job type + campaign requirements, layout,
+    // quality (both fields move together — see updateQuality).
+    if (s.job_type === 'myself' || s.job_type === 'campaign') {
+      patch.jobType = s.job_type
     }
+    if (typeof s.campaign_requirements === 'string') {
+      patch.campaignRequirements = s.campaign_requirements
+    }
+    if (
+      s.layout === 'center_crop' ||
+      s.layout === 'split' ||
+      s.layout === 'pip_facecam' ||
+      s.layout === 'blur_fill' ||
+      s.layout === 'streamer_full' ||
+      s.layout === 'gradient_fill' ||
+      s.layout === 'stacked' ||
+      s.layout === 'letterbox' ||
+      s.layout === 'face_closeup' ||
+      s.layout === 'framed'
+    ) {
+      patch.layout = s.layout
+    }
+    if (s.quality === 'draft' || s.quality === 'standard' || s.quality === 'high') {
+      patch.quality = s.quality
+      const mode = QUALITY_TO_PROCESSING_MODE[s.quality]
+      if (mode) patch.processingMode = mode
+    }
+    // Batch 9: captions language (which language the speech is in).
+    if (
+      s.captions_language === 'english' ||
+      s.captions_language === 'roman_urdu' ||
+      s.captions_language === 'hindi' ||
+      s.captions_language === 'auto'
+    ) {
+      patch.captionsLanguage = s.captions_language
+    }
+    // Batch 9: caption style — a REAL style id now. An old preset
+    // that stored a legacy id maps through the back-compat table;
+    // an unknown id keeps the current style and says so.
+    if (typeof s.caption_style === 'string') {
+      const realId = translateLegacyCaptionPreset(s.caption_style)
+      if (isCaptionStyleId(realId)) {
+        patch.captionStyle = realId
+      } else {
+        skipped.push(
+          `caption style (“${s.caption_style}” is not a style this wizard knows — kept the current style)`,
+        )
+      }
+    }
+    settingsAppliedRef.current = true
+    updateSpec(patch)
+    return skipped
+  }
+
+  /** Load a saved job preset into the Step 2 form (see applySettings). */
+  const handleLoadPreset = (id: number) => {
+    const preset = presets.find((p) => p.id === id)
+    if (!preset) return
+    const skipped = applySettings(preset.settings)
     setPresetMessage(
       `Preset “${preset.name}” loaded.` +
         (skipped.length > 0 ? ` Not applied: ${skipped.join('; ')}.` : ''),
     )
   }
 
+  /** Save the current Step 2 settings as a named preset (same
+   * endpoint New Job used — the wizard is the only creation flow
+   * now, so the save lives here). */
+  const handleSavePreset = async () => {
+    const name = presetName.trim()
+    if (!name) {
+      setPresetMessage('Type a name for the preset first.')
+      return
+    }
+    setPresetSaving(true)
+    setPresetMessage(null)
+    const result = await createPreset(name, snapshotSettings())
+    setPresetSaving(false)
+    if (!result.ok) {
+      setPresetMessage(result.error)
+      return
+    }
+    setPresets((current) => [result.preset, ...current])
+    setPresetName('')
+    setPresetMessage(`Preset "${result.preset.name}" saved.`)
+  }
+
+  /** Snapshot the current Step 2 spec for saving as a preset. */
+  const snapshotSettings = (): PresetSettings => ({
+    platform: spec.platform,
+    aspect_ratio: spec.aspect,
+    clip_count: spec.clipCount,
+    duration_mode: spec.durationMode,
+    duration_seconds:
+      spec.durationMode === 'exact'
+        ? spec.durationSeconds
+        : spec.durationMode === 'minimum'
+          ? spec.durationMinSeconds
+          : spec.durationMaxSeconds,
+    duration_min_seconds: spec.durationMinSeconds,
+    duration_max_seconds: spec.durationMaxSeconds,
+    captions_enabled: spec.captions,
+    captions_language: spec.captionsLanguage,
+    caption_style: spec.captionStyle,
+    selection_mode: spec.selectionMode ?? 'interesting_only',
+    on_screen_text: spec.onScreenText,
+    auto_zoom: spec.autoZoom ?? true,
+    face_tracking: spec.faceTracking ?? true,
+    silence_removal: spec.silenceRemoval ?? true,
+    filler_removal: spec.fillerRemoval ?? true,
+    headline_style: spec.headlineStyle ?? 'bold_bar',
+    caption_position: spec.captionPosition ?? 'bottom',
+    ost_position: spec.ostPosition ?? defaultOstPosition(spec.headlineStyle ?? 'bold_bar'),
+    ost_language: spec.ostLanguage ?? 'source',
+    sfx: spec.sfx ?? 'none',
+    colour_grade: spec.colourGrade ?? 'none',
+    beat_sync: spec.beatSync ?? true,
+    caption_translation: spec.captionTranslation ?? 'none',
+    export_ratios: spec.exportRatios ?? ['9:16'],
+    logo_overlay: spec.logoOverlay ?? false,
+    caption_safe_zone: spec.captionSafeZone ?? true,
+    ost_persistent: spec.ostPersistent ?? false,
+    // Batch 9: OST is always static — presets keep 'none'.
+    ost_animation: 'none',
+    end_card: spec.endCard ?? false,
+    end_card_text: (spec.endCardText ?? '').trim() ? (spec.endCardText ?? '').trim() : null,
+    keyword_popups: spec.keywordPopups ?? false,
+    lower_third_text: (spec.lowerThirdText ?? '').trim() ? (spec.lowerThirdText ?? '').trim() : null,
+    progress_bar: spec.progressBar ?? false,
+    job_type: spec.jobType,
+    campaign_requirements: spec.campaignRequirements.trim()
+      ? spec.campaignRequirements.trim()
+      : null,
+    notes: keywordsAvoid.trim() ? `Keywords to avoid: ${keywordsAvoid.trim()}` : null,
+    layout: spec.layout,
+    content_type: spec.contentType,
+    quality: spec.quality,
+  })
+
   /**
-   * Link import: validate the URL, then hand it to the New Job wizard
-   * with the link tab prefilled — that wizard + the worker download
-   * the video (YouTube / TikTok / Drive / direct file). No download
-   * is claimed here; the job page shows the real result.
+   * Link import: validate the URL, then keep it as this wizard's
+   * source — Step 2 styles it and Step 3 creates the job with
+   * sourceUrl (the backend accepts it and the worker downloads the
+   * video with yt-dlp). No download is claimed here; the job page
+   * shows the real result. Replaces the old hand-off to /jobs/new.
    */
   const submitLink = () => {
     const url = linkUrl.trim()
@@ -519,32 +786,51 @@ export function ClipperPage() {
       return
     }
     setLinkError(null)
-    navigate(`/jobs/new?source=link&url=${encodeURIComponent(url)}`)
+    setLinkSource(url)
+    setFile(null)
+    setProjectId(null)
   }
 
   /**
-   * Start Processing — the real one. Creates a Job from the probed file
-   * + the style spec via the Job API and navigates to the job page,
-   * where the connected worker transcribes, selects highlights and
-   * renders the clips. The wizard itself never pretends to render.
+   * Start Processing — the real one. Creates a Job from the probed
+   * file (or the validated link source) + the style spec via the Job
+   * API and navigates to the job page, where the connected worker
+   * transcribes, selects highlights and renders the clips. The
+   * wizard itself never pretends to render.
    */
   const startRealProcessing = async () => {
-    if (!file || !projectId || processing) return
+    if ((!file && !linkSource) || processing) return
     if (!specValid) return
+    // A music bed rides with an uploaded video file; a link job has
+    // no file upload to carry it (same rule as New Job had).
+    if (linkSource && musicBed) {
+      setProcessingError('Music bed needs an uploaded video file — switch to Upload to use one, or remove the music bed.')
+      return
+    }
     setProcessing(true)
     setProcessingError(null)
+    // The API requires duration_seconds in every mode: for exact it
+    // is the exact length; for minimum/maximum it is the bound that
+    // mode enforces (min / max). The min/max pair is sent as well.
+    const durationSeconds =
+      spec.durationMode === 'exact'
+        ? spec.durationSeconds
+        : spec.durationMode === 'minimum'
+          ? spec.durationMinSeconds
+          : spec.durationMaxSeconds
     const result = await createJob({
-      file,
+      file: file ?? null,
+      sourceUrl: linkSource ?? undefined,
       platform: spec.platform,
       aspectRatio: spec.aspect,
       clipCount: spec.clipCount,
       durationMode: spec.durationMode,
-      durationSeconds: spec.durationSeconds,
-      durationMinSeconds: null,
-      durationMaxSeconds: null,
+      durationSeconds,
+      durationMinSeconds: spec.durationMode === 'exact' ? null : spec.durationMinSeconds,
+      durationMaxSeconds: spec.durationMode === 'exact' ? null : spec.durationMaxSeconds,
       captionsEnabled: spec.captions,
-      captionsLanguage: 'auto',
-      captionStyle: translateLegacyCaptionPreset(captionPreset),
+      captionsLanguage: spec.captionsLanguage,
+      captionStyle: spec.captionStyle,
       selectionMode: spec.selectionMode ?? 'interesting_only',
       onScreenText: spec.onScreenText,
       autoZoom: spec.autoZoom ?? true,
@@ -553,25 +839,34 @@ export function ClipperPage() {
       fillerRemoval: spec.fillerRemoval ?? true,
       headlineStyle: spec.headlineStyle ?? 'bold_bar',
       captionPosition: spec.captionPosition ?? 'bottom',
+      ostPosition: spec.ostPosition ?? defaultOstPosition(spec.headlineStyle ?? 'bold_bar'),
+      ostLanguage: spec.ostLanguage ?? 'source',
+      sfx: spec.sfx ?? 'none',
+      colourGrade: spec.colourGrade ?? 'none',
+      musicBed,
       beatSync: spec.beatSync ?? true,
       captionTranslation: spec.captionTranslation ?? 'none',
       exportRatios: spec.exportRatios ?? ['9:16'],
       logoOverlay: spec.logoOverlay ?? false,
       captionSafeZone: spec.captionSafeZone ?? true,
       ostPersistent: spec.ostPersistent ?? false,
-      ostAnimation: spec.ostAnimation ?? 'none',
+      // Batch 9: OST is always static — no animation is sent.
+      ostAnimation: 'none',
       endCard: spec.endCard ?? false,
       endCardText: (spec.endCardText ?? '').trim(),
       keywordPopups: spec.keywordPopups ?? false,
       lowerThirdText: (spec.lowerThirdText ?? '').trim(),
       progressBar: spec.progressBar ?? false,
-      jobType: 'myself',
+      jobType: spec.jobType,
+      campaignRequirements: spec.campaignRequirements.trim(),
       notes: keywordsAvoid.trim()
         ? `Keywords to avoid: ${keywordsAvoid.trim()}`
         : undefined,
-      layout: spec.aspect === '9:16' ? 'split' : 'center_crop',
+      // Split layout is 9:16 only — any other ratio falls back to
+      // centre crop (same rule as New Job had).
+      layout: spec.aspect === '9:16' ? spec.layout : 'center_crop',
       contentType: spec.contentType,
-      quality: PROCESSING_MODE_TO_QUALITY[spec.processingMode] ?? 'standard',
+      quality: spec.quality,
     })
     setProcessing(false)
     if (!result.ok) {
@@ -613,6 +908,34 @@ export function ClipperPage() {
     }
     setDurationError(null)
     updateSpec({ durationSeconds: n })
+  }
+
+  /**
+   * Duration min/max for minimum/maximum modes (defaults 30–90s).
+   * The backend caps all three durations at 180s, and min must be
+   * below max — the same rule New Job enforced.
+   */
+  const onDurationRangeText = (which: 'min' | 'max', value: string) => {
+    const min = which === 'min' ? Number(value) : spec.durationMinSeconds
+    const max = which === 'max' ? Number(value) : spec.durationMaxSeconds
+    if (which === 'min') setDurationMinText(value)
+    else setDurationMaxText(value)
+    if (
+      value.trim() === '' ||
+      !Number.isInteger(which === 'min' ? min : max) ||
+      min < 5 || min > 180 || max < 5 || max > 180
+    ) {
+      setDurationRangeError('Enter whole numbers between 5 and 180 seconds.')
+      return
+    }
+    if (min >= max) {
+      setDurationRangeError('Minimum duration must be less than maximum duration.')
+      return
+    }
+    setDurationRangeError(null)
+    updateSpec(
+      which === 'min' ? { durationMinSeconds: min } : { durationMaxSeconds: max },
+    )
   }
 
   /**
@@ -714,7 +1037,9 @@ export function ClipperPage() {
     setSpec(fresh)
     setClipCountText(String(fresh.clipCount))
     setDurationText(String(fresh.durationSeconds))
-    setCaptionPreset('bold-pop')
+    setDurationMinText(String(fresh.durationMinSeconds))
+    setDurationMaxText(String(fresh.durationMaxSeconds))
+    setDurationRangeError(null)
     setKeywordsAvoid('')
     setProbe(null)
     setProbeError(null)
@@ -739,7 +1064,9 @@ export function ClipperPage() {
     setSpec(fresh)
     setClipCountText(String(fresh.clipCount))
     setDurationText(String(fresh.durationSeconds))
-    setCaptionPreset('bold-pop')
+    setDurationMinText(String(fresh.durationMinSeconds))
+    setDurationMaxText(String(fresh.durationMaxSeconds))
+    setDurationRangeError(null)
     setKeywordsAvoid('')
     setFile(null)
     setPreviewUrl(null)
@@ -836,10 +1163,11 @@ export function ClipperPage() {
     : []
 
   const durationModeLabel =
-    spec.durationMode === 'exact' ? 'exact' : spec.durationMode === 'minimum' ? 'min' : 'max'
-  const summary = `${spec.clipCount} clip${spec.clipCount === 1 ? '' : 's'} · ${durationModeLabel} ${spec.durationSeconds}s · ${spec.aspect} · ${spec.platform === 'tiktok' ? 'TikTok' : 'Instagram'} · captions ${spec.captions ? 'on' : 'off'} · ${SELECTION_MODE_LABELS[spec.selectionMode ?? 'interesting_only']}`
-  const captionLabel =
-    CAPTION_STYLES.find((s) => s.id === captionPreset)?.label ?? captionPreset
+    spec.durationMode === 'exact'
+      ? `exact ${spec.durationSeconds}s`
+      : `${spec.durationMinSeconds}–${spec.durationMaxSeconds}s (${spec.durationMode})`
+  const summary = `${spec.clipCount} clip${spec.clipCount === 1 ? '' : 's'} · ${durationModeLabel} · ${spec.aspect} · ${spec.platform === 'tiktok' ? 'TikTok' : 'Instagram'} · captions ${spec.captions ? 'on' : 'off'} · ${SELECTION_MODE_LABELS[spec.selectionMode ?? 'interesting_only']}`
+  const captionLabel = getCaptionStyle(spec.captionStyle).name
   const contentLabel =
     CONTENT_TYPES.find((c) => c.id === spec.contentType)?.label ?? spec.contentType
 
@@ -902,6 +1230,28 @@ export function ClipperPage() {
 
       {step === 1 ? (
         <section aria-label="Step 1 — Import">
+          {/* Clone banner — the source is never reused, so the user
+              picks the video/link again below (same as New Job had). */}
+          {clonedFrom !== null ? (
+            <div
+              role="status"
+              className="mb-4 rounded-2xl border border-amber-400/40 bg-amber-400/10 p-4 text-sm text-amber-200"
+            >
+              <p className="font-semibold">Cloned from Job #{clonedFrom} — settings copied.</p>
+              <p className="mt-1">
+                Source needed again — pick the video or link below. The old
+                video is not reused.
+              </p>
+            </div>
+          ) : null}
+          {cloneError ? (
+            <div
+              role="alert"
+              className="mb-4 rounded-2xl border border-red-400/40 bg-red-400/10 p-4 text-sm text-red-200"
+            >
+              {cloneError}
+            </div>
+          ) : null}
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
             <div className="xl:col-span-2">
           {!file ? (
@@ -1155,9 +1505,9 @@ export function ClipperPage() {
               <Link2 className="h-5 w-5 text-brand-light" /> Import from a link
             </h2>
             <p className="mt-1 text-sm text-[var(--color-text-muted)]">
-              Paste a YouTube, Google Drive or direct video link. It opens
-              in the New Job wizard — the worker downloads the video and
-              the job page shows the real result.
+              Paste a YouTube, Google Drive or direct video link. Click
+              Import link, then style it on Step 2 — the worker downloads
+              the video and the job page shows the real result.
             </p>
             <div className="mt-4 flex flex-col gap-3 sm:flex-row">
               <input
@@ -1187,19 +1537,34 @@ export function ClipperPage() {
                 {linkError}
               </p>
             ) : null}
+            {linkSource ? (
+              <p className="mt-3 text-xs text-white">
+                Link ready: <span className="break-all">{linkSource}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLinkSource(null)
+                    setLinkUrl('')
+                  }}
+                  className="ml-2 text-xs font-medium text-red-300 hover:underline"
+                >
+                  Remove
+                </button>
+              </p>
+            ) : null}
           </div>
 
           <div className="mt-6 flex justify-end">
             <button
               type="button"
-              disabled={projectId === null}
+              disabled={projectId === null && linkSource === null}
               onClick={() => goTo(2)}
               className="flex items-center gap-2 rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               Continue to Style <ArrowRight className="h-4 w-4" />
             </button>
           </div>
-          {projectId === null ? (
+          {projectId === null && linkSource === null ? (
             <p className="mt-2 text-right text-xs text-[var(--color-text-muted)]">
               {probeStatus === 'probing'
                 ? IS_LOCAL_SITE
@@ -1208,8 +1573,8 @@ export function ClipperPage() {
                 : probeStatus === 'error'
                   ? 'Probe failed — retry or choose a different file.'
                   : IS_LOCAL_SITE
-                    ? 'Choose a video and let the engine probe it to continue.'
-                    : 'Choose a video — your browser reads its duration and resolution — to continue.'}
+                    ? 'Choose a video and let the engine probe it to continue, or import a link.'
+                    : 'Choose a video — your browser reads its duration and resolution — to continue, or import a link.'}
             </p>
           ) : null}
             </div>
@@ -1239,20 +1604,29 @@ export function ClipperPage() {
                 </label>
                 <label className="mt-4 block">
                   <span className="text-sm font-medium text-white">Clip Duration</span>
-                  <select
-                    value={spec.durationSeconds}
-                    onChange={(e) => applyDuration(Number(e.target.value))}
-                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none"
-                  >
-                    {[15, 20, 30, 45, 60].map((n) => (
-                      <option key={n} value={n}>
-                        {n} seconds
-                      </option>
-                    ))}
-                    {![15, 20, 30, 45, 60].includes(spec.durationSeconds) ? (
-                      <option value={spec.durationSeconds}>{spec.durationSeconds} seconds (custom)</option>
-                    ) : null}
-                  </select>
+                  {spec.durationMode === 'exact' ? (
+                    <select
+                      value={spec.durationSeconds}
+                      onChange={(e) => applyDuration(Number(e.target.value))}
+                      className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none"
+                    >
+                      {[15, 20, 30, 45, 60].map((n) => (
+                        <option key={n} value={n}>
+                          {n} seconds
+                        </option>
+                      ))}
+                      {![15, 20, 30, 45, 60].includes(spec.durationSeconds) ? (
+                        <option value={spec.durationSeconds}>{spec.durationSeconds} seconds (custom)</option>
+                      ) : null}
+                    </select>
+                  ) : (
+                    <p className="mt-2 text-sm text-white">
+                      {spec.durationMinSeconds}–{spec.durationMaxSeconds}s ({spec.durationMode})
+                      <span className="block text-xs text-[var(--color-text-muted)]">
+                        Set the range on Step 2.
+                      </span>
+                    </p>
+                  )}
                 </label>
                 <label className="mt-4 block">
                   <span className="text-sm font-medium text-white">Clip selection</span>
@@ -1302,14 +1676,14 @@ export function ClipperPage() {
                 </div>
                 <button
                   type="button"
-                  disabled={projectId === null}
+                  disabled={projectId === null && linkSource === null}
                   onClick={() => goTo(2)}
                   className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   Continue to Style <ArrowRight className="h-4 w-4" />
                 </button>
                 <p className="mt-2 text-center text-xs text-[var(--color-text-muted)]">
-                  {projectId === null
+                  {projectId === null && linkSource === null
                     ? 'Choose a video first — options save into its project.'
                     : `Live summary: ${summary}`}
                 </p>
@@ -1345,13 +1719,19 @@ export function ClipperPage() {
           <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
             <h2 className="text-lg font-semibold text-white">{t('chooseStyle')}</h2>
             <p className="mt-1 text-sm text-[var(--color-text-muted)]">
-              {file ? `Video: ${file.name} · ${formatBytes(file.size)}` : 'Set the style for this job.'}
+              {file
+                ? `Video: ${file.name} · ${formatBytes(file.size)}`
+                : linkSource
+                  ? `Link: ${linkSource}`
+                  : 'Set the style for this job.'}
               {project ? ` · Project: ${project.title}` : ''}
             </p>
 
             {/* Load preset — same pattern as the New Job page's presets
                 card, compact. Loads the preset's settings into this
-                form; the video stays the one picked on Step 1. */}
+                form; the video stays the one picked on Step 1. The
+                save control lives here too (the wizard is the only
+                creation flow now). */}
             <div className="mt-5 rounded-xl border border-ink-border bg-ink-panel2 p-4">
               <label className="block">
                 <span className="text-sm font-medium text-white">Load preset</span>
@@ -1380,10 +1760,33 @@ export function ClipperPage() {
               ) : (
                 <p className="mt-2 text-xs text-[var(--color-text-muted)]">
                   {presets.length === 0
-                    ? 'No presets saved yet — save one from the New Job page.'
+                    ? 'No presets saved yet — save one below.'
                     : 'Loads a saved preset’s settings into this form.'}
                 </p>
               )}
+              <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+                <input
+                  type="text"
+                  value={presetName}
+                  onChange={(e) => setPresetName(e.target.value)}
+                  placeholder="Preset name…"
+                  aria-label="New preset name"
+                  maxLength={100}
+                  className="w-full flex-1 rounded-xl border border-ink-border bg-ink-panel px-3 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)] focus:border-brand focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => void handleSavePreset()}
+                  disabled={presetSaving}
+                  className="rounded-xl border border-ink-border bg-ink-panel px-4 py-2.5 text-sm font-semibold text-white hover:bg-ink-border disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {presetSaving ? 'Saving…' : 'Save preset'}
+                </button>
+              </div>
+              <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                Saves the current settings under a name (no video — the
+                video is always chosen fresh).
+              </p>
             </div>
 
             <div className="mt-6 grid grid-cols-1 gap-6 md:grid-cols-2">
@@ -1472,40 +1875,74 @@ export function ClipperPage() {
                     </ChoiceButton>
                   ))}
                 </div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {DURATION_PRESETS.map((n) => (
-                    <ChoiceButton
-                      key={n}
-                      selected={spec.durationSeconds === n}
-                      onClick={() => applyDuration(n)}
-                    >
-                      {n}s
-                    </ChoiceButton>
-                  ))}
-                  <label className="flex items-center gap-2">
-                    <span className="text-sm text-[var(--color-text-muted)]">Custom</span>
-                    <input
-                      type="number"
-                      inputMode="numeric"
-                      min={5}
-                      max={300}
-                      value={durationText}
-                      onChange={(e) => onDurationText(e.target.value)}
-                      aria-label="Custom clip duration in seconds (5 to 300)"
-                      className="w-20 rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
-                    />
+                {spec.durationMode === 'exact' ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {DURATION_PRESETS.map((n) => (
+                      <ChoiceButton
+                        key={n}
+                        selected={spec.durationSeconds === n}
+                        onClick={() => applyDuration(n)}
+                      >
+                        {n}s
+                      </ChoiceButton>
+                    ))}
+                    <label className="flex items-center gap-2">
+                      <span className="text-sm text-[var(--color-text-muted)]">Custom</span>
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        min={5}
+                        max={300}
+                        value={durationText}
+                        onChange={(e) => onDurationText(e.target.value)}
+                        aria-label="Custom clip duration in seconds (5 to 300)"
+                        className="w-20 rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
+                      />
+                      <span className="text-sm text-[var(--color-text-muted)]">seconds</span>
+                    </label>
+                  </div>
+                ) : (
+                  <div className="mt-3 flex flex-wrap items-center gap-3">
+                    <label className="flex items-center gap-2">
+                      <span className="text-sm text-[var(--color-text-muted)]">Min</span>
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        min={5}
+                        max={180}
+                        value={durationMinText}
+                        onChange={(e) => onDurationRangeText('min', e.target.value)}
+                        aria-label="Minimum clip duration in seconds (5 to 180)"
+                        className="w-20 rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
+                      />
+                    </label>
+                    <label className="flex items-center gap-2">
+                      <span className="text-sm text-[var(--color-text-muted)]">Max</span>
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        min={5}
+                        max={180}
+                        value={durationMaxText}
+                        onChange={(e) => onDurationRangeText('max', e.target.value)}
+                        aria-label="Maximum clip duration in seconds (5 to 180)"
+                        className="w-20 rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
+                      />
+                    </label>
                     <span className="text-sm text-[var(--color-text-muted)]">seconds</span>
-                  </label>
-                </div>
+                  </div>
+                )}
                 {durationError ? (
                   <p role="alert" className="mt-2 text-xs text-red-300">{durationError}</p>
+                ) : durationRangeError ? (
+                  <p role="alert" className="mt-2 text-xs text-red-300">{durationRangeError}</p>
                 ) : (
                   <p className="mt-2 text-xs text-[var(--color-text-muted)]">
                     {spec.durationMode === 'exact'
                       ? 'Each clip is exactly this long.'
                       : spec.durationMode === 'minimum'
-                        ? 'Clips are at least this long.'
-                        : 'Clips are at most this long.'}
+                        ? 'Clips are at least the minimum long, up to the maximum.'
+                        : 'Clips are at most the maximum long, at least the minimum.'}
                   </p>
                 )}
               </fieldset>
@@ -1531,6 +1968,26 @@ export function ClipperPage() {
                 </p>
               </fieldset>
 
+              {/* Batch 9: layout picker — 9:16 only, like New Job.
+                  Card grid on the same system as the caption picker
+                  (gradient backdrop diagrams, 2 per row, gradient
+                  border + checkmark on the selected card). Other
+                  ratios fall back to centre crop at submit. */}
+              {spec.aspect === '9:16' ? (
+                <div className="md:col-span-2">
+                  <span className="text-sm font-medium text-white">Layout (9:16 only)</span>
+                  <div className="mt-2">
+                    <LayoutPicker
+                      value={spec.layout}
+                      onChange={(layout) => updateSpec({ layout })}
+                    />
+                  </div>
+                  <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
+                    How the video fills the 9:16 frame. Other ratios use centre crop.
+                  </span>
+                </div>
+              ) : null}
+
               <div className="md:col-span-2">
                 <span className="text-sm font-medium text-white">Captions</span>
                 <div className="mt-2 flex items-center gap-3">
@@ -1543,17 +2000,92 @@ export function ClipperPage() {
                     {spec.captions ? 'Captions on' : 'Captions off'}
                   </span>
                 </div>
+                {/* Caption position — directly below the "Captions on"
+                    toggle (user placement spec, Batch 9): a dropdown,
+                    Bottom / Top / Centre. The stored value for Centre
+                    is "middle" (the existing caption_position value);
+                    only the label changed. Disabled while captions
+                    are off, like the style picker. */}
+                <label className="mt-3 block">
+                  <span className="text-sm font-medium text-white">Caption position</span>
+                  <select
+                    value={spec.captionPosition ?? 'bottom'}
+                    disabled={!spec.captions}
+                    onChange={(e) =>
+                      updateSpec({ captionPosition: e.target.value as CaptionPosition })
+                    }
+                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {(['bottom', 'top', 'middle'] as CaptionPosition[]).map((p) => (
+                      <option key={p} value={p}>
+                        {CAPTION_POSITION_LABELS[p]}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
+                    Where the burn-in captions sit — never over the headline.
+                  </span>
+                </label>
+                {/* Caption language — directly below the Caption
+                    position dropdown (user placement spec, Batch 9):
+                    which language the SPEECH is in. This is the
+                    transcription language, not the output language. */}
+                <label className="mt-3 block">
+                  <span className="text-sm font-medium text-white">Caption language</span>
+                  <select
+                    value={spec.captionsLanguage}
+                    disabled={!spec.captions}
+                    onChange={(e) =>
+                      updateSpec({
+                        captionsLanguage: e.target.value as ClipSpec['captionsLanguage'],
+                      })
+                    }
+                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {CAPTION_LANGUAGES.map((l) => (
+                      <option key={l.id} value={l.id}>
+                        {l.label}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
+                    The language of the speech in the video. Auto-detect lets
+                    the transcriber decide.
+                  </span>
+                </label>
+                {/* Translate captions — directly below the Caption
+                    language dropdown. Translates the captions AFTER
+                    transcription (Batch 9: 32 languages). If the free
+                    service is unavailable, captions stay in the
+                    original language and the job says so. */}
+                <label className="mt-3 block">
+                  <span className="text-sm font-medium text-white">Translate captions</span>
+                  <select
+                    value={spec.captionTranslation ?? 'none'}
+                    disabled={!spec.captions}
+                    onChange={(e) =>
+                      updateSpec({ captionTranslation: e.target.value as CaptionTranslation })
+                    }
+                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {(Object.keys(CAPTION_TRANSLATION_LABELS) as CaptionTranslation[]).map((t) => (
+                      <option key={t} value={t}>
+                        {CAPTION_TRANSLATION_LABELS[t]}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
+                    Translates the captions after transcription. If the free
+                    translation service is unavailable, captions stay in the
+                    original language and the job says so.
+                  </span>
+                </label>
                 <div className="mt-3">
                   <span className="text-sm font-medium text-white">Caption style</span>
                   <div className="mt-2">
                     <CaptionStylePicker
-                      value={translateLegacyCaptionPreset(captionPreset)}
-                      onChange={(realId) =>
-                        setCaptionPreset(
-                          REAL_STYLE_TO_LEGACY_PRESET[realId] ?? captionPreset,
-                        )
-                      }
-                      options={WIZARD_CAPTION_OPTIONS}
+                      value={spec.captionStyle}
+                      onChange={(realId) => updateSpec({ captionStyle: realId })}
                       disabled={!spec.captions}
                     />
                   </div>
@@ -1576,17 +2108,73 @@ export function ClipperPage() {
                     {spec.onScreenText ? 'On-screen text on' : 'On-screen text off'}
                   </span>
                 </div>
+                {/* On-screen text position — directly below the
+                    "On-screen text on" toggle (user placement spec,
+                    Batch 9): a dropdown, Bottom / Top / Centre.
+                    Always visible; disabled while on-screen text is
+                    off. Picking a headline style moves it to that
+                    style's default until a position is picked here. */}
+                <label className="mt-3 block">
+                  <span className="text-sm font-medium text-white">On-screen text position</span>
+                  <select
+                    value={spec.ostPosition ?? defaultOstPosition(spec.headlineStyle ?? 'bold_bar')}
+                    disabled={!spec.onScreenText}
+                    onChange={(e) => {
+                      ostPositionTouchedRef.current = true
+                      updateSpec({ ostPosition: e.target.value as OstPosition })
+                    }}
+                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {(['bottom', 'top', 'centre'] as OstPosition[]).map((p) => (
+                      <option key={p} value={p}>
+                        {OST_POSITION_LABELS[p]}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                    Where the headline sits on the frame. Default follows the style.
+                  </span>
+                </label>
+                {/* On-screen text language — directly below the
+                    On-screen text position dropdown (user placement
+                    spec, Batch 9): the headline's OUTPUT language.
+                    'Source language' keeps the headline in the
+                    video's own language. The end-card text and
+                    lower-third tag are never translated. */}
+                <label className="mt-3 block">
+                  <span className="text-sm font-medium text-white">On-screen text language</span>
+                  <select
+                    value={spec.ostLanguage ?? 'source'}
+                    disabled={!spec.onScreenText}
+                    onChange={(e) =>
+                      updateSpec({ ostLanguage: e.target.value as OstLanguage })
+                    }
+                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {(Object.keys(OST_LANGUAGE_LABELS) as OstLanguage[]).map((l) => (
+                      <option key={l} value={l}>
+                        {OST_LANGUAGE_LABELS[l]}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
+                    Translates the headline into this language. If the free
+                    translation service is unavailable, the headline stays
+                    in the source language and the job says so.
+                  </span>
+                </label>
               </div>
 
-              {/* Batch 2 headline style + caption position — defaults
-                  are the pre-Batch-2 behaviour (bold bar, bottom).
-                  Batch 8: static card grid, no motion. */}
+              {/* Batch 2 headline style — defaults are the pre-Batch-2
+                  behaviour (bold bar). Batch 8: static card grid, no
+                  motion. The OST position dropdown lives under the
+                  On-screen text toggle above, not here. */}
               <div className="block md:col-span-2">
                 <span className="text-sm font-medium text-white">Headline style</span>
                 <div className="mt-2">
                   <HeadlineStylePicker
                     value={spec.headlineStyle ?? 'bold_bar'}
-                    onChange={(s) => updateSpec({ headlineStyle: s })}
+                    onChange={pickHeadlineStyle}
                   />
                 </div>
               </div>
@@ -1616,26 +2204,8 @@ export function ClipperPage() {
                 ) : null}
               </div>
 
-              <label className="block">
-                <span className="text-sm font-medium text-white">Headline animation</span>
-                <select
-                  value={spec.ostAnimation ?? 'none'}
-                  disabled={!spec.onScreenText}
-                  onChange={(e) =>
-                    updateSpec({ ostAnimation: e.target.value as OstAnimation })
-                  }
-                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {(Object.keys(OST_ANIMATION_LABELS) as OstAnimation[]).map((a) => (
-                    <option key={a} value={a}>
-                      {OST_ANIMATION_LABELS[a]}
-                    </option>
-                  ))}
-                </select>
-                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
-                  {OST_ANIMATION_DESCRIPTIONS[spec.ostAnimation ?? 'none']}
-                </span>
-              </label>
+              {/* Batch 9: the headline animation control was removed —
+                  OST is always static now. */}
 
               <div>
                 <span className="text-sm font-medium text-white">Follow end card</span>
@@ -1714,27 +2284,86 @@ export function ClipperPage() {
                 </div>
               </div>
 
+              {/* Batch 9 music bed + SFX. No file = no music bed —
+                  the section says so instead of faking a preview. */}
+              <div>
+                <span className="text-sm font-medium text-white">Music bed</span>
+                <div className="mt-2">
+                  <input
+                    ref={musicBedInputRef}
+                    type="file"
+                    accept=".mp3,.wav,.m4a,audio/mpeg,audio/wav,audio/mp4"
+                    aria-label="Music bed audio file (MP3, WAV or M4A, max 50 MB)"
+                    onChange={(e) => handleMusicBed(e.target.files?.[0])}
+                    className="block w-full text-sm text-[var(--color-text-muted)] file:mr-3 file:rounded-xl file:border file:border-ink-border file:bg-ink-panel2 file:px-3 file:py-2 file:text-sm file:font-medium file:text-white hover:file:border-brand/60"
+                  />
+                </div>
+                {musicBed ? (
+                  <p className="mt-1 text-xs text-white">
+                    {musicBed.name} · {formatBytes(musicBed.size)}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMusicBed(null)
+                        if (musicBedInputRef.current) musicBedInputRef.current.value = ''
+                      }}
+                      className="ml-2 text-xs font-medium text-red-300 hover:underline"
+                    >
+                      Remove
+                    </button>
+                  </p>
+                ) : (
+                  <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                    No music bed — the clips keep their original audio. MP3, WAV or M4A, max 50 MB.
+                  </span>
+                )}
+                {musicBedError ? (
+                  <p role="alert" className="mt-1 text-xs text-red-300">
+                    {musicBedError}
+                  </p>
+                ) : null}
+              </div>
+
               <label className="block">
-                <span className="text-sm font-medium text-white">Caption position</span>
+                <span className="text-sm font-medium text-white">Sound effect (SFX)</span>
                 <select
-                  value={spec.captionPosition ?? 'bottom'}
-                  onChange={(e) =>
-                    updateSpec({ captionPosition: e.target.value as CaptionPosition })
-                  }
+                  value={spec.sfx ?? 'none'}
+                  onChange={(e) => updateSpec({ sfx: e.target.value as Sfx })}
                   className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
                 >
-                  {(Object.keys(CAPTION_POSITION_LABELS) as CaptionPosition[]).map((p) => (
-                    <option key={p} value={p}>
-                      {CAPTION_POSITION_LABELS[p]}
+                  {(Object.keys(SFX_LABELS) as Sfx[]).map((id) => (
+                    <option key={id} value={id}>
+                      {SFX_LABELS[id]}
                     </option>
                   ))}
                 </select>
                 <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
-                  Where the burn-in captions sit — never over the headline.
+                  A short sting over clip cuts. The worker mixes it in; None means no added sound.
                 </span>
               </label>
 
-              {/* Batch 3 beat sync + caption translation + export ratios. */}
+              <label className="block">
+                <span className="text-sm font-medium text-white">Colour grade</span>
+                <select
+                  value={spec.colourGrade ?? 'none'}
+                  onChange={(e) => updateSpec({ colourGrade: e.target.value as ColourGrade })}
+                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
+                >
+                  {(Object.keys(COLOUR_GRADE_LABELS) as ColourGrade[]).map((id) => (
+                    <option key={id} value={id}>
+                      {COLOUR_GRADE_LABELS[id]}
+                    </option>
+                  ))}
+                </select>
+                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
+                  Colours the footage on the final render. None (default) leaves the render untouched.
+                </span>
+              </label>
+
+              {/* Batch 3 beat sync + export ratios. The Translate
+                  captions control lives with the caption controls
+                  above (directly below the Caption language
+                  dropdown), not here. */}
               <div>
                 <span className="text-sm font-medium text-white">Beat sync</span>
                 <div className="mt-2 flex items-center gap-3">
@@ -1748,28 +2377,6 @@ export function ClipperPage() {
                   </span>
                 </div>
               </div>
-
-              <label className="block">
-                <span className="text-sm font-medium text-white">Translate captions</span>
-                <select
-                  value={spec.captionTranslation ?? 'none'}
-                  onChange={(e) =>
-                    updateSpec({ captionTranslation: e.target.value as CaptionTranslation })
-                  }
-                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
-                >
-                  {(Object.keys(CAPTION_TRANSLATION_LABELS) as CaptionTranslation[]).map((t) => (
-                    <option key={t} value={t}>
-                      {CAPTION_TRANSLATION_LABELS[t]}
-                    </option>
-                  ))}
-                </select>
-                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
-                  Translates the captions after transcription. If the free
-                  translation service is unavailable, captions stay in the
-                  original language and the job says so.
-                </span>
-              </label>
 
               <div>
                 <span className="text-sm font-medium text-white">Export ratios</span>
@@ -1943,6 +2550,27 @@ export function ClipperPage() {
                 </span>
               </label>
 
+              {/* Batch 9: quality — the direct control (same field
+                  New Job sets). It moves with the processing mode
+                  below: picking a quality sets the matching mode and
+                  vice versa, so the two can never disagree. */}
+              <label className="block">
+                <span className="text-sm font-medium text-white">Quality</span>
+                <select
+                  value={spec.quality}
+                  onChange={(e) => updateQuality(e.target.value as ClipSpec['quality'])}
+                  aria-label="Render quality"
+                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
+                >
+                  <option value="draft">Draft preview</option>
+                  <option value="standard">Standard</option>
+                  <option value="high">High quality</option>
+                </select>
+                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
+                  Render quality for this job. High quality takes longer.
+                </span>
+              </label>
+
               <fieldset className="md:col-span-2">
                 <legend className="text-sm font-medium text-white">Processing mode</legend>
                 <div className="mt-2 flex flex-wrap gap-2">
@@ -1950,12 +2578,58 @@ export function ClipperPage() {
                     <ChoiceButton
                       key={m}
                       selected={spec.processingMode === m}
-                      onClick={() => updateSpec({ processingMode: m })}
+                      onClick={() => updateProcessingMode(m)}
                     >
                       {m === 'eco' ? 'Eco' : m === 'balanced' ? 'Balanced' : 'Fast'}
                     </ChoiceButton>
                   ))}
                 </div>
+                <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                  Processing mode follows the quality above (Eco = Draft,
+                  Balanced = Standard, Fast = High quality).
+                </p>
+              </fieldset>
+
+              {/* Batch 9: job type + campaign requirements (same as
+                  New Job). Campaign jobs need requirements filled in
+                  before the wizard can continue. */}
+              <fieldset className="md:col-span-2">
+                <legend className="text-sm font-medium text-white">Job type</legend>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <ChoiceButton
+                    selected={spec.jobType === 'myself'}
+                    onClick={() => updateSpec({ jobType: 'myself' })}
+                  >
+                    For myself
+                  </ChoiceButton>
+                  <ChoiceButton
+                    selected={spec.jobType === 'campaign'}
+                    onClick={() => updateSpec({ jobType: 'campaign' })}
+                  >
+                    For a campaign
+                  </ChoiceButton>
+                </div>
+                {spec.jobType === 'campaign' ? (
+                  <label className="mt-3 block">
+                    <span className="text-sm font-medium text-white">Campaign requirements</span>
+                    <textarea
+                      value={spec.campaignRequirements}
+                      onChange={(e) => updateSpec({ campaignRequirements: e.target.value })}
+                      rows={4}
+                      maxLength={5000}
+                      placeholder="What must the clips do for this campaign? Tone, hooks, product moments, things to avoid…"
+                      className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)] focus:border-brand focus:outline-none"
+                    />
+                    <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                      Required for campaign jobs — the worker clips to this brief.
+                    </span>
+                  </label>
+                ) : null}
+                {campaignInvalid ? (
+                  <p role="alert" className="mt-2 text-xs text-red-300">
+                    Describe the campaign requirements — the worker clips to that brief.
+                  </p>
+                ) : null}
               </fieldset>
             </div>
 
@@ -1964,12 +2638,13 @@ export function ClipperPage() {
               <p className="mt-1 text-sm font-medium text-white">{summary}</p>
               <p className="mt-1 text-xs text-[var(--color-text-muted)]">
                 Caption style: {captionLabel} · Content: {contentLabel} ·{' '}
-                {spec.processingMode === 'eco'
-                  ? 'Eco'
-                  : spec.processingMode === 'balanced'
-                    ? 'Balanced'
-                    : 'Fast'}{' '}
-                processing
+                {spec.quality === 'draft'
+                  ? 'Draft preview'
+                  : spec.quality === 'high'
+                    ? 'High quality'
+                    : 'Standard'}{' '}
+                · {spec.aspect === '9:16' ? LAYOUT_LABELS[spec.layout] : 'Centre crop'} ·{' '}
+                {spec.jobType === 'campaign' ? 'For a campaign' : 'For myself'}
                 {keywordsAvoid.trim() ? ` · Avoid: ${keywordsAvoid.trim()}` : ''}
               </p>
             </div>
@@ -1984,16 +2659,16 @@ export function ClipperPage() {
               </button>
               <button
                 type="button"
-                disabled={projectId === null || !specValid}
+                disabled={(projectId === null && linkSource === null) || !specValid}
                 onClick={() => goTo(3)}
                 className="flex items-center gap-2 rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
               >
                 Continue to Process <ArrowRight className="h-4 w-4" />
               </button>
             </div>
-            {projectId === null || !specValid ? (
+            {(projectId === null && linkSource === null) || !specValid ? (
               <p className="mt-2 text-right text-xs text-[var(--color-text-muted)]">
-                {projectId === null
+                {projectId === null && linkSource === null
                   ? 'Probe a video on Step 1 first — the style is saved into its project.'
                   : 'Fix the highlighted fields to continue.'}
               </p>

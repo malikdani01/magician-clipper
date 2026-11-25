@@ -1,10 +1,7 @@
 import { useState } from 'react'
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
 import {
-  Captions,
   CreditCard,
-  Folder,
-  FolderPlus,
   HelpCircle,
   History,
   LayoutDashboard,
@@ -12,10 +9,9 @@ import {
   Menu,
   Moon,
   Palette,
-  PlusCircle,
   Scissors,
-  Search,
   Settings,
+  ShieldCheck,
   Sun,
   Video,
   Wand2,
@@ -24,19 +20,18 @@ import {
 import { NotificationsBell } from '../components/NotificationsBell'
 import { useAuth } from '../state/auth'
 import { usePreferences } from '../state/preferences'
-import { useProjectSearch } from '../state/search'
 import type { TranslationKey } from '../lib/i18n'
 
 const NAV_ITEMS: { to: string; labelKey: TranslationKey; icon: typeof LayoutDashboard; end?: boolean }[] = [
   { to: '/', labelKey: 'navDashboard', icon: LayoutDashboard, end: true },
-  { to: '/create', labelKey: 'navCreateProject', icon: FolderPlus },
-  { to: '/projects', labelKey: 'navMyProjects', icon: Folder },
-  { to: '/library', labelKey: 'navVideoLibrary', icon: Video },
+  // Batch 9 (2026-11-25): the wizard is the only creation flow and
+  // /jobs — labelled "My Projects" — is the only list. The old
+  // /create, /projects, /jobs/new and /captions entries were removed
+  // here; their routes redirect to /clipper, /jobs or /settings.
   { to: '/clipper', labelKey: 'navAiClipper', icon: Wand2 },
-  { to: '/jobs/new', labelKey: 'navNewJob', icon: PlusCircle },
-  { to: '/jobs', labelKey: 'navMyJobs', icon: ListVideo },
+  { to: '/jobs', labelKey: 'navMyProjects', icon: ListVideo },
   { to: '/editor', labelKey: 'navStudioEditor', icon: Scissors },
-  { to: '/captions', labelKey: 'navCaptionsStudio', icon: Captions },
+  { to: '/library', labelKey: 'navVideoLibrary', icon: Video },
   { to: '/brand-kit', labelKey: 'navBrandKit', icon: Palette },
   { to: '/exports', labelKey: 'navExportHistory', icon: History },
   { to: '/usage', labelKey: 'navUsageCredits', icon: CreditCard },
@@ -44,9 +39,18 @@ const NAV_ITEMS: { to: string; labelKey: TranslationKey; icon: typeof LayoutDash
   { to: '/help', labelKey: 'navHelpSupport', icon: HelpCircle },
 ] as const
 
+// Batch 9 (2026-11-25): admin access is through the normal login
+// page — an admin sign-in redirects to /admin, and a signed-in admin
+// also gets this sidebar entry. Regular users never see it.
+const ADMIN_NAV_ITEM = { to: '/admin', labelKey: 'navAdminPanel', icon: ShieldCheck } as const
+
 function Sidebar({ mobileOpen, onClose }: { mobileOpen: boolean; onClose: () => void }) {
   const { user, loading } = useAuth()
   const { t } = usePreferences()
+  // Admin-only sidebar entry (last in the list). The /admin route
+  // itself is still guarded by AdminLayout — this is navigation
+  // only, never the enforcement.
+  const navItems = user?.role === 'admin' ? [...NAV_ITEMS, ADMIN_NAV_ITEM] : NAV_ITEMS
   // While the stored session is still being verified, show a loading
   // state — never the guest UI. Rendering "Guest User" + Sign in /
   // Register for a signed-in user (even for a second) is the flash
@@ -78,7 +82,7 @@ function Sidebar({ mobileOpen, onClose }: { mobileOpen: boolean; onClose: () => 
       </Link>
 
       <nav className="mt-4 flex-1 space-y-1 overflow-y-auto px-3 pb-4">
-        {NAV_ITEMS.map((item) => (
+        {navItems.map((item) => (
           <NavLink
             key={item.to}
             to={item.to}
@@ -148,11 +152,8 @@ function Sidebar({ mobileOpen, onClose }: { mobileOpen: boolean; onClose: () => 
 }
 
 function TopBar({ onMenuClick }: { onMenuClick: () => void }) {
-  const { query, setQuery } = useProjectSearch()
   const { user, loading } = useAuth()
   const { theme, language, setTheme, setLanguage, t } = usePreferences()
-  const location = useLocation()
-  const searchVisible = location.pathname === '/projects'
   const initial = loading ? '…' : (user?.name ?? 'G').trim().charAt(0).toUpperCase() || 'G'
 
   return (
@@ -165,19 +166,12 @@ function TopBar({ onMenuClick }: { onMenuClick: () => void }) {
       >
         <Menu className="h-5 w-5" />
       </button>
-      <div className="relative w-full max-w-md">
-        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--color-text-muted)]" />
-        <input
-          type="search"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder={
-            searchVisible ? t('searchJobs') : t('searchPlaceholder')
-          }
-          aria-label="Search projects"
-          className="w-full rounded-xl border border-ink-border bg-ink-panel2 py-2.5 pl-10 pr-4 text-sm text-white placeholder:text-[var(--color-text-muted)] focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand"
-        />
-      </div>
+      {/*
+        Batch 9 (2026-11-25): the header search filtered the hidden
+        /projects list only (useProjectSearch) — removed with that page.
+        The Jobs page has its own search; nothing here filters a
+        hidden page any more.
+      */}
 
       <div className="ml-auto flex items-center gap-3">
         {/* Batch 5: theme + language toggles (persisted per user). */}

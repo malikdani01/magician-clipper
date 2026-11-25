@@ -549,3 +549,45 @@ h3 {
 .caption-anim-glow {
   animation: caption-glow 1.8s ease-in-out infinite;
 }
+
+/* ============================================================
+   Batch 9 — caption + headline webfonts. One distinct typeface
+   per style, the SAME files the worker burns in (see
+   services/video-engine/fonts/ and scripts/sync-fonts.sh): the
+   preview and the burned render use the same typeface, so a
+   sample card shows exactly what the clip will look like.
+   Family names match the worker's ASS Fontnames exactly; weights
+   match the faces (Black 900, ExtraBold 800, Bold 700, SemiBold
+   600, Medium 500, Regular 400, Light 300). Served from
+   public/fonts/ (copied there by sync-fonts.sh). Latin subset —
+   ~692K total, loaded on demand per card.
+   ============================================================ */
+@font-face { font-family: 'Noto Sans Black'; src: url('/fonts/NotoSans-Black.ttf') format('truetype'); font-weight: 900; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Sans ExtraBold'; src: url('/fonts/NotoSans-ExtraBold.ttf') format('truetype'); font-weight: 800; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Serif Black'; src: url('/fonts/NotoSerif-Black.ttf') format('truetype'); font-weight: 900; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Sans'; src: url('/fonts/NotoSans-Regular.ttf') format('truetype'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Sans'; src: url('/fonts/NotoSans-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Serif'; src: url('/fonts/NotoSerif-Regular.ttf') format('truetype'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Serif'; src: url('/fonts/NotoSerif-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Sans Display'; src: url('/fonts/NotoSansDisplay-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Sans Mono'; src: url('/fonts/NotoSansMono-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Sans SemiBold'; src: url('/fonts/NotoSans-SemiBold.ttf') format('truetype'); font-weight: 600; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Sans Condensed'; src: url('/fonts/NotoSans-CondensedBold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Sans ExtraCondensed Black'; src: url('/fonts/NotoSans-ExtraCondensedBlack.ttf') format('truetype'); font-weight: 900; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Sans Display Black'; src: url('/fonts/NotoSansDisplay-Black.ttf') format('truetype'); font-weight: 900; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Sans Display ExtraBold'; src: url('/fonts/NotoSansDisplay-ExtraBold.ttf') format('truetype'); font-weight: 800; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Sans Medium'; src: url('/fonts/NotoSans-Medium.ttf') format('truetype'); font-weight: 500; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Sans Light'; src: url('/fonts/NotoSans-Light.ttf') format('truetype'); font-weight: 300; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Sans Display SemiBold'; src: url('/fonts/NotoSansDisplay-SemiBold.ttf') format('truetype'); font-weight: 600; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Sans Display Light'; src: url('/fonts/NotoSansDisplay-Light.ttf') format('truetype'); font-weight: 300; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Sans Condensed Black'; src: url('/fonts/NotoSans-CondensedBlack.ttf') format('truetype'); font-weight: 900; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Sans Display Condensed'; src: url('/fonts/NotoSansDisplay-CondensedBold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'DejaVu Sans Mono'; src: url('/fonts/DejaVuSansMono-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Sans ExtraCondensed'; src: url('/fonts/NotoSans-ExtraCondensedBold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'DejaVu Sans'; src: url('/fonts/DejaVuSans-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'DejaVu Serif'; src: url('/fonts/DejaVuSerif-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Serif Display'; src: url('/fonts/NotoSerifDisplay-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Sans Display Condensed Black'; src: url('/fonts/NotoSansDisplay-CondensedBlack.ttf') format('truetype'); font-weight: 900; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Noto Serif Display Black'; src: url('/fonts/NotoSerifDisplay-Black.ttf') format('truetype'); font-weight: 900; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Comic Neue'; src: url('/fonts/ComicNeue-BoldItalic.otf') format('opentype'); font-weight: 700; font-style: italic; font-display: swap; }
+@font-face { font-family: 'Caveat'; src: url('/fonts/Caveat-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }

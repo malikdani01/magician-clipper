@@ -189,10 +189,13 @@ class JobPresetTest extends TestCase
             ->assertJsonPath('presets.0.settings.caption_translation', 'ur')
             ->assertJsonPath('presets.0.settings.export_ratios', ['9:16', '1:1']);
 
+        // Batch 9 (2026-11-25): the translation list expanded from
+        // none/ur/hi/en to 32 languages, so 'fr' is valid now — the
+        // rejection case uses a code that is in no list.
         $this->actingAs($user, 'sanctum')
             ->postJson('/api/v1/presets', [
                 'name' => 'Bad translation',
-                'settings' => $this->validSettings(['caption_translation' => 'fr']),
+                'settings' => $this->validSettings(['caption_translation' => 'xx']),
             ])
             ->assertStatus(422)
             ->assertJsonValidationErrors(['settings.caption_translation']);

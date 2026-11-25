@@ -103,6 +103,9 @@ class JobController extends Controller
             'project_id' => ['sometimes', 'nullable', 'integer', 'exists:projects,id'],
             'file' => ['sometimes', 'file', 'mimes:mp4,mov,mkv,webm', 'max:2097152'],
             'source_url' => ['sometimes', 'nullable', 'url', 'max:2048'],
+            // Batch 9: optional music bed (mp3/wav/m4a, max 50 MB).
+            // ffprobe-validated as audio in checkMusicBed below.
+            'music_bed' => ['sometimes', 'file', 'mimes:mp3,wav,m4a', 'max:51200'],
         ], JobSettingsRules::rules()));
 
         $hasFile = $request->hasFile('file');
@@ -117,6 +120,10 @@ class JobController extends Controller
 
         if (($sharedError = $this->checkSharedRules($validated)) !== null) {
             return $sharedError;
+        }
+
+        if (($bedError = $this->checkMusicBed($request)) !== null) {
+            return $bedError;
         }
 
         $user = $request->user();
@@ -226,6 +233,10 @@ class JobController extends Controller
             'disk' => $diskName ?? MediaStorage::DISK_LOCAL,
         ]);
 
+        // Batch 9: the music bed is stored after the job exists so
+        // its path can carry the job id.
+        $this->storeMusicBed($request, $job);
+
         return response()->json(['job' => $job->fresh()->toUserArray()], 201);
     }
 
@@ -245,6 +256,8 @@ class JobController extends Controller
             'project_id' => ['sometimes', 'nullable', 'integer', 'exists:projects,id'],
             'files' => ['required', 'array', 'min:1', 'max:5'],
             'files.*' => ['file', 'mimes:mp4,mov,mkv,webm', 'max:2097152'],
+            // Batch 9: one shared music bed for all bulk jobs.
+            'music_bed' => ['sometimes', 'file', 'mimes:mp3,wav,m4a', 'max:51200'],
         ], JobSettingsRules::rules()));
 
         if (! empty($request->input('source_url'))) {
@@ -256,6 +269,10 @@ class JobController extends Controller
 
         if (($sharedError = $this->checkSharedRules($validated)) !== null) {
             return $sharedError;
+        }
+
+        if (($bedError = $this->checkMusicBed($request)) !== null) {
+            return $bedError;
         }
 
         $user = $request->user();
@@ -337,7 +354,16 @@ class JobController extends Controller
                 'disk' => $diskName,
             ]);
             $jobs[] = $job->fresh()->toUserArray();
+            // Batch 9: the shared music bed is copied under each
+            // bulk job's own id.
+            $this->storeMusicBed($request, $job);
         }
+
+        // storeMusicBed updates the rows after toUserArray was taken;
+        // re-read so the response carries the bed name honestly.
+        $jobs = ProcessingJob::whereIn('id', array_map(fn ($j) => $j['id'], $jobs))
+            ->orderBy('id')
+            ->get()->map(fn ($j) => $j->toUserArray())->all();
 
         return response()->json(['jobs' => $jobs], 201);
     }
@@ -403,6 +429,23 @@ class JobController extends Controller
             // captions), so old API clients are unaffected.
             'headline_style' => $validated['headline_style'] ?? 'bold_bar',
             'caption_position' => $validated['caption_position'] ?? 'bottom',
+            // Batch 9: OST position — WHERE the headline sits,
+            // independent of headline_style (the look). Default map
+            // when absent: bold_bar -> top, lower_third -> bottom,
+            // big_centre -> centre. An explicit ost_position always
+            // wins over the style default.
+            'ost_position' => $validated['ost_position']
+                ?? self::defaultOstPosition($validated['headline_style'] ?? 'bold_bar'),
+            // Batch 9: OST language — 'source' unless asked for
+            // (the headline stays in the video's own language); the
+            // worker translates the derived headline when set.
+            'ost_language' => $validated['ost_language'] ?? 'source',
+            // Batch 9: SFX sting over cuts — 'none' unless asked for.
+            'sfx' => $validated['sfx'] ?? 'none',
+            // Batch 9: colour grade — 'none' unless asked for; 'none'
+            // leaves the render pipeline untouched (the worker adds
+            // no filter for it).
+            'colour_grade' => $validated['colour_grade'] ?? 'none',
             // Batch 3: beat sync ON unless explicitly off (the worker
             // treats a missing key as ON too); caption translation off
             // ("none") unless asked for; multi-ratio export defaults
@@ -442,6 +485,97 @@ class JobController extends Controller
             'source_url' => $sourceUrl,
             'source_path' => $sourcePath,
         ];
+    }
+
+    /**
+     * Batch 9: the style-derived OST position default (see
+     * buildSettings). Kept as its own method so the map is stated
+     * once and tests can pin it: bold_bar -> top, lower_third ->
+     * bottom, big_centre -> centre.
+     */
+    public static function defaultOstPosition(string $headlineStyle): string
+    {
+        return match ($headlineStyle) {
+            'lower_third' => 'bottom',
+            'big_centre' => 'centre',
+            default => 'top',
+        };
+    }
+
+    /**
+     * Batch 9: probe an uploaded music-bed file with ffprobe. Returns
+     * true when the file has an audio stream, false when it is not
+     * audio at all, and null when ffprobe is unavailable — in that
+     * case the upload is accepted and the worker validates it instead
+     * (same "ffprobe missing" posture as probeVideo).
+     */
+    private function probeAudio(string $absolutePath): ?bool
+    {
+        $ffprobe = trim((string) shell_exec('command -v ffprobe'));
+        if ($ffprobe === '') {
+            return null;
+        }
+        $command = escapeshellcmd($ffprobe)
+            .' -v error -show_streams -of json '
+            .escapeshellarg($absolutePath);
+        $output = shell_exec($command);
+        if ($output === null || $output === '') {
+            return false;
+        }
+        $data = json_decode($output, true);
+        if (! is_array($data) || empty($data['streams'])) {
+            return false;
+        }
+        foreach ($data['streams'] as $stream) {
+            if (($stream['codec_type'] ?? null) === 'audio') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Batch 9: reject a music-bed upload that is not audio. Probes
+     * the file BEFORE any job is created; returns a 422 response or
+     * null when the file is fine (or absent / unprobeable).
+     */
+    private function checkMusicBed(Request $request): ?\Illuminate\Http\JsonResponse
+    {
+        if (! $request->hasFile('music_bed')) {
+            return null;
+        }
+        $probe = $this->probeAudio($request->file('music_bed')->getPathname());
+        if ($probe === false) {
+            return response()->json([
+                'error' => 'validation_error',
+                'message' => 'The music bed file is not an audio file (FFprobe could not read an audio stream).',
+            ], 422);
+        }
+
+        return null;
+    }
+
+    /**
+     * Batch 9: store an already-validated music-bed upload under
+     * music-beds/{job_id}/ on the LOCAL disk and record its path +
+     * original name on the job. No file uploaded = nothing stored
+     * and both columns stay null ("No music bed").
+     */
+    private function storeMusicBed(Request $request, ProcessingJob $job): void
+    {
+        if (! $request->hasFile('music_bed')) {
+            return;
+        }
+        $file = $request->file('music_bed');
+        $extension = strtolower($file->getClientOriginalExtension());
+        $storedFilename = Str::uuid()->toString().'.'.$extension;
+        $relativePath = "music-beds/{$job->id}/{$storedFilename}";
+        Storage::disk('local')->putFileAs("music-beds/{$job->id}", $file, $storedFilename);
+        $job->update([
+            'music_bed_path' => $relativePath,
+            'music_bed_name' => $file->getClientOriginalName(),
+        ]);
     }
 
     public function show(Request $request, ProcessingJob $job)

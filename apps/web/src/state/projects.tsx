@@ -15,6 +15,7 @@ import {
   listLaravelProjects,
   updateLaravelProject,
 } from '../lib/api'
+import type { CaptionTranslation, ClipLayout, OstLanguage } from '../lib/jobs'
 
 /**
  * Project store — Phase 2.
@@ -47,10 +48,20 @@ export interface ClipSpec {
    * bold_bar / bottom (the pre-Batch-2 behaviour). */
   headlineStyle: 'bold_bar' | 'lower_third' | 'big_centre'
   captionPosition: 'bottom' | 'top' | 'middle'
+  /** Batch 9 OST position (2026-11-25) — where the headline sits,
+   * independent of the look; default follows the headline style
+   * (bold_bar -> top, lower_third -> bottom, big_centre -> centre). */
+  ostPosition: 'top' | 'centre' | 'bottom'
+  /** Batch 9 SFX sting (2026-11-25); default 'none'. */
+  sfx: 'none' | 'whoosh' | 'pop' | 'whoosh_pop'
+  /** Batch 9 colour grade (2026-11-25); default 'none' — no
+   * filter, the render pipeline is untouched. */
+  colourGrade: 'none' | 'vibrant' | 'warm' | 'cool' | 'cinematic'
   /** Batch 3 beat sync (2026-11-25); default ON. */
   beatSync: boolean
-  /** Batch 3 caption translation (2026-11-25); default 'none'. */
-  captionTranslation: 'none' | 'ur' | 'hi' | 'en'
+  /** Batch 3 caption translation (2026-11-25; broadened Batch 9
+   * to 32 languages); default 'none'. */
+  captionTranslation: CaptionTranslation
   /** Batch 3 export ratios (2026-11-25); default ['9:16'] — 9:16 is
    * always on, 1:1 and 16:9 are optional extras. */
   exportRatios: string[]
@@ -70,6 +81,26 @@ export interface ClipSpec {
   progressBar: boolean
   /** How clips are picked: best parts only, or any parts to fill the count. */
   selectionMode: 'interesting_only' | 'fill_any'
+  /** Batch 9 wizard parity (2026-11-25) — the fields the New Job
+   * page had and the wizard was missing. Duration range: the min/max
+   * pair for minimum/maximum modes (defaults 30–90s, like New Job);
+   * job type + campaign requirements (requirements required when
+   * campaign); layout (9:16 only — other ratios fall back to centre
+   * crop at submit); quality (the direct control — kept in sync
+   * with processingMode, see Clipper.tsx); captions language (which
+   * language the speech is in); caption style as a REAL style id
+   * (the picker stores real ids now — legacy preset ids map through
+   * translateLegacyCaptionPreset only when loading an old preset);
+   * OST language ('source' = the video's own language). */
+  durationMinSeconds: number
+  durationMaxSeconds: number
+  jobType: 'myself' | 'campaign'
+  campaignRequirements: string
+  layout: ClipLayout
+  quality: 'draft' | 'standard' | 'high'
+  captionsLanguage: 'english' | 'roman_urdu' | 'hindi' | 'auto'
+  captionStyle: string
+  ostLanguage: OstLanguage
   contentType:
     | 'podcast'
     | 'interview'
@@ -97,6 +128,9 @@ export function defaultClipSpec(): ClipSpec {
     fillerRemoval: true,
     headlineStyle: 'bold_bar',
     captionPosition: 'bottom',
+    ostPosition: 'top',
+    sfx: 'none',
+    colourGrade: 'none',
     beatSync: true,
     captionTranslation: 'none',
     exportRatios: ['9:16'],
@@ -113,6 +147,15 @@ export function defaultClipSpec(): ClipSpec {
     contentType: 'general',
     keywords: '',
     processingMode: 'balanced',
+    durationMinSeconds: 30,
+    durationMaxSeconds: 90,
+    jobType: 'myself',
+    campaignRequirements: '',
+    layout: 'center_crop',
+    quality: 'standard',
+    captionsLanguage: 'english',
+    captionStyle: 'punchy',
+    ostLanguage: 'source',
   }
 }
 

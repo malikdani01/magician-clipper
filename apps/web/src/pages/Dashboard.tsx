@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
-  Captions,
   Clapperboard,
   Download,
   Folder,
@@ -259,7 +258,7 @@ export function DashboardPage() {
         <div className="rounded-2xl border border-ink-border bg-ink-panel p-6 lg:col-span-2">
           <div className="flex items-center justify-between gap-3">
             <h2 className="text-lg font-semibold text-white">{t('recentProjects')}</h2>
-            <Link to="/projects" className="text-sm font-medium text-brand-light hover:underline">
+            <Link to="/jobs" className="text-sm font-medium text-brand-light hover:underline">
               {t('viewAll')} →
             </Link>
           </div>
@@ -368,9 +367,11 @@ export function DashboardPage() {
           <div className="mt-4 grid grid-cols-2 gap-3">
             {[
               { to: '/clipper', label: 'AI Clipper', icon: <Wand2 className="h-5 w-5" /> },
-              { to: '/projects', label: 'My Projects', icon: <Folder className="h-5 w-5" /> },
+              { to: '/jobs', label: 'My Projects', icon: <Folder className="h-5 w-5" /> },
               { to: '/library', label: 'Video Library', icon: <Video className="h-5 w-5" /> },
-              { to: '/captions', label: 'Captions Studio', icon: <Captions className="h-5 w-5" /> },
+              // Batch 9 (2026-11-25): the Captions Studio tile was
+              // removed with that page; the default caption style
+              // now lives in Settings → Preferences.
             ].map((a) => (
               <Link
                 key={a.to}

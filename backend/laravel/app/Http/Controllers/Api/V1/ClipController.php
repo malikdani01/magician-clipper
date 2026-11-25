@@ -383,6 +383,126 @@ class ClipController extends Controller
     }
 
     /**
+     * POST /api/v1/clips/bulk-rerender — queue a re-render of several
+     * clips with one caption style. Same ownership checks as the
+     * single re-render (zip() pattern): every id must exist and belong
+     * to the requesting user, or the whole request is a 404. One
+     * clip_rerenders row (queued) is created per clip that CAN be
+     * re-rendered; a clip with no rendered file, already on that
+     * style, or with a re-render already in flight is skipped and
+     * listed in `skipped` with its reason — never a row that can do
+     * nothing. Returns 202 with the created rows + the skips.
+     */
+    public function bulkRerender(Request $request)
+    {
+        $validated = $request->validate([
+            'clip_ids' => ['required', 'array', 'min:1', 'max:50'],
+            'clip_ids.*' => ['integer'],
+            'caption_style' => ['required', 'string', Rule::in(UserSetting::CAPTION_STYLES)],
+        ]);
+
+        $ids = array_values(array_unique($validated['clip_ids']));
+        $clips = Clip::with('project')->whereIn('id', $ids)->get();
+
+        if ($clips->count() !== count($ids)) {
+            return response()->json([
+                'error' => 'not_found',
+                'message' => 'One or more of the requested clips could not be found.',
+            ], 404);
+        }
+        foreach ($clips as $clip) {
+            if (! $request->user()->isAdmin() && $clip->project->user_id !== $request->user()->id) {
+                return response()->json([
+                    'error' => 'not_found',
+                    'message' => 'One or more of the requested clips could not be found.',
+                ], 404);
+            }
+        }
+
+        $rerenders = [];
+        $skipped = [];
+        foreach ($clips as $clip) {
+            if ($clip->output_path === null) {
+                $skipped[] = ['clip_id' => $clip->id, 'reason' => 'This clip has no rendered file yet.'];
+                continue;
+            }
+            $effectiveStyle = $clip->caption_style
+                ?? ($clip->job?->settings['caption_style'] ?? null);
+            if ($effectiveStyle === $validated['caption_style']) {
+                $skipped[] = ['clip_id' => $clip->id, 'reason' => 'This clip already uses that caption style.'];
+                continue;
+            }
+            $inFlight = ClipRerender::where('clip_id', $clip->id)
+                ->whereIn('status', [ClipRerender::STATUS_QUEUED, ClipRerender::STATUS_PROCESSING])
+                ->exists();
+            if ($inFlight) {
+                $skipped[] = ['clip_id' => $clip->id, 'reason' => 'A re-render for this clip is already queued or processing.'];
+                continue;
+            }
+            $rerenders[] = ClipRerender::create([
+                'clip_id' => $clip->id,
+                'user_id' => $request->user()->id,
+                'caption_style' => $validated['caption_style'],
+                'status' => ClipRerender::STATUS_QUEUED,
+            ])->toUserArray();
+        }
+
+        return response()->json(['rerenders' => $rerenders, 'skipped' => $skipped], 202);
+    }
+
+    /**
+     * POST /api/v1/clips/{clip}/variants — queue an A/B variant of one
+     * clip. Unlike render(), this does NOT replace the clip's file:
+     * the row is marked is_variant and the worker renders the SAME
+     * window with the chosen caption style (+ optional headline style)
+     * and uploads it as a NEW clip row with variant_of_clip_id set
+     * (MuseJobController::storeClip). A variant is rejected only when
+     * it would be identical to the original (same caption style AND
+     * same-or-absent headline style); the caption style may match the
+     * original when the headline differs. Ownership is enforced by
+     * the same 'render' policy as the single re-render.
+     */
+    public function createVariant(Request $request, Clip $clip)
+    {
+        $this->authorize('render', $clip);
+
+        $validated = $request->validate([
+            'caption_style' => ['required', 'string', Rule::in(UserSetting::CAPTION_STYLES)],
+            'headline_style' => ['sometimes', 'nullable', 'string', Rule::in(['bold_bar', 'lower_third', 'big_centre'])],
+        ]);
+
+        if ($clip->output_path === null) {
+            return response()->json([
+                'error' => 'invalid_state',
+                'message' => 'This clip has no rendered file yet — there is nothing to make a variant of.',
+            ], 422);
+        }
+
+        $effectiveStyle = $clip->caption_style
+            ?? ($clip->job?->settings['caption_style'] ?? null);
+        $jobHeadline = $clip->job?->settings['headline_style'] ?? 'bold_bar';
+        $variantHeadline = $validated['headline_style'] ?? null;
+        if ($effectiveStyle === $validated['caption_style']
+            && ($variantHeadline === null || $variantHeadline === $jobHeadline)) {
+            return response()->json([
+                'error' => 'validation_error',
+                'message' => 'A variant must differ from the original — pick a different caption style or headline style.',
+            ], 422);
+        }
+
+        $rerender = ClipRerender::create([
+            'clip_id' => $clip->id,
+            'user_id' => $request->user()->id,
+            'caption_style' => $validated['caption_style'],
+            'status' => ClipRerender::STATUS_QUEUED,
+            'is_variant' => true,
+            'variant_headline_style' => $variantHeadline,
+        ]);
+
+        return response()->json(['rerender' => $rerender->toUserArray()], 202);
+    }
+
+    /**
      * GET /api/v1/clips/{clip}/rerenders — re-render history for one
      * clip, latest first. The job page polls this while a re-render is
      * queued/processing and shows the result when it lands.

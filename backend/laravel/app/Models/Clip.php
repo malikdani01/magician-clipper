@@ -43,6 +43,10 @@ class Clip extends Model
         // and the per-clip favourite flag.
         'thumbnail_candidates',
         'is_favourite',
+        // Batch 9: face tracking as reported by the worker (default
+        // false) and the Variant B link (null = original clip).
+        'face_tracked',
+        'variant_of_clip_id',
         'caption_style',
         'file_size_bytes',
         'score',
@@ -62,12 +66,26 @@ class Clip extends Model
             'score_breakdown' => 'array',
             'thumbnail_candidates' => 'array',
             'is_favourite' => 'boolean',
+            'face_tracked' => 'boolean',
+            'variant_of_clip_id' => 'integer',
         ];
     }
 
     public function project()
     {
         return $this->belongsTo(Project::class);
+    }
+
+    /** The Variant A clip this clip is a Variant B of (null = original). */
+    public function variantOf()
+    {
+        return $this->belongsTo(Clip::class, 'variant_of_clip_id');
+    }
+
+    /** Variant B clips rendered from this clip. */
+    public function variants()
+    {
+        return $this->hasMany(Clip::class, 'variant_of_clip_id');
     }
 
     public function job()

@@ -25,6 +25,7 @@ FROM php:8.3-apache
 # runs inside this image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
+        postgresql-client \
         libpq-dev \
         libcurl4-openssl-dev \
         libzip-dev \
@@ -35,7 +36,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # PHP extensions the app needs:
-#   pdo_pgsql             — Render's free PostgreSQL database
+#   postgresql-client     — pg_dump + psql for `php artisan db:backup` /
+#                           db:restore (Batch 9 deploy-safety work).
+#                           The PHP extension above (pdo_pgsql) does NOT
+#                           ship these binaries, so the backup command
+#                           cannot work without this package.
 #   mbstring, xml, curl, zip, gd — Laravel + file handling
 RUN docker-php-ext-install -j"$(nproc)" \
         pdo_pgsql mbstring xml curl zip gd

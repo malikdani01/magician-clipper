@@ -7,11 +7,15 @@ use App\Models\Clip;
 use App\Models\ProcessingJob;
 use App\Models\Project;
 use App\Models\User;
+use App\Support\DatabaseBackup;
+use App\Support\MediaStorage;
 use App\Support\StorageUsage;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Validation\Rule;
 
 class AdminController extends Controller
 {
@@ -246,6 +250,137 @@ class AdminController extends Controller
         }
 
         return response()->json(['job' => $job->fresh()]);
+    }
+
+    /**
+     * PATCH /api/v1/admin/settings/credentials — the signed-in admin
+     * changes their OWN email + password (Batch 9, 2026-11-25).
+     *
+     * The Admin Panel → Settings form is the source of truth for admin
+     * credentials: each Save replaces the previous ones and the old
+     * ones stop working. The seeder never touches credentials after
+     * the first admin exists, so a panel change survives deploys.
+     *
+     * current_password is verified against the signed-in admin first
+     * (wrong → 422, nothing changes). new_email must be a valid email
+     * unused by any OTHER user; new_password is min 8 with a matching
+     * confirmation. Only the signed-in admin's row is updated (email
+     * + password hash); name, plan and everything else are untouched.
+     * The current session is NOT revoked — the admin just proved the
+     * current password. No credential value is ever returned or logged.
+     */
+    public function updateCredentials(Request $request)
+    {
+        $admin = $request->user();
+
+        $validated = $request->validate([
+            'current_password' => ['required', 'string'],
+            'new_email' => ['required', 'email', 'max:255', Rule::unique('users', 'email')->ignore($admin->id)],
+            'new_password' => ['required', 'string', 'min:8', 'confirmed'],
+        ]);
+
+        if (! Hash::check($validated['current_password'], $admin->password)) {
+            return response()->json([
+                'message' => 'The current password is incorrect.',
+                'errors' => ['current_password' => ['The current password is incorrect.']],
+            ], 422);
+        }
+
+        $admin->email = $validated['new_email'];
+        $admin->password = Hash::make($validated['new_password']);
+        $admin->save();
+
+        return response()->json([
+            'message' => 'Credentials updated — use the new email and password next time you sign in.',
+            'admin' => ['id' => $admin->id, 'email' => $admin->email],
+        ]);
+    }
+
+    /**
+     * GET /api/v1/admin/backup — latest backup info for the Admin
+     * Panel → Settings "Backup & Restore" section (Batch 9, 2026-11-25).
+     *
+     * Returns the newest local backup (or null), whether the signed-in
+     * admin has cloud storage configured (backups upload there too),
+     * and the EXACT restore command — restore stays an artisan
+     * command on purpose (a web-request restore can time out
+     * mid-restore and corrupt data), so the panel shows the command
+     * instead of a restore button.
+     */
+    public function backupInfo(Request $request)
+    {
+        $latest = DatabaseBackup::latest();
+        $admin = $request->user();
+
+        return response()->json([
+            'backup' => $latest === null ? null : $this->backupArray($latest),
+            'cloud_configured' => MediaStorage::buildCloudDisk($admin) !== null,
+            'restore_command' => $latest === null
+                ? 'php artisan db:restore storage/app/backups/<backup-file>.sql.gz --force'
+                : DatabaseBackup::restoreCommand($latest['filename']),
+        ]);
+    }
+
+    /**
+     * POST /api/v1/admin/backup — create a backup now (admin-only,
+     * throttled: a dump is real server work). Runs synchronously and
+     * returns the new backup's metadata. A failed cloud upload never
+     * fails the backup — the local file exists either way and the
+     * failure is reported in cloud_error, never hidden.
+     */
+    public function createBackup(Request $request)
+    {
+        try {
+            $meta = DatabaseBackup::create($request->user());
+        } catch (\Throwable $e) {
+            return response()->json([
+                'message' => 'Backup failed: '.$e->getMessage(),
+            ], 500);
+        }
+
+        return response()->json([
+            'message' => 'Backup created.',
+            'backup' => $this->backupArray($meta),
+            'cloud_configured' => MediaStorage::buildCloudDisk($request->user()) !== null,
+            'restore_command' => DatabaseBackup::restoreCommand($meta['filename']),
+        ]);
+    }
+
+    /**
+     * GET /api/v1/admin/backup/download — stream the latest backup
+     * file (.sql.gz). 404 with an honest message when no backup
+     * exists yet. Admin gate + Sanctum auth come from the route.
+     */
+    public function downloadBackup(Request $request)
+    {
+        $latest = DatabaseBackup::latest();
+        if ($latest === null) {
+            return response()->json([
+                'message' => 'No backup exists yet — create one first.',
+            ], 404);
+        }
+
+        return response()->download(
+            $latest['path'],
+            $latest['filename'],
+            ['Content-Type' => 'application/gzip']
+        );
+    }
+
+    /** Public shape of a backup for the panel (paths stay server-side). */
+    private function backupArray(array $meta): array
+    {
+        return [
+            'filename' => $meta['filename'],
+            'size_bytes' => $meta['size_bytes'],
+            'created_at' => $meta['created_at'],
+            'driver' => $meta['driver'],
+            'method' => $meta['method'],
+            'cloud_key' => $meta['cloud_key'],
+            'cloud_error' => $meta['cloud_error'],
+            // Where the file lives: local disk, or local + cloud bucket.
+            'location' => $meta['cloud_key'] !== null ? 'local+cloud' : 'local',
+        ];
     }
 
     /**

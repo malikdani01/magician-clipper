@@ -19,6 +19,22 @@ use Illuminate\Validation\Rule;
  */
 class JobSettingsRules
 {
+    /**
+     * Batch 9 (2026-11-25): the broad MyMemory output-language list
+     * shared by caption_translation and ost_language (ISO 639-1
+     * codes; zh-CN for Simplified Chinese). Stated once so the two
+     * rules and the worker's TRANSLATION_TARGETS cannot drift apart.
+     */
+    public static function translationLanguages(): array
+    {
+        return [
+            'en', 'ur', 'hi', 'es', 'fr', 'de', 'pt', 'ar', 'tr', 'id',
+            'bn', 'pa', 'ta', 'te', 'ml', 'mr', 'gu', 'ru', 'ja', 'ko',
+            'zh-CN', 'it', 'nl', 'pl', 'uk', 'vi', 'th', 'fa', 'ps',
+            'sd', 'ne', 'si',
+        ];
+    }
+
     public static function rules(): array
     {
         return [
@@ -46,12 +62,41 @@ class JobSettingsRules
             // headline, captions at the bottom / on the divider).
             'headline_style' => ['sometimes', 'string', Rule::in(['bold_bar', 'lower_third', 'big_centre'])],
             'caption_position' => ['sometimes', 'string', Rule::in(['bottom', 'top', 'middle'])],
+            // Batch 9 (2026-11-25): OST position — WHERE the headline
+            // sits, independent of headline_style (the LOOK). The
+            // default is derived from the style in
+            // JobController::buildSettings (bold_bar -> top,
+            // lower_third -> bottom, big_centre -> centre); an
+            // explicit value here always wins.
+            'ost_position' => ['sometimes', 'nullable', 'string', Rule::in(['top', 'centre', 'bottom'])],
+            // Batch 9 (2026-11-25): OST language — the headline's
+            // output language. 'source' (default) keeps the
+            // headline in the video's own language; any other value
+            // translates the derived headline through MyMemory (same
+            // honest fallback as captions: on failure the headline
+            // stays in the source language). End-card text,
+            // lower-third tag and keyword pop-ups are never
+            // translated (they are the user's own words / the spoken
+            // words). Same broad list as caption_translation.
+            'ost_language' => ['sometimes', 'nullable', 'string', Rule::in(array_merge(['source'], self::translationLanguages()))],
+            // Batch 9 (2026-11-25): sound-effect sting over clip
+            // cuts (default 'none'). The worker mixes the named SFX
+            // files; 'whoosh_pop' is both, whoosh then pop.
+            'sfx' => ['sometimes', 'string', Rule::in(['none', 'whoosh', 'pop', 'whoosh_pop'])],
+            // Batch 9 (2026-11-25): per-job colour grade (default
+            // 'none'). The worker applies it as a video filter on
+            // the final render only; 'none' adds no filter at all.
+            'colour_grade' => ['sometimes', 'nullable', 'string', Rule::in(['none', 'vibrant', 'warm', 'cool', 'cinematic'])],
             // Batch 3 (2026-11-25): beat-synced cuts/zoom (default ON),
             // captions auto-translate (default "none" = original
             // language), multi-ratio export (9:16 always on; the worker
             // also forces the job's own aspect_ratio into the list).
             'beat_sync' => ['sometimes', 'boolean'],
-            'caption_translation' => ['sometimes', 'string', Rule::in(['none', 'ur', 'hi', 'en'])],
+            // Batch 9 (2026-11-25): caption translation targets
+            // broadened from ur/hi/en to the full MyMemory list
+            // (same list as ost_language, minus 'source'/'none'
+            // handling — 'none' keeps the original language).
+            'caption_translation' => ['sometimes', 'string', Rule::in(array_merge(['none'], self::translationLanguages()))],
             'export_ratios' => ['sometimes', 'array', 'max:3'],
             'export_ratios.*' => ['string', Rule::in(['9:16', '1:1', '16:9'])],
             // Batch 6 (2026-11-25): caption safe zone (default ON) —
@@ -73,6 +118,12 @@ class JobSettingsRules
             // full clip. The worker treats missing keys as the
             // defaults, so old jobs render exactly as before.
             'ost_persistent' => ['sometimes', 'boolean'],
+            // Batch 9 (2026-11-25): the OST animation control was
+            // removed from the New Job + wizard UI — OST is always
+            // static now. The field stays ACCEPTED here (and in
+            // presets) so old presets / API clients that still send
+            // it validate instead of breaking; the worker treats any
+            // value as 'none'.
             'ost_animation' => ['sometimes', 'string', Rule::in(['none', 'slide', 'fade', 'pop'])],
             'end_card' => ['sometimes', 'boolean'],
             'end_card_text' => ['sometimes', 'nullable', 'string', 'max:40'],
@@ -85,7 +136,10 @@ class JobSettingsRules
             'job_type' => ['sometimes', 'string', Rule::in(['myself', 'campaign'])],
             'campaign_requirements' => ['sometimes', 'nullable', 'string', 'max:5000'],
             'notes' => ['sometimes', 'nullable', 'string', 'max:5000'],
-            'layout' => ['sometimes', 'string', Rule::in(['center_crop', 'split', 'pip_facecam', 'blur_fill', 'streamer_full'])],
+            // Batch 9 (2026-11-25): five more 9:16 layouts — gradient_fill,
+            // stacked, letterbox, face_closeup, framed. The worker falls
+            // back to centre crop for any layout at a non-9:16 ratio.
+            'layout' => ['sometimes', 'string', Rule::in(['center_crop', 'split', 'pip_facecam', 'blur_fill', 'streamer_full', 'gradient_fill', 'stacked', 'letterbox', 'face_closeup', 'framed'])],
             'content_type' => ['sometimes', 'string', Rule::in(Project::CONTENT_TYPES)],
             'quality' => ['sometimes', 'string', Rule::in(['draft', 'standard', 'high'])],
         ];

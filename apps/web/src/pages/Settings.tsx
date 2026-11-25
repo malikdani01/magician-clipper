@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { Bell, Cloud, CreditCard, HardDrive, ShieldCheck, SlidersHorizontal, User } from 'lucide-react'
 import { API_URL } from '../lib/api'
+import { CAPTION_STYLES, getCaptionStyle, isCaptionStyleId } from '../lib/captionStyles'
 import { formatBytes } from '../lib/format'
 import { useAuth } from '../state/auth'
 import { useProjects } from '../state/projects'
@@ -86,6 +86,73 @@ export function SettingsPage() {
   const [profileMessage, setProfileMessage] = useState<string | null>(null)
   const [profileError, setProfileError] = useState<string | null>(null)
   const [savingProfile, setSavingProfile] = useState(false)
+
+  // Batch 9 (2026-11-25): the default caption style moved here from
+  // the hidden Captions Studio page — same behaviour: GET on mount,
+  // PATCH { caption_style } on change, and the wizard pre-selects
+  // the saved default for new jobs.
+  const [defaultCaptionStyle, setDefaultCaptionStyle] = useState<string>('punchy')
+  const [defaultStyleMessage, setDefaultStyleMessage] = useState<string | null>(null)
+  const [defaultStyleError, setDefaultStyleError] = useState<string | null>(null)
+  const [savingDefaultStyle, setSavingDefaultStyle] = useState(false)
+
+  useEffect(() => {
+    if (!token) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch(`${API_URL}/settings`, {
+          headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
+        })
+        if (!res.ok) return
+        const body = (await res.json()) as { settings?: { caption_style?: unknown } }
+        if (!cancelled && isCaptionStyleId(body.settings?.caption_style)) {
+          setDefaultCaptionStyle(body.settings.caption_style)
+        }
+      } catch {
+        // Backend unreachable — keep the 'punchy' default.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [token])
+
+  async function saveDefaultCaptionStyle(id: string) {
+    setDefaultStyleMessage(null)
+    setDefaultStyleError(null)
+    if (!token) {
+      setDefaultStyleError('Sign in to save a default caption style.')
+      return
+    }
+    setSavingDefaultStyle(true)
+    try {
+      const res = await fetch(`${API_URL}/settings`, {
+        method: 'PATCH',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ caption_style: id }),
+      })
+      const body = (await res.json().catch(() => null)) as Record<string, unknown> | null
+      if (!res.ok) {
+        const message =
+          body && typeof body.message === 'string' ? body.message : `HTTP ${res.status}`
+        setDefaultStyleError(message)
+        return
+      }
+      setDefaultCaptionStyle(id)
+      setDefaultStyleMessage(
+        `Default caption style saved — new jobs will use ${getCaptionStyle(id).name}.`,
+      )
+    } catch (e) {
+      setDefaultStyleError(e instanceof Error ? e.message : 'Could not reach the backend.')
+    } finally {
+      setSavingDefaultStyle(false)
+    }
+  }
 
   // Real on-disk storage (uploaded sources + rendered clips) from the
   // server; falls back to the browser project sum while loading.
@@ -402,6 +469,33 @@ export function SettingsPage() {
                   className="h-5 w-5 accent-[var(--color-primary)]"
                 />
               </label>
+              <div>
+                <label className="block">
+                  <span className="text-sm font-medium text-white">Default caption style</span>
+                  <select
+                    value={defaultCaptionStyle}
+                    disabled={savingDefaultStyle}
+                    onChange={(e) => void saveDefaultCaptionStyle(e.target.value)}
+                    aria-label="Default caption style"
+                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {CAPTION_STYLES.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                  New jobs in the AI Clipper start with this style. Saved to your account.
+                </p>
+                {defaultStyleMessage ? (
+                  <p className="mt-2 text-sm text-emerald-300">{defaultStyleMessage}</p>
+                ) : null}
+                {defaultStyleError ? (
+                  <p className="mt-2 text-sm text-red-300">{defaultStyleError}</p>
+                ) : null}
+              </div>
             </div>
           </div>
         ) : null}
@@ -443,19 +537,6 @@ export function SettingsPage() {
         ) : null}
         </div>
       </div>
-
-      <Link
-        to="/admin"
-        className="mt-4 flex items-center gap-3 rounded-2xl border border-ink-border bg-ink-panel p-4 text-sm text-[var(--color-text-muted)] hover:border-brand/60 hover:text-white"
-      >
-        <ShieldCheck className="h-5 w-5 text-brand-light" />
-        <span>
-          <span className="block font-medium text-white">Admin Panel</span>
-          {user?.role === 'admin'
-            ? `Signed in as ${user.name} — admin access available.`
-            : 'Protected — sign in with an admin account to open it.'}
-        </span>
-      </Link>
     </div>
   )
 }

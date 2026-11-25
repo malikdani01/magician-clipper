@@ -194,7 +194,7 @@ LANGUAGE_MAP = {"english": "en", "roman_urdu": "ur", "hindi": "hi", "auto": None
 # lower than single-scene windows.
 W_DENSITY = 0.20
 W_COVERAGE = 0.20
-W_COMPLETENESS = 0.20
+W_COMPLETENESS = 0.15
 W_SILENCE = 0.05
 W_ENERGY = 0.05
 W_GAMEPLAY = 0.15
@@ -206,6 +206,15 @@ W_STABILITY = 0.10
 # hooks the viewer; one that opens on a pause does not — but a
 # genuinely better later window still wins.
 W_HOOK = 0.05
+# Batch 9 (2026-11-25): ranking v2 — emotional peaks. The number of
+# per-second RMS energy peaks inside the window (a second counts as a
+# peak when its energy is >= 70% of the loudest second in the source),
+# normalised against the best candidate's peak count, like density.
+# 0.05 of the score, taken from completeness (0.20 -> 0.15) — sentence
+# completeness is now also enforced by the Batch 9 sentence-boundary
+# snap, so it needs less weight. Weights still sum to 1.00:
+# 0.20 + 0.20 + 0.15 + 0.05 + 0.05 + 0.15 + 0.10 + 0.05 + 0.05 = 1.00.
+W_PEAKS = 0.05
 
 # Batch 2 headline styles (per-job setting `headline_style`, default
 # "bold_bar" = the look every job used before Batch 2).
@@ -225,6 +234,87 @@ OST_END_CARD_DEFAULT = "Follow for more"
 # bottom edge, growing left-to-right across the full clip.
 PROGRESS_BAR_HEIGHT = 8
 PROGRESS_BAR_COLOUR = "0x8b5cf6"
+# Batch 9 (2026-11-25): colour grade presets (per-job setting
+# `colour_grade`, default "none"). Applied on the final render only,
+# as a video filter after layout/zoom/sharpen and BEFORE the
+# captions/headline burn, so the grade colours the footage while the
+# burned text stays its own colour. "none" adds no filter at all —
+# the pipeline is byte-identical to before. Filters use only eq /
+# vibrance / colorbalance, all present in this ffmpeg build.
+COLOUR_GRADES = ("none", "vibrant", "warm", "cool", "cinematic")
+COLOUR_GRADE_FILTERS = {
+    "vibrant": "eq=saturation=1.3:contrast=1.08,vibrance=intensity=0.2",
+    "warm": "colorbalance=rs=0.08:gs=0.02:bs=-0.08,eq=saturation=1.05",
+    "cool": "colorbalance=rs=-0.06:gs=0.0:bs=0.08,eq=saturation=1.02",
+    "cinematic": ("eq=contrast=1.12:brightness=-0.02:saturation=0.85,"
+                  "colorbalance=rs=0.03:bs=0.05"),
+}
+
+
+def colour_grade_filter(grade: str) -> str:
+    """FFmpeg video filter for a colour grade, or "" for none/unknown.
+
+    Unknown values fall back to "" (no grade) — an old or mistyped
+    grade never breaks a render.
+    """
+    return COLOUR_GRADE_FILTERS.get((grade or "none").lower(), "")
+
+
+# Batch 9 (2026-11-25): SFX (per-job setting `sfx`: none / whoosh /
+# pop / whoosh_pop). Only sounds shipped in the repo are offered —
+# services/video-engine/assets/sfx/{whoosh,pop}.wav, synthesised by
+# scripts/synth-sfx.py (stdlib only, reproducible). whoosh plays at
+# the clip start + each auto-zoom punch-in; pop plays on each keyword
+# pop-up. A trigger that does not exist in a clip simply does not
+# sound, and the job note says how many times each fired.
+SFX_OPTIONS = ("none", "whoosh", "pop", "whoosh_pop")
+SFX_DIR = Path(__file__).resolve().parent.parent / "assets" / "sfx"
+SFX_FILES = {"whoosh": SFX_DIR / "whoosh.wav", "pop": SFX_DIR / "pop.wav"}
+SFX_VOLUMES = {"whoosh": 0.5, "pop": 0.6}
+# At most this many SFX events per clip (each is an extra ffmpeg
+# input); the earliest triggers win.
+SFX_MAX_EVENTS = 8
+# Music bed level relative to the speech (0.25 ~= 12 dB under the
+# main audio before the final loudnorm); the sidechain compressor
+# ducks it further under speech (see render_clip).
+MUSIC_BED_VOLUME = 0.25
+# Bed alone (source with no audio track): a moderate level, since
+# there is no speech to duck under.
+MUSIC_BED_SOLO_VOLUME = 0.5
+
+
+def sfx_events_for_clip(sfx: str, zoom_moments: list,
+                        popups: list[dict] | None,
+                        duration: float) -> list[tuple[str, float]]:
+    """SFX trigger times (render-timeline seconds) for one clip.
+
+    ``zoom_moments`` are (start, end) spans on the render timeline
+    (auto-zoom punch-ins); ``popups`` are keyword pop-up dicts with a
+    "start" on the render timeline. whoosh fires at the clip start
+    (0.0) + each punch-in; pop fires at each pop-up. Events closer
+    than 0.3s collapse to one (a punch-in at the clip start is one
+    whoosh, not two). Capped at SFX_MAX_EVENTS, earliest first.
+    Unknown / "none" settings return [].
+    """
+    setting = (sfx or "none").lower()
+    if setting not in SFX_OPTIONS or setting == "none":
+        return []
+    events: list[tuple[str, float]] = []
+    if "whoosh" in setting:
+        times = [0.0] + [float(m[0]) for m in (zoom_moments or [])]
+        for t in sorted(times):
+            if 0.0 <= t <= duration and not any(
+                    abs(t - e[1]) < 0.3 for e in events if e[0] == "whoosh"):
+                events.append(("whoosh", t))
+    if "pop" in setting:
+        for p in (popups or []):
+            t = float(p.get("start", -1.0))
+            if 0.0 <= t <= duration:
+                events.append(("pop", t))
+    events.sort(key=lambda e: e[1])
+    return events[:SFX_MAX_EVENTS]
+
+
 # Visual-moment windows (speech-scarce sources): the score is built only
 # from what a wordless window honestly has — loud audio, gameplay on
 # screen, a stable scene. No speech terms: a visual moment must never
@@ -608,6 +698,53 @@ class JobApi:
             )
         return resp.json()
 
+    def upload_variant_clip(self, clip_id, clip_path: Path, rerender_id,
+                            thumbnail: Path | None = None,
+                            duration_seconds: float | None = None,
+                            candidates: list[Path] | None = None,
+                            face_tracked: bool = False) -> dict:
+        """Upload an A/B variant render as a NEW clip row (Variant B).
+
+        Batch 9: POST /muse/clips/{clip}/variant-file — the backend
+        creates the variant row (score/reason/transcript copied from
+        the original clip, linked via variant_of_clip_id) and marks
+        the variant re-render ready. The original clip is untouched.
+        """
+        files: dict = {}
+        handles = []
+        try:
+            fh = open(clip_path, "rb")
+            handles.append(fh)
+            files["file"] = (clip_path.name, fh, "video/mp4")
+            if thumbnail is not None and thumbnail.exists():
+                th = open(thumbnail, "rb")
+                handles.append(th)
+                files["thumbnail"] = (thumbnail.name, th, "image/jpeg")
+            for n, cand in enumerate(candidates or [], 1):
+                if n > 3:
+                    break
+                if cand is not None and Path(cand).exists():
+                    fh_c = open(cand, "rb")
+                    handles.append(fh_c)
+                    files[f"candidate_{n}"] = (Path(cand).name, fh_c, "image/jpeg")
+            data = {"rerender_id": str(rerender_id),
+                    "face_tracked": "true" if face_tracked else "false"}
+            if duration_seconds is not None:
+                data["duration_seconds"] = str(duration_seconds)
+            resp = self._request(
+                "POST", f"/muse/clips/{clip_id}/variant-file",
+                files=files, data=data, timeout=300,
+            )
+        finally:
+            for h in handles:
+                h.close()
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(
+                f"Upload variant clip {clip_path.name} for clip {clip_id} failed: "
+                f"HTTP {resp.status_code}: {resp.text[:300]}"
+            )
+        return resp.json()
+
 
 # ---------------------------------------------------------------------------
 # Source acquisition
@@ -859,7 +996,23 @@ def transcribe(wav_path: Path, language: str | None) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 #: Target language code -> display name (the only values the API accepts).
-TRANSLATION_TARGETS = {"ur": "Urdu", "hi": "Hindi", "en": "English"}
+#: Batch 9 (2026-11-25): broadened from ur/hi/en to the full MyMemory
+#: list (ISO 639-1; zh-CN for Simplified Chinese) — the same list the
+#: backend's JobSettingsRules::translationLanguages() states, so the
+#: two cannot drift apart. A code MyMemory does not support simply
+#: never translates: every call returns None and the caller falls
+#: back honestly, so offering the full list is safe.
+TRANSLATION_TARGETS = {
+    "en": "English", "ur": "Urdu", "hi": "Hindi", "es": "Spanish",
+    "fr": "French", "de": "German", "pt": "Portuguese", "ar": "Arabic",
+    "tr": "Turkish", "id": "Indonesian", "bn": "Bengali",
+    "pa": "Punjabi", "ta": "Tamil", "te": "Telugu", "ml": "Malayalam",
+    "mr": "Marathi", "gu": "Gujarati", "ru": "Russian",
+    "ja": "Japanese", "ko": "Korean", "zh-CN": "Chinese (Simplified)",
+    "it": "Italian", "nl": "Dutch", "pl": "Polish", "uk": "Ukrainian",
+    "vi": "Vietnamese", "th": "Thai", "fa": "Persian", "ps": "Pashto",
+    "sd": "Sindhi", "ne": "Nepali", "si": "Sinhala",
+}
 #: Job captions_language -> MyMemory source code. "auto" lets MyMemory
 #: detect the source language itself.
 TRANSLATION_SOURCES = {"english": "en", "hindi": "hi",
@@ -1014,6 +1167,46 @@ def translate_segments(segments: list[dict], target: str,
                  "failed": failed_n, "target": target}
 
 
+def _translate_headline(headline: str, settings: dict) -> tuple[str, str]:
+    """Translate a DERIVED headline into the job's ost_language.
+
+    Returns (text, status): status is "none" (ost_language unset /
+    'source' / unknown — no translation asked for), "same" (the
+    headline is already in the target language — no call made), "ok"
+    (translated), or "failed" (MyMemory failed after one retry — the
+    ORIGINAL headline is returned and the job note says so).
+
+    The source language is the language the headline is ALREADY in:
+    the caption-translation target when captions were translated
+    (the headline derives from the translated transcript then), else
+    the transcript's language (captions_language). The translated
+    headline is uppercased, like every derived headline, so the
+    burned look stays the same across languages.
+
+    Only the derived headline ever passes through here — the end-card
+    text and lower-third tag are the user's own words and keyword
+    pop-ups must match the spoken words, so they are never translated.
+    """
+    target = (settings.get("ost_language") or "source").lower()
+    if target == "source" or target not in TRANSLATION_TARGETS:
+        return headline, "none"
+    caption_target = (settings.get("caption_translation") or "none").lower()
+    if caption_target in TRANSLATION_TARGETS:
+        source = caption_target
+    else:
+        source = TRANSLATION_SOURCES.get(
+            (settings.get("captions_language") or "auto").lower(), "autodetect")
+    if source == target:
+        return headline, "same"
+    for _attempt in range(2):  # one attempt + at most one retry
+        got = _mymemory_translate(headline, source, target)
+        if got:
+            return got.upper(), "ok"
+    log.warning("MyMemory headline translation to %s failed; headline "
+                "stays in the source language.", target)
+    return headline, "failed"
+
+
 def wav_rms_profile(wav_path: Path, window: float = 1.0) -> list[float]:
     """Per-second RMS energy of the mono 16 kHz WAV (supporting signal only)."""
     try:
@@ -1154,6 +1347,7 @@ _SCORE_BREAKDOWN_LABELS = {
     "gameplay": "Gameplay",
     "stability": "Stability",
     "hook": "Hook",
+    "peaks": "Peaks",
 }
 
 
@@ -1385,6 +1579,38 @@ def _any_part_windows(source_duration: float,
     return picked
 
 
+def _snap_end_to_sentence(units: list[dict], window_end: float,
+                          start: float, tail: float,
+                          tolerance: float = DURATION_TOLERANCE
+                          ) -> tuple[float, bool]:
+    """Snap a window's end to the nearest sentence end (Batch 9).
+
+    Sentence ends are ``unit["end"] + tail`` for the sentence units
+    inside the window. When one is within ``tolerance`` seconds of
+    ``window_end`` (default 0.6s), return it and True. Otherwise
+    return the unmoved ``window_end`` and False — the caller keeps
+    the old mid-sentence cut and says so honestly in the note.
+
+    NOTE: this helper alone does NOT know the duration mode. The
+    caller must gate the snap: exact mode must never snap (Job #8 —
+    a 20.595s window failed validation at the 0.6s boundary), and
+    minimum/maximum modes must only snap inside their promised
+    range. A snap that merely "validates within tolerance" is not
+    enough — exact mode promises exactly the target.
+    """
+    best: float | None = None
+    for u in units:
+        cand = u["end"] + tail
+        if cand <= start:
+            continue
+        if abs(cand - window_end) <= tolerance:
+            if best is None or abs(cand - window_end) < abs(best - window_end):
+                best = cand
+    if best is None:
+        return window_end, False
+    return best, best != window_end
+
+
 def select_highlights(segments: list[dict], source_duration: float,
                       settings: dict, energy_profile: list[float],
                       face_profile: list[tuple[float, float]] | None = None) -> list[dict]:
@@ -1491,6 +1717,10 @@ def select_highlights(segments: list[dict], source_duration: float,
         return source_duration - t
 
     candidates: list[dict] = []
+    # Batch 9: ranking v2 — the loudest second in the source; a
+    # second counts as an emotional peak when its energy is >= 70%
+    # of this.
+    max_energy = max(energy_profile) if energy_profile else 0.0
     if units:
         # Candidate windows: start at a sentence start, extend sentence by
         # sentence until the duration mode is satisfied.
@@ -1558,6 +1788,42 @@ def select_highlights(segments: list[dict], source_duration: float,
                     window_end = start + target
                     span = target
                     complete = False
+            # Batch 9: sentence-boundary cuts — snap the window end to
+            # the nearest sentence end when one is within the 0.6s
+            # tolerance, so the clip ends on a sentence, never
+            # mid-word. The snap must never break the duration
+            # contract of the mode: exact mode NEVER snaps (Job #8 —
+            # a 20.595s window failed validation at the 0.6s boundary
+            # and the clip was skipped, so exact promises exactly the
+            # target); minimum mode only snaps while the window stays
+            # >= Min and <= Max; maximum mode only snaps while it
+            # stays <= Max and >= Min. When no sentence end qualifies,
+            # the old cut stays and the window is honestly marked
+            # trimmed in the note.
+            snapped_end, moved = _snap_end_to_sentence(
+                units, window_end, start, tail)
+            snap_refused = False
+            if moved:
+                snapped_span = snapped_end - start
+                snap_ok = (
+                    (mode == "minimum" and snapped_span >= target
+                     and (not max_s
+                          or snapped_span <= max_s + DURATION_TOLERANCE))
+                    or (mode == "maximum"
+                        and snapped_span <= target + DURATION_TOLERANCE
+                        and (not min_s
+                             or snapped_span >= min_s - DURATION_TOLERANCE))
+                )
+                if snap_ok:
+                    window_end = snapped_end
+                    span = snapped_span
+                    complete = True
+                else:
+                    # A sentence end IS nearby, but taking it would
+                    # break the duration promise — say so honestly in
+                    # the reason instead of claiming no boundary
+                    # exists (see the reason builder below).
+                    snap_refused = True
             if window_end > source_duration + 1e-6:
                 window_end = source_duration
                 span = window_end - start
@@ -1579,6 +1845,20 @@ def select_highlights(segments: list[dict], source_duration: float,
                              if start <= w["start"] < start + 3.0]
             hook_density = len(opening_words) / 3.0
             hook_energy = energy_in(start, min(window_end, start + 3.0))
+            # Batch 9: emotional peaks — per-second RMS energy peaks
+            # inside the FINAL window (after snapping/extension). A
+            # second is a peak when its energy is >= 70% of the
+            # loudest second in the source; only seconds overlapping
+            # the window count. Raw count here, normalised against
+            # the best candidate in the scoring pass, like density.
+            peak_seconds = 0
+            if max_energy > 0:
+                peak_threshold = 0.7 * max_energy
+                peak_seconds = sum(
+                    1 for k in range(int(start), int(window_end) + 1)
+                    if k + 1 > start and k < window_end
+                    and k < len(energy_profile)
+                    and energy_profile[k] >= peak_threshold)
             # Normalise density against the densest candidate (computed below).
             # Coverage is measured on the FINAL window (after any extension
             # into nearby context for the duration mode), so a window padded
@@ -1592,6 +1872,9 @@ def select_highlights(segments: list[dict], source_duration: float,
                 "energy": energy_in(start, window_end),
                 "hook_density": hook_density,
                 "hook_energy": hook_energy,
+                "peaks": peak_seconds,
+                "snapped": moved and not snap_refused,
+                "snap_refused": snap_refused,
                 "gameplay": gameplay_in(start, window_end),
                 "stability": stability_in(start, window_end),
                 "text": " ".join(u["text"] for u in units[i:j + 1])[:300],
@@ -1602,6 +1885,7 @@ def select_highlights(segments: list[dict], source_duration: float,
         max_density = max(c["density"] for c in candidates) or 1.0
         max_hook_density = max(c["hook_density"] for c in candidates) or 1.0
         max_hook_energy = max(c["hook_energy"] for c in candidates) or 1.0
+        max_peaks = max(c.get("peaks", 0) for c in candidates) or 1.0
         for c in candidates:
             density_n = min(1.0, c["density"] / max_density)
             completeness = 1.0 if c["complete"] else 0.4
@@ -1610,7 +1894,13 @@ def select_highlights(segments: list[dict], source_duration: float,
             # each normalised against the best candidate's opening.
             hook_n = round(0.5 * min(1.0, c["hook_density"] / max_hook_density)
                            + 0.5 * min(1.0, c["hook_energy"] / max_hook_energy), 4)
+            # Batch 9: emotional peaks — the window's peak-second
+            # count normalised against the best candidate's, like
+            # density. A window with several loud moments scores
+            # higher than a flat one.
+            peaks_n = min(1.0, c.get("peaks", 0) / max_peaks)
             c["hook"] = hook_n
+            c["peaks_n"] = round(peaks_n, 4)
             c["score"] = round(
                 W_DENSITY * density_n
                 + W_COVERAGE * c["coverage"]
@@ -1619,7 +1909,8 @@ def select_highlights(segments: list[dict], source_duration: float,
                 + W_ENERGY * min(1.0, c["energy"])
                 + W_GAMEPLAY * c["gameplay"]
                 + W_STABILITY * c["stability"]
-                + W_HOOK * hook_n, 4)
+                + W_HOOK * hook_n
+                + W_PEAKS * peaks_n, 4)
             # The breakdown is the same normalised per-signal values
             # the score above was just built from — nothing invented,
             # nothing re-derived.
@@ -1632,25 +1923,44 @@ def select_highlights(segments: list[dict], source_duration: float,
                 "gameplay": c["gameplay"],
                 "stability": c["stability"],
                 "hook": hook_n,
+                "peaks": peaks_n,
             })
             c["signals"] = ["speech_density", "sentence_complete" if c["complete"] else "trimmed_to_duration",
                             "silence_boundary", "audio_coverage"]
+            if c.get("snapped"):
+                c["signals"].append("sentence_boundary_cut")
             if c["energy"] > 0:
                 c["signals"].append("audio_energy_supporting")
             if c["hook"] >= 0.7:
                 c["signals"].append("strong_opening")
+            if peaks_n >= 0.5:
+                c["signals"].append("emotional_peaks")
             if c["gameplay"] >= 0.5:
                 c["signals"].append("gameplay_present")
             if c["stability"] >= 0.8:
                 c["signals"].append("single_scene")
+            if c.get("snapped"):
+                sentence_note = "ends on a sentence boundary"
+            elif c.get("complete"):
+                sentence_note = "sentence complete"
+            elif c.get("snap_refused"):
+                # A sentence end was nearby, but the duration mode
+                # forbade taking it — say that, not "no boundary".
+                sentence_note = (
+                    f"trimmed to the exact {target:.0f}s target"
+                    if mode == "exact"
+                    else "trimmed mid-sentence (nearest sentence end outside the Min–Max range)"
+                )
+            else:
+                sentence_note = "trimmed mid-sentence (no sentence boundary within 0.6s)"
             c["reason"] = (
                 f"Score {c['score']:.2f} (viral {round(c['score'] * 100)}/100): "
                 f"speech density {density_n:.2f}, "
                 f"audio coverage {c['coverage']:.2f}, "
-                f"sentence {'complete' if c['complete'] else 'trimmed'}, "
+                f"{sentence_note}, "
                 f"silence boundary {silence_n:.2f}, audio energy (supporting) {c['energy']:.2f}, "
                 f"gameplay {c['gameplay']:.2f}, scene stability {c['stability']:.2f}, "
-                f"opening hook {hook_n:.2f}."
+                f"opening hook {hook_n:.2f}, emotional peaks {peaks_n:.2f}."
             )
         chosen = _select_usable_windows(candidates, count)
         if len(chosen) < count:
@@ -1851,11 +2161,123 @@ CAPTION_STYLES = {
     "tiktok_bold": "TikTok Bold",
     "reels_clean": "Reels Clean",
     "shorts_minimal": "Shorts Minimal",
+    # Batch 9 (2026-11-25): two more concepts, our own work — Comic Pop
+    # (playful slanted words, pink shadow, wobble entrance) and Marker
+    # (slanted words with a thick yellow marker outline, flat landing).
+    # Same generic concepts as the competitor's Comic/Marker, but our
+    # own names, samples, colours and rendering — nothing copied.
+    "comic": "Comic Pop",
+    "marker": "Marker",
 }
 
 # One bright colour per word, cycled (ASS BGR hex) — the Gradient Pop
 # palette. Must match wordColors in captionStyles.ts.
 GRADIENT_PALETTE = ["0000FFFF", "000080FF", "00FF00FF", "00FFFF00"]
+
+# Batch 9 (2026-11-25): the Comic Pop accent cycle — mint / yellow /
+# cyan, one per word (ASS BGR hex). Must match the comic word colours
+# in CaptionStylePreview.tsx. Neon alternates cyan / pink the same
+# way (NEON_PALETTE); Marker's spoken word is always orange
+# (MARKER_ACCENT, #FB923C).
+COMIC_PALETTE = ["0099D334", "0015CCFA", "00EED322"]
+NEON_PALETTE = ["00EED322", "009948EC"]
+MARKER_ACCENT = "003C92FB"
+
+# Batch 9 — one distinct typeface per caption style (25) + headline
+# style (3), documented as the FONT MAP. Each entry: (ASS Fontname,
+# ASS Bold, ASS Italic, shipped font file in
+# services/video-engine/fonts/). Bold/Italic MATCH the style's
+# existing ASS flags (see _NEW_STYLE_PARAMS and the legacy Style
+# lines) — only the typeface changes, never the weight or slant, so
+# no existing style's look changes except its font. The file is used
+# for real PIL measurement (the same glyphs libass renders) and is
+# served as a webfont for the browser preview, so preview and burn
+# use the same typeface. Weight-named families ("Noto Sans Black")
+# resolve via fontconfig to that exact face; plain families
+# ("Noto Sans") resolve through the Bold/Italic flags — every entry
+# was verified with fc-match (see test_font_map_resolves in
+# test_muse_worker.py). The files ship in the repo (see
+# scripts/sync-fonts.sh) because VM replacements wipe
+# /usr/share/fonts; the worker installs them into fontconfig at job
+# start (_ensure_repo_fonts).
+FONT_MAP: dict[str, tuple[str, int, int, str]] = {
+    "punchy": ("Noto Sans Black", -1, 0, "NotoSans-Black.ttf"),
+    "word_pop": ("Noto Sans ExtraBold", -1, 0, "NotoSans-ExtraBold.ttf"),
+    "title_card": ("Noto Serif Black", -1, 0, "NotoSerif-Black.ttf"),
+    "clean_subs": ("Noto Sans", 0, 0, "NotoSans-Regular.ttf"),
+    "classic": ("Noto Serif Display", -1, 0, "NotoSerifDisplay-Bold.ttf"),
+    "karaoke": ("Noto Sans", -1, 0, "NotoSans-Bold.ttf"),
+    "bounce": ("Noto Sans Display", -1, 0, "NotoSansDisplay-Bold.ttf"),
+    "typewriter": ("Noto Sans Mono", -1, 0, "NotoSansMono-Bold.ttf"),
+    "sweep": ("Noto Sans SemiBold", -1, 0, "NotoSans-SemiBold.ttf"),
+    "neon": ("Noto Sans Condensed", -1, 0, "NotoSans-CondensedBold.ttf"),
+    "slam": ("Noto Sans ExtraCondensed Black", -1, 0,
+             "NotoSans-ExtraCondensedBlack.ttf"),
+    "outline": ("Noto Sans Display Black", -1, 0, "NotoSansDisplay-Black.ttf"),
+    "gradient": ("Noto Sans Display ExtraBold", -1, 0,
+                 "NotoSansDisplay-ExtraBold.ttf"),
+    "kinetic": ("Noto Sans Medium", -1, 0, "NotoSans-Medium.ttf"),
+    "glow_pop": ("Noto Sans Light", -1, 0, "NotoSans-Light.ttf"),
+    "word_zoom": ("Noto Sans Display SemiBold", -1, 0,
+                  "NotoSansDisplay-SemiBold.ttf"),
+    "word_fade": ("Noto Sans Display Light", -1, 0, "NotoSansDisplay-Light.ttf"),
+    "highlight_sweep": ("Noto Sans Condensed Black", -1, 0,
+                        "NotoSans-CondensedBlack.ttf"),
+    "bounce_in": ("Noto Sans Display Condensed", -1, 0,
+                  "NotoSansDisplay-CondensedBold.ttf"),
+    "glitch_pop": ("DejaVu Sans Mono", -1, 0, "DejaVuSansMono-Bold.ttf"),
+    "tiktok_bold": ("Noto Sans ExtraCondensed", -1, 0,
+                    "NotoSans-ExtraCondensedBold.ttf"),
+    "reels_clean": ("DejaVu Sans", -1, 0, "DejaVuSans-Bold.ttf"),
+    "shorts_minimal": ("DejaVu Serif", -1, 0, "DejaVuSerif-Bold.ttf"),
+    "comic": ("Comic Neue", -1, -1, "ComicNeue-BoldItalic.otf"),
+    "marker": ("Caveat", -1, -1, "Caveat-Bold.ttf"),
+}
+# The CleanSubs sub-style inside title_card shares clean_subs' font.
+TITLE_CARD_SUB_FONT = FONT_MAP["clean_subs"]
+HEADLINE_FONT_MAP: dict[str, tuple[str, int, int, str]] = {
+    "bold_bar": ("Noto Serif", -1, 0, "NotoSerif-Bold.ttf"),
+    "lower_third": ("Noto Sans Display Condensed Black", -1, 0,
+                    "NotoSansDisplay-CondensedBlack.ttf"),
+    "big_centre": ("Noto Serif Display Black", -1, 0,
+                   "NotoSerifDisplay-Black.ttf"),
+}
+FONTS_DIR = Path(__file__).resolve().parent.parent / "fonts"
+
+
+def _ensure_repo_fonts() -> None:
+    """Install the repo's shipped fonts into fontconfig (once per run).
+
+    libass resolves ASS Fontnames through fontconfig, which reads the
+    user's font dir — symlink each shipped file into
+    ~/.local/share/fonts/magician-clipper/ and refresh the cache when
+    anything changed. Idempotent and cheap when nothing changed (no
+    fc-cache run). Never fails the job: a fontconfig problem only
+    logs a warning and the render falls back to the system fonts.
+    """
+    try:
+        if not FONTS_DIR.is_dir():
+            return
+        target = Path.home() / ".local" / "share" / "fonts" / "magician-clipper"
+        target.mkdir(parents=True, exist_ok=True)
+        changed = False
+        for src in sorted(FONTS_DIR.iterdir()):
+            if src.suffix.lower() not in (".ttf", ".otf"):
+                continue
+            link = target / src.name
+            if link.is_symlink() and link.resolve() == src.resolve():
+                continue
+            if link.exists() or link.is_symlink():
+                link.unlink()
+            link.symlink_to(src)
+            changed = True
+        if changed:
+            run(["fc-cache", "-f", str(target)], timeout=120)
+            log.info("Installed %d repo font(s) into fontconfig",
+                     len(list(target.iterdir())))
+    except Exception:
+        log.warning("repo fonts install failed (continuing with system "
+                    "fonts)", exc_info=True)
 
 # Words that get the yellow highlight in punchy captions: the emphatic /
 # action word of a phrase. Falls back to the longest word (len >= 4).
@@ -1928,6 +2350,28 @@ _DEJAVU_BOLD_CANDIDATES = (
 )
 _measure_font = None  # PIL ImageFont at 100px, or False when unavailable
 _MEASURE_FONT_TRIED = False
+# Batch 9: per-font measure cache — one PIL ImageFont (100px) per
+# shipped font file, so measurement uses the same glyphs libass
+# renders for that style (see FONT_MAP).
+_measure_fonts: dict[str, object] = {}
+
+
+def _load_measure_font_for(font_path) -> object | None:
+    """PIL ImageFont (100px) for one shipped font file, or None.
+
+    Cached per path. None when Pillow is missing or the file cannot
+    be read — the caller then falls back to the estimator.
+    """
+    key = str(font_path)
+    if key in _measure_fonts:
+        return _measure_fonts[key]
+    try:
+        from PIL import ImageFont
+        font = ImageFont.truetype(key, 100)
+    except Exception:
+        font = None
+    _measure_fonts[key] = font
+    return font
 
 
 def _load_measure_font():
@@ -1955,36 +2399,46 @@ def _load_measure_font():
     return None
 
 
-def _measure_text_width_px(text: str, fs: int) -> float:
-    """Real rendered width of one line of DejaVu Sans Bold at ``fs``.
+def _measure_text_width_px(text: str, fs: int, font_path=None) -> float:
+    """Real rendered width of one line at ``fs``.
 
     Primary path for caption auto-fit: Pillow measures the exact glyph
-    advances of the same font libass renders. A 2% safety margin covers
-    libass's own rounding (its advances are integer pixels). Falls back
-    to the per-glyph estimator when Pillow or the font is unavailable.
+    advances of the same font libass renders. ``font_path`` selects
+    that style's shipped font (Batch 9 FONT_MAP); without it, the
+    legacy DejaVu Sans Bold measure font is used (Batch 6 behaviour).
+    A 2% safety margin covers libass's own rounding (its advances are
+    integer pixels). Falls back to the per-glyph estimator when Pillow
+    or the font is unavailable.
     """
+    if font_path is not None:
+        font = _load_measure_font_for(font_path)
+        if font is None:
+            return _estimate_text_width_px(text, fs)
+        return font.getlength(text) * fs / 100 * 1.02
     font = _load_measure_font()
     if font is None:
         return _estimate_text_width_px(text, fs)
     return font.getlength(text) * fs / 100 * 1.02
 
 
-def _fit_font_size(text: str, fs: int, max_width: float) -> int | None:
+def _fit_font_size(text: str, fs: int, max_width: float,
+                   font_path=None) -> int | None:
     """Smaller font size that fits ``text`` in ``max_width`` px, or
     None when ``fs`` already fits. Floored at 24 so captions stay
     readable — a word that still would not fit at 24 is left at 24
     (libass then wraps it; a 24pt overflow is a one-word edge case,
     not a silent clip of the frame). Widths are real measurements
     (Batch 6) with the estimator as fallback."""
-    if _measure_text_width_px(text, fs) <= max_width:
+    if _measure_text_width_px(text, fs, font_path) <= max_width:
         return None
-    fitted = int(fs * max_width / _measure_text_width_px(text, fs))
+    fitted = int(fs * max_width / _measure_text_width_px(text, fs, font_path))
     return max(24, fitted)
 
 
 def _caption_align_mv(position: str, fs: int, tw: int, th: int,
                       divider_y: int | None, layout: str,
-                      headline_style: str = "bold_bar") -> tuple[int, int]:
+                      headline_style: str = "bold_bar",
+                      ost_position: str | None = None) -> tuple[int, int]:
     """(ASS alignment, MarginV) for captions at ``position``.
 
     - "bottom" (default, pre-Batch-2 behaviour): on the split divider
@@ -1993,16 +2447,18 @@ def _caption_align_mv(position: str, fs: int, tw: int, th: int,
       the bold-bar headline at 120), so headline and captions stack
       instead of colliding.
     - "middle": vertically centred (top alignment at th/2 - fs/2).
-      When the headline is the big centred one, the first 4s would
+      When the headline sits at the CENTRE (big_centre's default, or
+      any style with ost_position="centre"), the first 4s would
       collide, so middle captions drop to 62% down for those 4s' sake
       — the setting still reads "Middle" everywhere; the shift is a
-      layout guard, not a different position.
+      layout guard, not a different position. Batch 9: the guard
+      follows the EFFECTIVE ost position, not just the headline style.
     """
     split = layout == "split" and divider_y is not None
     if position == "top":
         return 8, 300
     if position == "middle":
-        if headline_style == "big_centre":
+        if effective_ost_position(headline_style, ost_position) == "centre":
             return 8, int(th * 0.62)
         return 8, max(0, th // 2 - fs // 2)
     if split:
@@ -2094,7 +2550,7 @@ def _split_text_phrases(text: str, max_words: int = 6) -> list[list[str]]:
 
 
 def _phrase_lines(phrase: list[dict], fs: int,
-                  max_width: float) -> list[list[dict]]:
+                  max_width: float, font_path=None) -> list[list[dict]]:
     """Split one phrase into 1–2 rendered lines (Batch 6).
 
     One line when the whole phrase fits ``max_width`` at ``fs``.
@@ -2103,10 +2559,11 @@ def _phrase_lines(phrase: list[dict], fs: int,
     with no boundary inside, split at the middle word. The caller fits
     the font on the LONGEST line, so a 2-line phrase keeps the full
     font size instead of shrinking — a 6-word phrase at fs 96 becomes
-    two 3-word lines, not a tiny one-liner.
+    two 3-word lines, not a tiny one-liner. ``font_path`` (Batch 9)
+    measures with that style's real font.
     """
     text = " ".join(w["word"] for w in phrase)
-    if _measure_text_width_px(text, fs) <= max_width:
+    if _measure_text_width_px(text, fs, font_path) <= max_width:
         return [phrase]
     n = len(phrase)
     if n < 2:
@@ -2122,9 +2579,9 @@ def _phrase_lines(phrase: list[dict], fs: int,
     best_i, best_max = candidates[0], float("inf")
     for i in candidates:
         w1 = _measure_text_width_px(
-            " ".join(w["word"] for w in phrase[:i]), fs)
+            " ".join(w["word"] for w in phrase[:i]), fs, font_path)
         w2 = _measure_text_width_px(
-            " ".join(w["word"] for w in phrase[i:]), fs)
+            " ".join(w["word"] for w in phrase[i:]), fs, font_path)
         if max(w1, w2) < best_max:
             best_max, best_i = max(w1, w2), i
     return [phrase[:best_i], phrase[best_i:]]
@@ -2214,6 +2671,30 @@ def _campaign_on_screen_text(settings: dict) -> str | None:
     return None
 
 
+def _trim_headline_edges(parts: list[dict]) -> list[dict]:
+    """Strip leading/trailing stopwords from a headline candidate.
+
+    Batch 9: a headline must start AND end on a content word
+    ("CLIMB THE TOWER", never "TO I HAVE TO" or "WE CLIMB THE").
+    Returns [] when nothing but stopwords survives — the caller then
+    tries the next-best phrase, or no headline at all.
+    """
+    start = 0
+    while (start < len(parts)
+           and parts[start]["word"].strip(_PUNCT).lower() in _ON_SCREEN_STOPWORDS):
+        start += 1
+    end = len(parts)
+    while (end > start
+           and parts[end - 1]["word"].strip(_PUNCT).lower() in _ON_SCREEN_STOPWORDS):
+        end -= 1
+    kept = parts[start:end]
+    if not any(w["word"].strip(_PUNCT)
+               and w["word"].strip(_PUNCT).lower() not in _ON_SCREEN_STOPWORDS
+               for w in kept):
+        return []
+    return kept
+
+
 def _transcript_headline(clip: dict, segments: list[dict]) -> str | None:
     """Headline from the clip's own transcript (max 6 words / 60 chars).
 
@@ -2227,6 +2708,13 @@ def _transcript_headline(clip: dict, segments: list[dict]) -> str | None:
     ("go go go"). Without a scored winner, the window's first phrase.
     None when the window has no transcript words at all — silence gets
     no invented headline.
+    Batch 9: score COMPLETE natural phrases only — a phrase that
+    starts on a stopword or is mostly function words is penalised,
+    the winning phrase's edges are trimmed to content words, and a
+    window with no content word at all gets NO headline (the old
+    fallback returned the first phrase verbatim, which is how a
+    stopword-only stretch became the Batch 7 headline
+    "TO I HAVE TO I TO").
     """
     words = _clip_words(segments, clip["start"], clip["end"])
     if not words:
@@ -2243,8 +2731,12 @@ def _transcript_headline(clip: dict, segments: list[dict]) -> str | None:
 
     counts = content_counts()
     if not counts:
-        text = " ".join(w["word"] for w in phrases[0][:6])
-        return _cap_headline(text.upper()) if text else None
+        # Batch 9: a window with no content word at all has no
+        # headline — the old fallback returned the first phrase
+        # verbatim, which is how a stopword-only stretch became the
+        # Batch 7 headline "TO I HAVE TO I TO".
+        log.debug("Headline: window has no content words — no headline")
+        return None
 
     def phrase_score(phrase: list[dict]) -> float:
         if not phrase:
@@ -2267,25 +2759,42 @@ def _transcript_headline(clip: dict, segments: list[dict]) -> str | None:
         # A headline that trails off on "is"/"the" reads unfinished.
         trailing_stop = 1.0 if (
             phrase[-1]["word"].strip(_PUNCT).lower() in _ON_SCREEN_STOPWORDS) else 0.0
+        # Batch 9: a phrase that is mostly function words is not a
+        # headline — score complete natural phrases only. (A leading
+        # stopword is NOT penalised here on purpose: "we climb the
+        # tower" is a good phrase whose edge the trim below removes;
+        # penalising the start would demote it below a repeated-word
+        # stretch. The trim, not the score, guarantees the edge.)
+        content_frac = len(content) / max(1, len(phrase))
+        fragment_penalty = 2.0 if content_frac < 0.5 else 0.0
         # One word repeated is not a headline ("go go go go").
         repeat_penalty = 1.0 if content and len(distinct) <= 1 and len(content) >= 3 else 0.0
         return (emphasis + min(best_count, 2) * 0.5 + density * 0.3
                 + min(len(distinct), 4) * 0.2 - filler_frac * 2.0
-                - trailing_stop - repeat_penalty)
+                - trailing_stop - fragment_penalty
+                - repeat_penalty)
 
     scored = sorted(range(len(phrases)),
                     key=lambda i: (-phrase_score(phrases[i]), i))
-    phrase_idx = scored[0]
-    log.debug("Headline pick: phrase %d of %d scored %.2f: %r",
-              phrase_idx, len(phrases), phrase_score(phrases[phrase_idx]),
-              " ".join(w["word"] for w in phrases[phrase_idx]))
-    parts = list(phrases[phrase_idx])
-    if len(parts) < 3 and phrase_idx > 0:
-        parts = list(phrases[phrase_idx - 1]) + parts
-    if len(parts) < 3 and phrase_idx + 1 < len(phrases):
-        parts = parts + list(phrases[phrase_idx + 1])
-    text = " ".join(w["word"] for w in parts[:6])
-    return _cap_headline(text.upper()) if text else None
+    for phrase_idx in scored:
+        log.debug("Headline pick: phrase %d of %d scored %.2f: %r",
+                  phrase_idx, len(phrases), phrase_score(phrases[phrase_idx]),
+                  " ".join(w["word"] for w in phrases[phrase_idx]))
+        parts = list(phrases[phrase_idx])
+        if len(parts) < 3 and phrase_idx > 0:
+            parts = list(phrases[phrase_idx - 1]) + parts
+        if len(parts) < 3 and phrase_idx + 1 < len(phrases):
+            parts = parts + list(phrases[phrase_idx + 1])
+        # Batch 9: the headline never starts/ends on a stopword and
+        # is never a lone function word — trim the edges and require
+        # at least one content word to survive; otherwise try the
+        # next-best phrase.
+        trimmed = _trim_headline_edges(parts)
+        if not trimmed:
+            continue
+        text = " ".join(w["word"] for w in trimmed[:6])
+        return _cap_headline(text.upper()) if text else None
+    return None
 
 
 def derive_on_screen_text(clip: dict, segments: list[dict],
@@ -2415,7 +2924,10 @@ def derive_keyword_popups(segments: list[dict], start: float, end: float,
 
 def _text_box_filter(tw: int, text: str, fs: int, y_centre: int,
                      pad_x: int = 40, pad_y: int = 20,
-                     enable: str | None = None) -> str:
+                     enable: str | None = None, font_path=None,
+                     lines: list[str] | None = None,
+                     y_top: int | None = None,
+                     alpha: float = 0.8) -> str:
     """A filled dark box behind one line of text — the background for
     the end card and the lower-third tag. ASS BorderStyle 3 opaque
     boxes do NOT render in this ffmpeg/libass build (verified
@@ -2427,18 +2939,65 @@ def _text_box_filter(tw: int, text: str, fs: int, y_centre: int,
     text line's vertical centre in output px; the box is centred
     horizontally and padded by ``pad_x``/``pad_y`` around the measured
     text width (real font measurement, estimator fallback).
+    Batch 9: ``font_path`` measures with the style's real font, and
+    ``lines`` (the fitted wrapped lines) sizes the box to the longest
+    line and to all lines' height — a 2-line end card gets a taller
+    box. ``y_top`` places the box by its top edge instead of its
+    centre (the top headline bar).
     """
     # _measure_text_width_px already falls back to the estimator when
     # Pillow/the font is unavailable, so this is always a real number.
-    text_w = _measure_text_width_px(text, fs)
+    use_lines = lines if lines else [text]
+    text_w = max(_measure_text_width_px(l, fs, font_path) for l in use_lines)
     box_w = min(int(text_w) + 2 * pad_x, tw - 40)
-    box_h = int(fs * 1.2) + 2 * pad_y
+    box_h = int(fs * 1.2 * len(use_lines)) + 2 * pad_y
     x = max(0, (tw - box_w) // 2)
-    y = max(0, y_centre - box_h // 2)
-    s = f"drawbox=x={x}:y={y}:w={box_w}:h={box_h}:color=black@0.8:t=fill"
+    y = y_top if y_top is not None else max(0, y_centre - box_h // 2)
+    s = f"drawbox=x={x}:y={y}:w={box_w}:h={box_h}:color=black@{alpha}:t=fill"
     if enable:
         s += f":enable='{enable}'"
     return s
+
+
+def _headline_background_filter(tw: int, th: int, style: str, pos: str,
+                                fit_fs: int, lines: list[str], font_path,
+                                enable: str) -> str | None:
+    """The dark background behind the headline text — the bar/band the
+    preview shows. ASS BorderStyle 3 opaque boxes do NOT render in
+    this libass build (same as the end card/tag), so the background is
+    a drawbox, drawn UNDER the headline subtitles step and time-gated
+    to the headline's span (``enable``). The background follows the
+    STYLE (bold_bar: a padded bar; lower_third: a full-width band;
+    big_centre: none — its look is plain text) and sits at the
+    EFFECTIVE position (top / centre / bottom). Batch 9: without this
+    the preview's bar/band would be a lie — the burn had no bar at
+    all. Returns None when the style has no background.
+    """
+    if style == "big_centre" or not lines:
+        return None
+    line_h = int(fit_fs * 1.2 * len(lines))
+    if style == "lower_third":
+        # Full-width band (the preview's band), placed at the position.
+        if pos == "top":
+            y, h = 120 - 16, line_h + 32
+        elif pos == "centre":
+            h = line_h + 32
+            y = th // 2 - h // 2
+        else:  # bottom — to the bottom edge, like the preview
+            y = th - 40 - line_h - 16
+            h = th - y
+        return (f"drawbox=x=0:y={max(0, y)}:w={tw}:h={h}:color=black@0.7"
+                f":t=fill:enable='{enable}'")
+    # bold_bar: a padded bar around the text.
+    if pos == "top":
+        y_top = 120 - 20
+    elif pos == "centre":
+        y_top = th // 2 - (line_h + 40) // 2
+    else:  # bottom — the text's bottom edge sits 40px above the frame
+        y_top = th - 40 - line_h - 20
+    return _text_box_filter(
+        tw, " ".join(lines), fit_fs, 0, pad_x=40, pad_y=20, enable=enable,
+        font_path=font_path, lines=lines, y_top=y_top, alpha=0.7)
 
 
 def _progress_bar_source(tw: int, duration: float) -> str:
@@ -2463,13 +3022,108 @@ def _progress_bar_source(tw: int, duration: float) -> str:
     )
 
 
+# Batch 9 — OST position. The headline's position is its own
+# setting (``ost_position``), INDEPENDENT of the headline style
+# (style = look, position = where). An explicit position wins; when
+# the setting is absent (old jobs, old presets) the style's historic
+# default applies, so old jobs render exactly as before.
+OST_POSITION_DEFAULTS = {"bold_bar": "top", "lower_third": "bottom",
+                         "big_centre": "centre"}
+
+
+def effective_ost_position(style: str, position: str | None) -> str:
+    """The headline's render position: an explicit top/centre/bottom
+    wins, otherwise the style's historic default (bold_bar top,
+    lower_third bottom, big_centre centre)."""
+    if position in ("top", "centre", "bottom"):
+        return position
+    return OST_POSITION_DEFAULTS.get(
+        style if style in HEADLINE_STYLES else "bold_bar", "top")
+
+
+def _wrap_text_lines(text: str, fs: int, max_width: float,
+                     font_path=None) -> list[str]:
+    """Greedy word wrap of ``text`` at ``fs`` (real font measurement),
+    each line <= ``max_width``. A single word longer than max_width
+    stays on its own line (the caller shrinks the size for it)."""
+    words = text.split()
+    if not words:
+        return []
+    lines: list[str] = []
+    cur = ""
+    for w in words:
+        trial = f"{cur} {w}".strip()
+        if not cur or _measure_text_width_px(trial, fs, font_path) <= max_width:
+            cur = trial
+        else:
+            lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _balance_two_lines(words: list[str], fs: int, max_width: float,
+                       font_path=None) -> list[str]:
+    """Split ``words`` into two lines with near-equal measured widths
+    (both <= max_width). Falls back to the greedy wrap when no split
+    satisfies both lines."""
+    if len(words) < 2:
+        return [" ".join(words)]
+    best: tuple[float, list[str]] | None = None
+    for i in range(1, len(words)):
+        l1, l2 = " ".join(words[:i]), " ".join(words[i:])
+        w1 = _measure_text_width_px(l1, fs, font_path)
+        w2 = _measure_text_width_px(l2, fs, font_path)
+        if w1 > max_width or w2 > max_width:
+            continue
+        gap = abs(w1 - w2)
+        if best is None or gap < best[0]:
+            best = (gap, [l1, l2])
+    if best is not None:
+        return best[1]
+    return _wrap_text_lines(" ".join(words), fs, max_width, font_path)
+
+
+def _fit_text_block(text: str, fs: int, max_width: float, max_lines: int = 2,
+                    min_fs: int = 24, font_path=None) -> tuple[int, list[str]]:
+    """Largest font size <= ``fs`` at which ``text`` wraps to at most
+    ``max_lines`` lines of <= ``max_width`` each, and the wrapped
+    lines (balanced when there are two). Shrinks toward ``min_fs``;
+    a single word longer than max_width at min_fs stays on one line
+    at min_fs (libass then wraps it; the floor keeps it readable).
+    Returns (fitted_fs, lines) — fitted_fs == fs when it fits as-is.
+    Batch 9: the no-overflow guarantee for OST (headline, tag, end
+    card) — the same measured-fit idea Batch 6 gave captions."""
+    if not text or not text.split():
+        return fs, [text] if text else []
+    lo, hi = min_fs, fs
+    best_fs = min_fs
+    best_lines = _wrap_text_lines(text, min_fs, max_width, font_path)
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        lines = _wrap_text_lines(text, mid, max_width, font_path)
+        if (len(lines) <= max_lines and all(
+                _measure_text_width_px(l, mid, font_path) <= max_width
+                for l in lines)):
+            best_fs, best_lines = mid, lines
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    if len(best_lines) == 2:
+        best_lines = _balance_two_lines(text.split(), best_fs, max_width,
+                                        font_path)
+    return best_fs, best_lines
+
+
 def write_headline_ass(text: str | None, duration: float, ass_path: Path,
                        tw: int, th: int, style: str = "bold_bar",
                        persistent: bool = False,
                        animation: str = "none",
                        end_card_text: str | None = None,
                        keyword_popups: list[dict] | None = None,
-                       lower_third_text: str | None = None) -> bool:
+                       lower_third_text: str | None = None,
+                       position: str | None = None) -> bool:
     """Write a minimal ASS file with the on-screen-text events.
 
     The headline (``text``) is shown for the first 4 seconds of the
@@ -2489,6 +3143,21 @@ def write_headline_ass(text: str | None, duration: float, ass_path: Path,
       the persistent headline too.
     A single very long word is scaled down (auto-fit) so it cannot
     overflow the frame; ordinary text wraps as before.
+
+    Batch 9 (position + measured fit + static OST):
+    - ``position`` ("top"/"centre"/"bottom", None = the style's
+      historic default) moves the headline INDEPENDENTLY of the
+      style — style is the look, position is where it sits. The
+      caption collision guard follows the effective position, not
+      just big_centre (see _caption_align_mv).
+    - The headline wraps to at most 2 balanced lines and shrinks
+      until it fits the frame width (measured with the style's real
+      font); the end card gets the same 2-line treatment and the
+      lower-third tag fits on one line. Nothing overflows, at any
+      position or style.
+    - OST is STATIC, always (user rule): render_clip passes
+      animation="none" regardless of the stored setting; the
+      parameter stays so old callers do not break.
 
     Batch 7 (whole-clip on-screen text) — all optional, all off by
     default, so a call with no extras is byte-identical to before:
@@ -2525,6 +3194,11 @@ def write_headline_ass(text: str | None, duration: float, ass_path: Path,
     if duration <= 0:
         return False
     style = style if style in HEADLINE_STYLES else "bold_bar"
+    # Batch 9 FONT MAP: this headline style's own typeface (shared by
+    # the end card, keyword pop-ups and lower-third tag — they are
+    # parts of the one OST sample, so one font per sample).
+    h_family, h_bold, h_italic, h_file = HEADLINE_FONT_MAP[style]
+    h_font_path = FONTS_DIR / h_file
     animation = animation if animation in OST_ANIMATIONS else "none"
     # Headline span: first 4s, or the full clip when persistent. An
     # end card always replaces it for the last 2s.
@@ -2537,29 +3211,39 @@ def write_headline_ass(text: str | None, duration: float, ass_path: Path,
             headline_end = None
     if style == "lower_third":
         fs = 64 if tw >= 1080 else 48
-        align, mv = 2, 40
         border, outline_w, shadow = 3, 2, 0
         back = "&HCC000000"
     elif style == "big_centre":
         fs = 110 if tw >= 1080 else 80
-        align, mv = 5, 0
         border, outline_w, shadow = 1, 5, 1
         back = "&H80000000"
     else:  # bold_bar
         fs = 84 if tw >= 1080 else 60
-        align, mv = 8, 120
         border, outline_w, shadow = 1, 4, 0
         back = "&H80000000"
+    # Batch 9: position is independent of style — the style sets the
+    # look (size, outline, colours), the position sets where it sits.
+    # The defaults keep the old geometry exactly (bold_bar top 8/120,
+    # lower_third bottom 2/40, big_centre centre 5/0).
+    pos = effective_ost_position(style, position)
+    if pos == "centre":
+        align, mv = 5, 0
+    elif pos == "bottom":
+        align, mv = 2, 40
+    else:  # top
+        align, mv = 8, 120
     # Entrance animation prefix for the headline event. \move's
-    # coordinates are the style's alignment anchor: (tw/2, 120) for
-    # the top bar, (tw/2, th-40) for the bottom band (slides UP from
-    # below), (tw/2, th/2) for the centred card.
+    # coordinates are the position's alignment anchor: (tw/2, 120) for
+    # the top, (tw/2, th-40) for the bottom band (slides UP from
+    # below), (tw/2, th/2) for the centred card. Batch 9: render_clip
+    # always passes animation="none" (OST is static, always — user
+    # rule); the parameter stays for old callers and tests.
     anim = ""
     if headline_end is not None and animation == "slide":
-        if style == "lower_third":
+        if pos == "bottom":
             x2, y2 = tw // 2, th - 40
             x1, y1 = x2, y2 + 90
-        elif style == "big_centre":
+        elif pos == "centre":
             x2, y2 = tw // 2, th // 2
             x1, y1 = x2, y2 - 90
         else:
@@ -2570,41 +3254,69 @@ def write_headline_ass(text: str | None, duration: float, ass_path: Path,
         anim = "{\\fad(300,0)}"
     elif headline_end is not None and animation == "pop":
         anim = "{\\fscx60\\fscy60\\t(0,150,\\fscx100\\fscy100)}"
-    # Auto-fit: a single long word must fit on one line; the rest of
-    # the headline may wrap (WrapStyle 0) as before.
+    # Batch 9 measured fit (no-overflow): the headline wraps to at
+    # most 2 balanced lines and shrinks until it fits the frame width
+    # — at every position and style. The old code only fitted the
+    # longest single word; a long headline could still wrap to many
+    # lines and crowd the frame. The end card and the tag get the same
+    # treatment (2 lines / 1 line); a keyword pop-up is one word, so
+    # it fits like the old longest-word rule.
     fs_prefix = ""
+    headline_lines: list[str] = []
     if text:
-        longest = max(text.split(), key=len) if text.split() else text
-        fitted = _fit_font_size(longest, fs, tw - 120)
-        fs_prefix = f"{{\\fs{fitted}}}" if fitted is not None else ""
+        fit_fs, headline_lines = _fit_text_block(
+            text, fs, tw - 120, max_lines=2, min_fs=28, font_path=h_font_path)
+        if fit_fs != fs:
+            fs_prefix = f"{{\\fs{fit_fs}}}"
     pop_fs = 120 if tw >= 1080 else 84
     pop_mv = int(th * 0.28)
     tag_fs = 40 if tw >= 1080 else 30
     card_fs = 96 if tw >= 1080 else 68
+    card_prefix = ""
+    card_lines: list[str] = []
+    if end_card_text:
+        card_fit_fs, card_lines = _fit_text_block(
+            end_card_text, card_fs, tw - 120, max_lines=2, min_fs=36,
+            font_path=h_font_path)
+        if card_fit_fs != card_fs:
+            card_prefix = f"{{\\fs{card_fit_fs}}}"
+    tag_prefix = ""
+    if lower_third_text:
+        tag_fit_fs, _tag_lines = _fit_text_block(
+            lower_third_text, tag_fs, tw - 120, max_lines=1, min_fs=20,
+            font_path=h_font_path)
+        if tag_fit_fs != tag_fs:
+            tag_prefix = f"{{\\fs{tag_fit_fs}}}"
     events: list[str] = []
     if headline_end is not None and text:
+        body = ("\\N".join(_ass_escape(line) for line in headline_lines)
+                if headline_lines else _ass_escape(text))
         events.append(
             f"Dialogue: 0,0:00:00.00,{_fmt_ass_time(headline_end)},Headline,,0,0,0,,"
-            f"{anim}{fs_prefix}{_ass_escape(text)}"
+            f"{anim}{fs_prefix}{body}"
         )
     if end_card_text:
+        card_body = ("\\N".join(_ass_escape(line) for line in card_lines)
+                     if card_lines else _ass_escape(end_card_text))
         events.append(
             f"Dialogue: 0,{_fmt_ass_time(max(0.0, duration - 2.0))},{_fmt_ass_time(duration)},"
-            f"EndCard,,0,0,0,,{_ass_escape(end_card_text)}"
+            f"EndCard,,0,0,0,,{card_prefix}{card_body}"
         )
     for popup in keyword_popups or []:
         s, e = popup["start"], popup["end"]
         if e <= s or s >= duration:
             continue
+        pop_fit = _fit_font_size(popup["word"], pop_fs, tw - 120, h_font_path)
+        pop_prefix = f"{{\\fs{pop_fit}}}" if pop_fit is not None else ""
         events.append(
             f"Dialogue: 0,{_fmt_ass_time(s)},{_fmt_ass_time(min(e, duration))},"
             f"KeywordPop,,0,0,0,,{{\\fscx60\\fscy60\\t(0,150,\\fscx100\\fscy100)}}"
-            f"{_ass_escape(popup['word'])}"
+            f"{pop_prefix}{_ass_escape(popup['word'])}"
         )
     if lower_third_text:
         events.append(
             f"Dialogue: 0,0:00:00.00,{_fmt_ass_time(duration)},LowerThirdTag,,0,0,0,,"
-            f"{_ass_escape(lower_third_text)}"
+            f"{tag_prefix}{_ass_escape(lower_third_text)}"
         )
     if not events:
         return False
@@ -2621,8 +3333,8 @@ def write_headline_ass(text: str | None, duration: float, ass_path: Path,
         "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
         "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Headline,DejaVu Sans,{fs},&H00FFFFFF,&H000000FF,&H00000000,"
-        f"{back},-1,0,0,0,100,100,0,0,{border},{outline_w},{shadow},{align},40,40,{mv},1\n"
+        f"Style: Headline,{h_family},{fs},&H00FFFFFF,&H000000FF,&H00000000,"
+        f"{back},{h_bold},{h_italic},0,0,100,100,0,0,{border},{outline_w},{shadow},{align},40,40,{mv},1\n"
         # Batch 7: the end card is a centred card; keyword pop-ups
         # are large yellow on the upper-middle (Alignment 8,
         # MarginV 28%); the lower-third tag is a small band at the
@@ -2631,12 +3343,12 @@ def write_headline_ass(text: str | None, duration: float, ass_path: Path,
         # build does not render opaque boxes at all (verified
         # 2026-11-25), so the card/band background is a drawbox added
         # in render_clip (_text_box_filter), drawn UNDER the text.
-        f"Style: EndCard,DejaVu Sans,{card_fs},&H00FFFFFF,&H000000FF,&H00000000,"
-        f"&H80000000,-1,0,0,0,100,100,0,0,1,2,0,5,40,40,0,1\n"
-        f"Style: KeywordPop,DejaVu Sans,{pop_fs},&H0000FFFF,&H00FFFFFF,&H00000000,"
-        f"&H80000000,-1,0,0,0,100,100,0,0,1,4,1,8,40,40,{pop_mv},1\n"
-        f"Style: LowerThirdTag,DejaVu Sans,{tag_fs},&H00FFFFFF,&H000000FF,&H00000000,"
-        f"&H80000000,-1,0,0,0,100,100,0,0,1,2,0,2,40,40,260,1\n"
+        f"Style: EndCard,{h_family},{card_fs},&H00FFFFFF,&H000000FF,&H00000000,"
+        f"&H80000000,{h_bold},{h_italic},0,0,100,100,0,0,1,2,0,5,40,40,0,1\n"
+        f"Style: KeywordPop,{h_family},{pop_fs},&H0000FFFF,&H00FFFFFF,&H00000000,"
+        f"&H80000000,{h_bold},{h_italic},0,0,100,100,0,0,1,4,1,8,40,40,{pop_mv},1\n"
+        f"Style: LowerThirdTag,{h_family},{tag_fs},&H00FFFFFF,&H000000FF,&H00000000,"
+        f"&H80000000,{h_bold},{h_italic},0,0,100,100,0,0,1,2,0,2,40,40,260,1\n"
         "\n[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
         "Effect, Text\n"
@@ -2652,7 +3364,8 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                    divider_y: int | None, tw: int, th: int,
                    layout: str, caption_position: str = "bottom",
                    headline_style: str = "bold_bar",
-                   caption_safe_zone: bool = True) -> bool:
+                   caption_safe_zone: bool = True,
+                   ost_position: str | None = None) -> bool:
     """Write an ASS caption file for the clip window (0-based times).
 
     ``divider_y`` is the y of the streamer/gameplay divider in output
@@ -2684,12 +3397,20 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
     headline_style = headline_style if headline_style in HEADLINE_STYLES else "bold_bar"
     safe_zone = bool(caption_safe_zone)
 
+    # Batch 9 FONT MAP: this style's own typeface (family + Bold /
+    # Italic flags + the shipped file for real measurement). Unknown
+    # ids fall back to DejaVu Sans Bold, the pre-Batch-9 font.
+    font_family, font_bold, font_italic, font_file = FONT_MAP.get(
+        style_id, ("DejaVu Sans", -1, 0, "DejaVuSans-Bold.ttf"))
+    font_path = FONTS_DIR / font_file
+
     def margin_for(font_size: int) -> tuple[int, int]:
         """(alignment, marginV) — Batch 2 caption position; "bottom"
         is the pre-Batch-2 behaviour (on the divider when split,
-        lower-centre otherwise)."""
+        lower-centre otherwise). The middle-vs-centre-headline guard
+        follows the effective OST position (Batch 9)."""
         return _caption_align_mv(position, font_size, tw, th, divider_y,
-                                 layout, headline_style)
+                                 layout, headline_style, ost_position)
 
     # Batch 6 safe zone: the caption text area is the left ~78% of the
     # frame (right margin reserves 22% for the action rail); its centre
@@ -2712,12 +3433,12 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
         """"{\\fsN}" prefix when ``text`` would overflow at ``fs`` —
         the whole line for single-line styles, the longest word only
         for full-sentence styles. "" when it already fits. Widths are
-        real DejaVu Sans Bold measurements (Batch 6)."""
+        real measurements of THIS style's font (Batch 9 FONT_MAP)."""
         probe = text
         if not whole_line:
             words = text.split()
             probe = max(words, key=len) if words else text
-        fitted = _fit_font_size(probe, fs, max_w)
+        fitted = _fit_font_size(probe, fs, max_w, font_path)
         return f"{{\\fs{fitted}}}" if fitted is not None else ""
 
     def fit_lines(lines: list[list[dict]], fs: int) -> str:
@@ -2727,7 +3448,7 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
         longest = ""
         for line in lines:
             text = " ".join(w["word"] for w in line)
-            if _measure_text_width_px(text, fs) > _measure_text_width_px(longest, fs):
+            if _measure_text_width_px(text, fs, font_path) > _measure_text_width_px(longest, fs, font_path):
                 longest = text
         return fit(longest, fs)
 
@@ -2736,8 +3457,8 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
         fs = 96 if big else 68
         align, mv = margin_for(fs)
         styles["Punchy"] = (
-            f"Style: Punchy,DejaVu Sans,{fs},&H00FFFFFF,&H000000FF,&H00000000,"
-            f"&H80000000,-1,0,0,0,100,100,0,0,1,3,0,{align},{ml},{mr},{mv},1"
+            f"Style: Punchy,{font_family},{fs},&H00FFFFFF,&H000000FF,&H00000000,"
+            f"&H80000000,{font_bold},{font_italic},0,0,100,100,0,0,1,3,0,{align},{ml},{mr},{mv},1"
         )
     elif style_id == "tiktok_bold":
         # Batch 6: the classic TikTok look — phrase-based like punchy,
@@ -2746,49 +3467,53 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
         fs = 104 if big else 76
         align, mv = margin_for(fs)
         styles["TikTokBold"] = (
-            f"Style: TikTokBold,DejaVu Sans,{fs},&H00FFFFFF,&H000000FF,&H00000000,"
-            f"&H80000000,-1,0,0,0,100,100,0,0,1,4,0,{align},{ml},{mr},{mv},1"
+            f"Style: TikTokBold,{font_family},{fs},&H00FFFFFF,&H000000FF,&H00000000,"
+            f"&H80000000,{font_bold},{font_italic},0,0,100,100,0,0,1,4,0,{align},{ml},{mr},{mv},1"
         )
     elif style_id == "word_pop":
         fs = 130 if big else 92
         align, mv = margin_for(fs)
         styles["WordPop"] = (
-            f"Style: WordPop,DejaVu Sans,{fs},&H00FFFFFF,&H000000FF,&H00000000,"
-            f"&H80000000,-1,0,0,0,100,100,0,0,1,4,0,{align},{ml},{mr},{mv},1"
+            f"Style: WordPop,{font_family},{fs},&H00FFFFFF,&H000000FF,&H00000000,"
+            f"&H80000000,{font_bold},{font_italic},0,0,100,100,0,0,1,4,0,{align},{ml},{mr},{mv},1"
         )
     elif style_id == "title_card":
         fs = 60 if big else 44
         align, mv = (8, max(0, divider_y - 40)) if split else (8, int(th * 0.40))
         styles["Title"] = (
-            f"Style: Title,DejaVu Sans,{fs},&H00000000,&H000000FF,&H00FFFFFF,"
-            f"&H00FFFFFF,-1,0,0,0,100,100,0,0,3,0,0,{align},{ml},{mr},{mv},1"
+            f"Style: Title,{font_family},{fs},&H00000000,&H000000FF,&H00FFFFFF,"
+            f"&H00FFFFFF,{font_bold},{font_italic},0,0,100,100,0,0,3,0,0,{align},{ml},{mr},{mv},1"
         )
         # The Title event is the hook title (its own spot); only the
         # CleanSubs captions follow the position setting — and "bottom"
         # keeps the established (2, 40) subtitle spot, not the divider.
         cs_align, cs_mv = ((2, 40) if position == "bottom" else
                            _caption_align_mv(position, 36, tw, th, divider_y,
-                                             layout, headline_style))
+                                             layout, headline_style,
+                                             ost_position))
+        _sub_family, _sub_bold, _sub_italic, _sub_file = TITLE_CARD_SUB_FONT
         styles["CleanSubs"] = (
-            "Style: CleanSubs,DejaVu Sans,36,&H00FFFFFF,&H000000FF,&H00000000,"
-            f"&H80000000,0,0,0,0,100,100,0,0,1,2,0,{cs_align},{ml},{mr},{cs_mv},1"
+            f"Style: CleanSubs,{_sub_family},36,&H00FFFFFF,&H000000FF,&H00000000,"
+            f"&H80000000,{_sub_bold},{_sub_italic},0,0,100,100,0,0,1,2,0,{cs_align},{ml},{mr},{cs_mv},1"
         )
     elif style_id == "clean_subs":
         cs_align, cs_mv = ((2, 40) if position == "bottom" else
                            _caption_align_mv(position, 36, tw, th, divider_y,
-                                             layout, headline_style))
+                                             layout, headline_style,
+                                             ost_position))
         styles["CleanSubs"] = (
-            "Style: CleanSubs,DejaVu Sans,36,&H00FFFFFF,&H000000FF,&H00000000,"
-            f"&H80000000,0,0,0,0,100,100,0,0,1,2,0,{cs_align},{ml},{mr},{cs_mv},1"
+            f"Style: CleanSubs,{font_family},36,&H00FFFFFF,&H000000FF,&H00000000,"
+            f"&H80000000,{font_bold},{font_italic},0,0,100,100,0,0,1,2,0,{cs_align},{ml},{mr},{cs_mv},1"
         )
     elif style_id in ("karaoke", "bounce", "typewriter", "sweep",
                       "neon", "slam", "outline", "gradient",
                       "kinetic", "glow_pop",
                       "word_zoom", "word_fade", "highlight_sweep",
                       "bounce_in", "glitch_pop",
-                      "reels_clean", "shorts_minimal"):
+                      "reels_clean", "shorts_minimal",
+                      "comic", "marker"):
         # (name, fs_big, fs_small, primary, secondary, outline_colour,
-        #  back_colour, bold, border_style, outline, shadow)
+        #  back_colour, bold, border_style, outline, shadow, italic)
         # Colours are ASS &HAABBGGRR. Neon shadow is BackColour magenta,
         # so the glow reads; Outline is hollow (primary fully transparent).
         # Glow Pop's glow is its gold BackColour with Shadow 2 — steady
@@ -2802,56 +3527,75 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
         # has no true RGB split in libass (no per-channel offset), so
         # the flicker lives in the per-word prefix below: a rapid
         # magenta -> cyan colour flash on each word change.
+        # Batch 9: comic and marker are the only italic styles
+        # (12th column -1) — the slant is the playful/handwritten
+        # read. Comic's pink shadow is its BackColour; Marker's
+        # spoken word is orange (MARKER_ACCENT, per-word prefix
+        # below) with an alternating tilt, over a plain black
+        # outline + shadow.
         _NEW_STYLE_PARAMS = {
             "karaoke": ("Karaoke", 96, 68, "&H0000FFFF", "&H00FFFFFF",
-                        "&H00000000", "&H80000000", -1, 1, 3, 0),
+                        "&H00000000", "&H80000000", -1, 1, 3, 0, 0),
             "bounce": ("Bounce", 110, 78, "&H00FFFFFF", "&H0000FFFF",
-                       "&H00000000", "&H80000000", -1, 1, 4, 0),
+                       "&H00000000", "&H80000000", -1, 1, 4, 0, 0),
             "typewriter": ("Typewriter", 72, 54, "&H00FFFFFF", "&H0000FFFF",
-                           "&H00000000", "&H80000000", -1, 1, 3, 0),
+                           "&H00000000", "&H80000000", -1, 1, 3, 0, 0),
             "sweep": ("Sweep", 96, 68, "&H00FFFFFF", "&H0000FFFF",
-                      "&H00000000", "&H80000000", -1, 1, 3, 0),
+                      "&H00000000", "&H80000000", -1, 1, 3, 0, 0),
             "neon": ("Neon", 100, 72, "&H00FFFF00", "&H00FF00FF",
-                     "&H00FF00FF", "&H00FF00FF", -1, 1, 4, 2),
+                     "&H00FF00FF", "&H00FF00FF", -1, 1, 4, 2, 0),
             "slam": ("Slam", 130, 92, "&H00FFFFFF", "&H0000FFFF",
-                    "&H00000000", "&H80000000", -1, 1, 5, 1),
+                    "&H00000000", "&H80000000", -1, 1, 5, 1, 0),
             "outline": ("Outline", 110, 78, "&HFF000000", "&H0000FFFF",
-                        "&H00FFFFFF", "&H80000000", -1, 1, 4, 0),
+                        "&H00FFFFFF", "&H80000000", -1, 1, 4, 0, 0),
             "gradient": ("Gradient", 110, 78, "&H00FFFFFF", "&H0000FFFF",
-                         "&H00000000", "&H80000000", -1, 1, 4, 0),
+                         "&H00000000", "&H80000000", -1, 1, 4, 0, 0),
             "kinetic": ("Kinetic", 100, 72, "&H00FFFFFF", "&H0000FFFF",
-                        "&H00000000", "&H80000000", -1, 1, 4, 0),
+                        "&H00000000", "&H80000000", -1, 1, 4, 0, 0),
             "glow_pop": ("GlowPop", 110, 78, "&H00FFFFFF", "&H0000FFFF",
-                         "&H00000000", "&H0000CCFF", -1, 1, 4, 2),
+                         "&H00000000", "&H0000CCFF", -1, 1, 4, 2, 0),
             "word_zoom": ("WordZoom", 110, 78, "&H00FFFFFF", "&H0000FFFF",
-                          "&H00000000", "&H80000000", -1, 1, 4, 0),
+                          "&H00000000", "&H80000000", -1, 1, 4, 0, 0),
             "word_fade": ("WordFade", 110, 78, "&H00FFFFFF", "&H0000FFFF",
-                          "&H00000000", "&H80000000", -1, 1, 4, 0),
+                          "&H00000000", "&H80000000", -1, 1, 4, 0, 0),
             "highlight_sweep": ("HighlightSweep", 96, 68, "&H00000000",
                                 "&H00FFFFFF", "&H00000000", "&H0000FFFF",
-                                -1, 3, 0, 0),
+                                -1, 3, 0, 0, 0),
             "bounce_in": ("BounceIn", 110, 78, "&H00FFFFFF", "&H0000FFFF",
-                          "&H00000000", "&H80000000", -1, 1, 4, 0),
+                          "&H00000000", "&H80000000", -1, 1, 4, 0, 0),
             "glitch_pop": ("GlitchPop", 110, 78, "&H00FFFFFF", "&H0000FFFF",
-                           "&H00000000", "&H80000000", -1, 1, 4, 0),
+                           "&H00000000", "&H80000000", -1, 1, 4, 0, 0),
             # Batch 6: reels_clean is smaller, clean white with a soft
             # shadow (outline 2, shadow 1); shorts_minimal is the
             # smallest, most restrained — thin outline, no shadow, no
             # entrance. Both are word-at-a-time like the other
             # animated styles, with no entrance override.
             "reels_clean": ("ReelsClean", 84, 60, "&H00FFFFFF", "&H0000FFFF",
-                            "&H00000000", "&H80000000", -1, 1, 2, 1),
+                            "&H00000000", "&H80000000", -1, 1, 2, 1, 0),
             "shorts_minimal": ("ShortsMinimal", 72, 52, "&H00FFFFFF",
                                "&H0000FFFF", "&H00000000", "&H80000000",
-                               -1, 1, 1, 0),
+                               -1, 1, 1, 0, 0),
+            # Batch 9 (2026-11-25): Comic Pop — playful slanted
+            # words, white on black outline with a bright pink shadow
+            # (BackColour #FF6B9D); the spoken word takes a bright
+            # accent that cycles mint / yellow / cyan (COMIC_PALETTE,
+            # applied per word below). Marker — casual slanted
+            # handwritten words, black outline + shadow; the spoken
+            # word turns orange (#FB923C, applied per word below) and
+            # lands with an alternating tilt (see the prefix). Both
+            # italic (-1 in the new 12th column).
+            "comic": ("Comic", 110, 78, "&H00FFFFFF", "&H0000FFFF",
+                      "&H00000000", "&H009D6BFF", -1, 1, 3, 2, -1),
+            "marker": ("Marker", 110, 78, "&H00FFFFFF", "&H0000FFFF",
+                       "&H00000000", "&H80000000", -1, 1, 3, 1, -1),
         }
         (sname, fs_big, fs_small, primary, secondary, outline_c, back_c,
-         bold, border, outline_w, shadow) = _NEW_STYLE_PARAMS[style_id]
+         bold, border, outline_w, shadow, italic) = _NEW_STYLE_PARAMS[style_id]
         fs = fs_big if big else fs_small
         align, mv = margin_for(fs)
         styles[sname] = (
-            f"Style: {sname},DejaVu Sans,{fs},{primary},{secondary},"
-            f"{outline_c},{back_c},{bold},0,0,0,100,100,0,0,{border},"
+            f"Style: {sname},{font_family},{fs},{primary},{secondary},"
+            f"{outline_c},{back_c},{font_bold},{font_italic},0,0,100,100,0,0,{border},"
             f"{outline_w},{shadow},{align},{ml},{mr},{mv},1"
         )
     else:
@@ -2880,7 +3624,7 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                     # Batch 6: split into 1-2 lines at a phrase
                     # boundary first; the font is fitted on the
                     # longest line, so a split phrase keeps full size.
-                    lines = _phrase_lines(phrase, fs, max_w)
+                    lines = _phrase_lines(phrase, fs, max_w, font_path)
                     events.append(
                         f"Dialogue: 0,{_fmt_ass_time(s)},{_fmt_ass_time(e)},"
                         f"{sname},,0,0,0,,{fit_lines(lines, fs)}{pop}"
@@ -2915,7 +3659,7 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                 for j, chunk in enumerate(chunks):
                     cs, ce = s - start + j * span, s - start + (j + 1) * span
                     phrase = [{"word": w, "start": cs, "end": ce} for w in chunk]
-                    lines = _phrase_lines(phrase, fs, max_w)
+                    lines = _phrase_lines(phrase, fs, max_w, font_path)
                     events.append(
                         f"Dialogue: 0,{_fmt_ass_time(cs)},{_fmt_ass_time(ce)},"
                         f"{sname},,0,0,0,,{fit_lines(lines, fs)}{pop}"
@@ -2926,7 +3670,8 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                       "kinetic", "glow_pop",
                       "word_zoom", "word_fade", "highlight_sweep",
                       "bounce_in", "glitch_pop",
-                      "reels_clean", "shorts_minimal"):
+                      "reels_clean", "shorts_minimal",
+                      "comic", "marker"):
         # CapCut-style animated captions. Every branch produces events
         # in the SAME style the Captions Studio preview loops.
         sname = _NEW_STYLE_PARAMS[style_id][0]
@@ -2944,7 +3689,7 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                 s, e = phrase[0]["start"], phrase[-1]["end"]
                 if e <= s:
                     continue
-                lines = _phrase_lines(phrase, fs, max_w)
+                lines = _phrase_lines(phrase, fs, max_w, font_path)
                 line_parts = []
                 for line in lines:
                     line_parts.append(" ".join(
@@ -2960,7 +3705,7 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
             # Full phrase always visible; one event per word, with the
             # active word coloured yellow — the highlight sweeps across.
             for phrase in _group_phrases(words):
-                lines = _phrase_lines(phrase, fs, max_w)
+                lines = _phrase_lines(phrase, fs, max_w, font_path)
                 for i, w in enumerate(phrase):
                     s = w["start"]
                     e = (phrase[i + 1]["start"] if i + 1 < len(phrase)
@@ -3018,7 +3763,7 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                 s, e = w["start"], w["end"]
                 min_dur = 0.35 if style_id in ("bounce", "kinetic", "bounce_in") else (
                     0.30 if style_id in ("glow_pop", "word_zoom", "word_fade",
-                                         "glitch_pop") else 0.25)
+                                         "glitch_pop", "comic", "marker") else 0.25)
                 if e - s < min_dur:
                     e = s + min_dur
                 if i + 1 < len(words):
@@ -3083,7 +3828,33 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                               "\\t(0,80,\\1c&HFF00FF&)"
                               "\\t(80,160,\\1c&H00FFFF&)"
                               "\\t(160,260,\\fscx100\\fscy100)}")
-                else:  # neon, outline
+                elif style_id == "comic":
+                    # Playful wobble + a bright accent that cycles
+                    # mint / yellow / cyan word to word: the word on
+                    # screen IS the spoken word (one word per event),
+                    # so each spoken word takes the next accent. The
+                    # pink shadow is the style's BackColour (steady).
+                    prefix = ("{\\1c&H%s&\\fscx0\\fscy0\\frz-8"
+                              "\\t(0,150,\\fscx115\\fscy115\\frz5)"
+                              "\\t(150,300,\\fscx100\\fscy100\\frz0)}"
+                              % COMIC_PALETTE[i % len(COMIC_PALETTE)])
+                elif style_id == "marker":
+                    # The spoken word turns orange and lands with an
+                    # alternating tilt (-3° / +3° word to word) — the
+                    # uneven handwritten read. A marker stroke lands
+                    # flat, so the scale pop has no rotation of its
+                    # own; the tilt is the static \\frz.
+                    prefix = ("{\\1c&H%s&\\frz%d\\fscx0\\fscy0"
+                              "\\t(0,150,\\fscx112\\fscy112)"
+                              "\\t(150,280,\\fscx100\\fscy100)}"
+                              % (MARKER_ACCENT, -3 if i % 2 == 0 else 3))
+                elif style_id == "neon":
+                    # Pink / cyan alternate word to word; the magenta
+                    # glow is the style's BackColour (steady in the
+                    # burn) so both colours glow.
+                    prefix = ("{\\1c&H%s&}"
+                              % NEON_PALETTE[i % len(NEON_PALETTE)])
+                else:  # outline
                     prefix = ""
                 events.append(
                     f"Dialogue: 0,{_fmt_ass_time(s)},{_fmt_ass_time(e)},"
@@ -3102,7 +3873,7 @@ def write_clip_ass(segments: list[dict], start: float, end: float,
                 for j, chunk in enumerate(chunks):
                     cs, ce = s - start + j * span, s - start + (j + 1) * span
                     phrase = [{"word": w, "start": cs, "end": ce} for w in chunk]
-                    lines = _phrase_lines(phrase, fs, max_w)
+                    lines = _phrase_lines(phrase, fs, max_w, font_path)
                     text = "\\N".join(
                         " ".join(_ass_escape(w["word"]) for w in line)
                         for line in lines)
@@ -4000,6 +4771,21 @@ def _tracked_inset_crop(box, sw: int, sh: int, face_track: list[tuple]) -> str |
     return f"crop={top_w}:{top_h_src}:'{x}':'{y}'"
 
 
+def _tracked_closeup_crop(box, sw: int, sh: int, face_track: list[tuple]) -> str | None:
+    """Face-closeup crop following the trajectory (Batch 9): same tight
+    9:16 size as _face_closeup_crop (from the median face), but the
+    window moves with the face instead of sitting on the median
+    position. None when no box (the caller falls back to centre crop)."""
+    if box is None:
+        return None
+    cw, ch = _closeup_size(box, sw, sh)
+    x = f"min(max({_pan_expr(face_track, 0)}*iw-{cw}/2,0),iw-{cw})"
+    y = f"min(max({_pan_expr(face_track, 1)}*ih-{ch}/2,0),ih-{ch})"
+    # Same quoting rule as _tracked_crop: the if()/min()/max()
+    # expressions hold commas, so both offsets are single-quoted.
+    return f"crop={cw}:{ch}:'{x}':'{y}'"
+
+
 def _median_face_box(face_track: list[tuple]) -> tuple[float, float, float, float]:
     """Median (fx, fy, fw, fh) of a trajectory — the static layout
     decisions (inset size, the split bottom-shift rule) use it."""
@@ -4042,6 +4828,34 @@ def _facecam_inset_crop(box, sw: int, sh: int) -> str | None:
     return f"crop={top_w}:{top_h_src}:{top_x}:{top_y}"
 
 
+def _closeup_size(box, sw: int, sh: int) -> tuple[int, int]:
+    """Tight 9:16 crop size around a detected face box (Batch 9
+    face_closeup): ~2.2x the face width, clamped to 25–60% of the frame
+    width so a huge face does not collapse the crop and a tiny face
+    still fills the frame. Height follows the 9:16 ratio, clamped to
+    the frame height (width re-derived so the ratio stays exact)."""
+    _fx, _fy, fw, _fh = box
+    cw = int(min(max(fw * sw * 2.2, sw * 0.25), sw * 0.6))
+    ch = int(cw * 16 / 9)
+    if ch > sh:
+        ch = sh
+        cw = int(ch * 9 / 16)
+    return cw, ch
+
+
+def _face_closeup_crop(box, sw: int, sh: int) -> str | None:
+    """Static tight crop centred on a detected face box (fx, fy, fw, fh
+    as fractions of the frame) — the face fills roughly half the frame
+    width. None when no box (the caller falls back to centre crop)."""
+    if box is None:
+        return None
+    fx, fy, _fw, _fh = box
+    cw, ch = _closeup_size(box, sw, sh)
+    cx = int(min(max(fx * sw - cw / 2, 0), max(0, sw - cw)))
+    cy = int(min(max(fy * sh - ch / 2, 0), max(0, sh - ch)))
+    return f"crop={cw}:{ch}:{cx}:{cy}"
+
+
 def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
                         ratio: str, layout: str, start: float, duration: float,
                         face_box=_DETECT_FACE, face_track=None,
@@ -4054,6 +4868,18 @@ def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
       * pip_facecam — gameplay full-frame, facecam inset overlaid top-right.
       * blur_fill — blurred cover background + sharp contain-fit video.
       * streamer_full — the streamer region fills the whole frame.
+      * gradient_fill (Batch 9) — Aurora gradient background (deep navy
+        -> violet -> fuchsia, the picker's own palette) + sharp
+        contain-fit video centred on it. No blurred video anywhere.
+      * stacked (Batch 9) — video cover-cropped to the top ~65% of the
+        frame, dark slate panel below for the headline/captions area.
+      * letterbox (Batch 9) — video full width, cinematic black bars
+        top + bottom (centred vertically, no stretch).
+      * face_closeup (Batch 9) — tight 9:16 crop around the speaker's
+        face (~2.2x the face width), following the face trajectory when
+        face tracking is on; no face -> honest centre-crop fallback.
+      * framed (Batch 9) — video cover-cropped to 9:16, inset with a
+        30px margin on a dark slate frame + a thin light border around it.
     ``face_box`` is a detected (fx, fy, fw, fh) box, None for "no face"
     (the face layouts fall back honestly), or the default sentinel to
     detect it here from 5 samples across the clip window. Callers and
@@ -4061,15 +4887,16 @@ def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
     Batch 1 face tracking: when ``face_tracking`` is on and
     ``face_track`` holds a trajectory, the crops that centre on the
     subject follow it over time instead of sitting on the median box
-    (split top inset, pip base, streamer_full inset, centre crop).
-    blur_fill has no crop to track — it is unaffected. When tracking is
+    (split top inset, pip base, streamer_full inset, centre crop,
+    face_closeup). gradient_fill, stacked, letterbox, framed and
+    blur_fill have no crop to track — they are unaffected. When tracking is
     on but no trajectory exists, the static behaviour below is used
     unchanged and the caller reports the fallback.
     """
     layout = (layout or "center_crop").lower()
     box = None
     tracked = bool(face_tracking) and bool(face_track)
-    if layout in ("split", "pip_facecam", "streamer_full") and ratio == "9:16":
+    if layout in ("split", "pip_facecam", "streamer_full", "face_closeup") and ratio == "9:16":
         if tracked:
             # Median face from the trajectory — the static decisions
             # (inset size, the split bottom-shift rule) use it; the
@@ -4163,6 +4990,55 @@ def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
         return [f"[0:v]{top_crop},scale={tw}:{th}:"
                 f"force_original_aspect_ratio=increase,crop={tw}:{th}[v0]"]
 
+    if layout == "gradient_fill" and ratio == "9:16":
+        # Aurora gradient background (the picker's own palette: deep
+        # navy -> violet -> fuchsia) with the sharp video contain-fit
+        # on top — a smooth gradient, never blurred video. The
+        # gradients source generates its own frames; the render
+        # command's -t caps the output duration.
+        return [f"gradients=size={tw}x{th}:nb_colors=3:c0=1e1b4b:c1=7c3aed:"
+                f"c2=db2777:x0={tw // 2}:y0=0:x1={tw // 2}:y1={th}[bg];"
+                f"[0:v]scale={tw}:{th}:force_original_aspect_ratio=decrease[fg];"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/2[v0]"]
+
+    if layout == "stacked" and ratio == "9:16":
+        # Podcast stack: video cover-cropped to the top ~65% of the
+        # frame (1248px), dark slate panel below for the
+        # headline/captions area. Captions at the bottom sit on the
+        # panel by design.
+        top_h = int(th * 0.65)
+        return [f"[0:v]scale={tw}:{top_h}:force_original_aspect_ratio=increase,"
+                f"crop={tw}:{top_h},pad={tw}:{th}:0:0:color=0x0f172a[v0]"]
+
+    if layout == "letterbox" and ratio == "9:16":
+        # Cinematic black bars: video full width, centred vertically
+        # (no stretch, no crop of the width). scale=1080:-2 keeps the
+        # source aspect; pad centres it with black top + bottom.
+        return [f"[0:v]scale={tw}:-2,"
+                f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:color=black[v0]"]
+
+    if layout == "face_closeup" and ratio == "9:16":
+        # Tight 9:16 crop around the speaker's face, following the
+        # trajectory when face tracking is on. No face found -> honest
+        # centre-crop fallback (same as pip_facecam).
+        closeup = (_tracked_closeup_crop(box, sw, sh, face_track)
+                   if tracked else _face_closeup_crop(box, sw, sh))
+        if closeup is None:
+            log.warning("face_closeup: no face detected in this clip window; "
+                        "falling back to centre crop.")
+            return [f"[0:v]{_center_crop_filter(sw, sh, tw, th)}[v0]"]
+        return [f"[0:v]{closeup},scale={tw}:{th}[v0]"]
+
+    if layout == "framed" and ratio == "9:16":
+        # Video cover-cropped to 9:16, inset with a 30px margin on a
+        # dark slate frame, thin light border around the video rect.
+        inner_w, inner_h = 1020, 1813
+        frame_x, frame_y = (tw - inner_w) // 2, (th - inner_h) // 2
+        return [f"[0:v]{_center_crop_filter(sw, sh, inner_w, inner_h)},"
+                f"pad={tw}:{th}:{frame_x}:{frame_y}:color=0x0f172a,"
+                f"drawbox=x={frame_x - 3}:y={frame_y - 3}:w={inner_w + 6}:"
+                f"h={inner_h + 6}:color=white@0.85:t=4[v0]"]
+
     # Centre crop (crop-to-cover for the requested ratio), no stretch.
     # With face tracking on, the crop follows the trajectory.
     centre = (_tracked_crop(sw, sh, tw, th, face_track)
@@ -4172,7 +5048,8 @@ def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
 
 def render_clip(source: Path, clip: dict, settings: dict,
                 segments: list[dict], out_path: Path,
-                source_info: dict, job_dir: Path) -> Path:
+                source_info: dict, job_dir: Path,
+                music_bed_path: Path | None = None) -> Path:
     """Render one clip with FFmpeg. Returns out_path. Raises on failure.
 
     Batch 1 enhancements (all default ON; see _feature_on):
@@ -4204,7 +5081,20 @@ def render_clip(source: Path, clip: dict, settings: dict,
              "ost_persistent": False, "ost_animation": "none",
              "end_card": False, "keyword_popups": 0,
              "keyword_popups_on": False, "lower_third": False,
-             "progress_bar": False}
+             "progress_bar": False,
+             # Batch 9: colour grade applied ("none" when ungraded);
+             # the job note reads this, never the settings.
+             "colour_grade": "none",
+             # Batch 9: music bed + SFX applied to this clip (the job
+             # note reads these, never the settings).
+             "music_bed": None,
+             "music_bed_skipped": None,
+             "sfx_counts": {"whoosh": 0, "pop": 0},
+             # Batch 9: OST language — the headline language asked
+             # for, and whether its translation landed ("none" /
+             # "same" / "ok" / "failed"; the job note reads these).
+             "ost_language": "source",
+             "ost_translation": "none"}
     clip["_batch1_stats"] = stats
 
     # --- Cleaning pre-pass (silence + filler removal) ---
@@ -4286,9 +5176,15 @@ def render_clip(source: Path, clip: dict, settings: dict,
     # "Follow for more" when the card is on but no text was given;
     # lower_third_text is empty = OFF.
     ost_persistent = bool(settings.get("ost_persistent", False))
-    ost_animation = (settings.get("ost_animation") or "none").lower()
-    if ost_animation not in OST_ANIMATIONS:
-        ost_animation = "none"
+    # Batch 9: OST is STATIC, always (user rule). The stored
+    # ost_animation is accepted for old presets but never honoured —
+    # the headline is written with animation="none".
+    ost_animation = "none"
+    # Batch 9: OST position is its own setting, independent of the
+    # headline style; absent = the style's historic default.
+    ost_position = settings.get("ost_position") or None
+    ost_pos = effective_ost_position(headline_style, ost_position)
+    h_font_path = FONTS_DIR / HEADLINE_FONT_MAP[headline_style][3]
     end_card = bool(settings.get("end_card", False))
     end_card_text = None
     if end_card:
@@ -4310,7 +5206,7 @@ def render_clip(source: Path, clip: dict, settings: dict,
             divider = 864 if (layout == "split" and ratio == "9:16") else None
             if write_clip_ass(render_segments, render_start, render_end, style_id, candidate,
                               divider, tw, th, layout, caption_position, headline_style,
-                              caption_safe_zone):
+                              caption_safe_zone, ost_position=ost_position):
                 captions_path = candidate
                 captions_is_ass = True
 
@@ -4330,8 +5226,18 @@ def render_clip(source: Path, clip: dict, settings: dict,
     if bool(settings.get("on_screen_text", False)):
         headline = derive_on_screen_text(render_clip_view, render_segments, settings)
         if headline:
-            log.info("Clip %.1f-%.1fs on-screen headline: %r (style %s)",
-                     start, end, headline, headline_style)
+            # Batch 9: ost_language — translate the DERIVED headline
+            # (campaign verbatim first, else the transcript headline)
+            # into the job's headline language. The end-card text,
+            # lower-third tag and keyword pop-ups are never translated.
+            stats["ost_language"] = (
+                settings.get("ost_language") or "source").lower()
+            headline, stats["ost_translation"] = _translate_headline(
+                headline, settings)
+            log.info("Clip %.1f-%.1fs on-screen headline: %r (style %s, "
+                     "ost_language %s, translation %s)",
+                     start, end, headline, headline_style,
+                     stats["ost_language"], stats["ost_translation"])
         else:
             log.info("Clip %.1f-%.1fs: on-screen text on, but no headline "
                      "could be derived (no campaign text, no transcript) — "
@@ -4355,10 +5261,12 @@ def render_clip(source: Path, clip: dict, settings: dict,
                               animation=ost_animation,
                               end_card_text=end_card_text,
                               keyword_popups=popups or None,
-                              lower_third_text=lower_third_text):
+                              lower_third_text=lower_third_text,
+                              position=ost_position):
             headline_path = candidate
             stats["ost_persistent"] = bool(ost_persistent and headline)
             stats["ost_animation"] = ost_animation
+            stats["ost_position"] = ost_pos
             stats["end_card"] = bool(end_card_text)
             stats["keyword_popups"] = len(popups)
             stats["keyword_popups_on"] = keyword_popups_on
@@ -4372,10 +5280,17 @@ def render_clip(source: Path, clip: dict, settings: dict,
     face_track: list[tuple] = []
     do_track = _feature_on(settings, "face_tracking")
     if do_track:
-        if layout == "blur_fill" and ratio == "9:16":
-            # blur_fill has no crop to track — honest no-op, not faked.
-            stats["face_fallback"] = (
-                "face tracking does not apply to the blurred-background layout")
+        if layout in ("blur_fill", "gradient_fill", "stacked",
+                      "letterbox", "framed") and ratio == "9:16":
+            # These layouts have no crop to track — honest no-op, not
+            # faked. blur_fill keeps its original message; the Batch 9
+            # layouts name themselves.
+            if layout == "blur_fill":
+                stats["face_fallback"] = (
+                    "face tracking does not apply to the blurred-background layout")
+            else:
+                stats["face_fallback"] = (
+                    f"face tracking does not apply to the {layout} layout")
         else:
             face_track = face_track_trajectory(
                 render_source, render_start, render_duration, sw, sh)
@@ -4402,6 +5317,7 @@ def render_clip(source: Path, clip: dict, settings: dict,
     # fps=30 runs here so in/30 is exact clip time in the zoompan
     # expression; the final chain then only sets the pixel format.
     fps_applied = False
+    render_moments: list = []
     if _feature_on(settings, "auto_zoom"):
         moments = clip.get("_zoom_moments") or []
         render_moments = remap_spans(moments, start, cuts) if moments else []
@@ -4417,6 +5333,17 @@ def render_clip(source: Path, clip: dict, settings: dict,
     # the text stays crisp because it is burned in after this.
     chains.append(f"{video_label}unsharp=5:5:0.5:5:5:0.0[vu]")
     video_label = "[vu]"
+    # Batch 9: colour grade — after layout/zoom/sharpen, before the
+    # captions burn, so the grade colours the footage and the burned
+    # text stays its own colour. "none" (default) adds nothing, so
+    # the pipeline is unchanged for ungraded jobs.
+    grade_filter = colour_grade_filter(settings.get("colour_grade"))
+    if grade_filter:
+        chains.append(f"{video_label}{grade_filter}[vg]")
+        video_label = "[vg]"
+        stats["colour_grade"] = (settings.get("colour_grade") or "none").lower()
+        log.info("Clip %.1f-%.1fs: colour grade %s applied.",
+                 start, end, stats["colour_grade"])
     if captions_path is not None:
         if captions_is_ass:
             chains.append(
@@ -4434,11 +5361,15 @@ def render_clip(source: Path, clip: dict, settings: dict,
                 srt_align, srt_mv = 8, 300
             elif caption_position == "middle":
                 srt_align, srt_mv = _caption_align_mv(
-                    "middle", font_size, tw, th, srt_divider, layout, headline_style)
+                    "middle", font_size, tw, th, srt_divider, layout,
+                    headline_style, ost_position)
             else:
                 srt_align, srt_mv = 2, 70
+            # Batch 9 FONT MAP: classic's own typeface — the family
+            # comes from the map so the burn and the map cannot drift.
+            classic_family = FONT_MAP["classic"][0]
             style = (
-                "FontName=DejaVu Sans,FontSize=%d,PrimaryColour=&HFFFFFF,"
+                f"FontName={classic_family},FontSize=%d,PrimaryColour=&HFFFFFF,"
                 "OutlineColour=&H000000,BorderStyle=1,Outline=2,Shadow=0,"
                 f"Bold=1,Alignment={srt_align},MarginV={srt_mv}" % font_size
             )
@@ -4455,20 +5386,56 @@ def render_clip(source: Path, clip: dict, settings: dict,
         # the subtitles step. The end card's box is time-gated to the
         # last 2s (enable timeline); the tag's box runs the full clip.
         # Static geometry + enable are both proven on this build.
+        # Batch 9: the same treatment for the headline's own bar/band
+        # (bold_bar / lower_third) — the preview shows it, so the burn
+        # must have it too — and every box is sized from the FITTED
+        # text (measured with the style's real font), so a shrunk or
+        # 2-line text still sits inside its box.
         boxes: list[str] = []
+        if headline:
+            # The headline's span, same formula as write_headline_ass.
+            headline_end = (render_duration if ost_persistent
+                            else min(4.0, render_duration))
+            if end_card_text:
+                headline_end = min(headline_end,
+                                   max(0.0, render_duration - 2.0))
+            if headline_end > 0:
+                if headline_style == "lower_third":
+                    hl_fs = 64 if tw >= 1080 else 48
+                elif headline_style == "big_centre":
+                    hl_fs = 110 if tw >= 1080 else 80
+                else:  # bold_bar
+                    hl_fs = 84 if tw >= 1080 else 60
+                hl_fit_fs, hl_lines = _fit_text_block(
+                    headline, hl_fs, tw - 120, max_lines=2, min_fs=28,
+                    font_path=h_font_path)
+                hl_box = _headline_background_filter(
+                    tw, th, headline_style, ost_pos, hl_fit_fs, hl_lines,
+                    h_font_path,
+                    enable=f"between(t,0,{headline_end:.3f})")
+                if hl_box:
+                    boxes.append(hl_box)
         if end_card_text:
             card_fs = 96 if tw >= 1080 else 68
+            card_fit_fs, card_lines = _fit_text_block(
+                end_card_text, card_fs, tw - 120, max_lines=2, min_fs=36,
+                font_path=h_font_path)
             boxes.append(_text_box_filter(
-                tw, end_card_text, card_fs, th // 2,
-                enable=f"between(t,{render_duration - 2.0:.3f},{render_duration:.3f})"))
+                tw, end_card_text, card_fit_fs, th // 2,
+                enable=f"between(t,{render_duration - 2.0:.3f},{render_duration:.3f})",
+                font_path=h_font_path, lines=card_lines))
         if lower_third_text:
             tag_fs = 40 if tw >= 1080 else 30
+            tag_fit_fs, _tag_lines = _fit_text_block(
+                lower_third_text, tag_fs, tw - 120, max_lines=1, min_fs=20,
+                font_path=h_font_path)
             # Alignment 2 + MarginV 260: the tag's bottom edge sits
             # 260px above the frame bottom, so its line centre is
             # ~260 + half a line above the bottom.
-            tag_centre = th - 260 - int(tag_fs * 0.6)
+            tag_centre = th - 260 - int(tag_fit_fs * 0.6)
             boxes.append(_text_box_filter(
-                tw, lower_third_text, tag_fs, tag_centre, pad_x=30, pad_y=16))
+                tw, lower_third_text, tag_fit_fs, tag_centre, pad_x=30, pad_y=16,
+                font_path=h_font_path))
         if boxes:
             chains.append(f"{video_label}{','.join(boxes)}[vcard]")
             video_label = "[vcard]"
@@ -4496,13 +5463,103 @@ def render_clip(source: Path, clip: dict, settings: dict,
         stats["progress_bar"] = True
     else:
         chains.append(f"{video_label}{'format=yuv420p' if fps_applied else 'fps=30,format=yuv420p'}[vout]")
-    filter_complex = ";".join(chains)
+    # Batch 9: music bed + SFX — the audio chain. The bed is ducked
+    # under speech with sidechain compression (the clip's own audio
+    # is the sidechain key, so the bed dips whenever someone speaks
+    # and comes back up in gaps); SFX fire at their trigger times
+    # via adelay. A source with no audio gets the bed alone at a
+    # moderate level (nothing to duck under). When neither is set,
+    # the command is exactly the old path (single -af loudnorm), so
+    # jobs without a bed/SFX render byte-identically to before.
+    sfx_setting = (settings.get("sfx") or "none").lower()
+    if sfx_setting not in SFX_OPTIONS:
+        sfx_setting = "none"
+    bed_file = Path(music_bed_path) if music_bed_path else None
+    if bed_file is not None and not bed_file.exists():
+        stats["music_bed_skipped"] = (
+            "music bed file missing — rendered without it")
+        bed_file = None
+    sfx_events = sfx_events_for_clip(
+        sfx_setting, render_moments, popups, render_duration)
+    # Only SFX files that exist are used — a missing shipped file is
+    # a repo problem, never a render failure: the event is dropped.
+    sfx_events = [(kind, t) for kind, t in sfx_events
+                  if SFX_FILES[kind].exists()]
+    for kind, _t in sfx_events:
+        stats["sfx_counts"][kind] += 1
+    if bed_file is not None:
+        stats["music_bed"] = bed_file.name
+    audio_chains: list[str] = []
+    input_args: list[str] = [
+        "-ss", str(render_start), "-i", str(render_source)]
+    if bed_file is not None or sfx_events:
+        # Extra inputs: the bed first (looped), then one per SFX event.
+        next_input = 1
+        bed_input: int | None = None
+        if bed_file is not None:
+            input_args += ["-stream_loop", "-1", "-i", str(bed_file)]
+            bed_input = next_input
+            next_input += 1
+        sfx_inputs: list[str] = []
+        for kind, at in sfx_events:
+            input_args += ["-i", str(SFX_FILES[kind])]
+            delay_ms = int(round(at * 1000))
+            label = f"[sfx{len(sfx_inputs)}]"
+            audio_chains.append(
+                f"[{next_input}:a]adelay={delay_ms}:all=1,"
+                f"volume={SFX_VOLUMES[kind]},"
+                f"aformat=sample_rates=48000:channel_layouts=stereo{label}")
+            sfx_inputs.append(label)
+            next_input += 1
+        mix_inputs: list[str] = []
+        if source_info["has_audio"]:
+            if bed_file is not None:
+                # Split the speech: one copy for the mix, one as the
+                # sidechain key that ducks the bed.
+                audio_chains.append("[0:a]asplit=2[amain][aside]")
+                audio_chains.append(
+                    f"[{bed_input}:a]volume={MUSIC_BED_VOLUME},"
+                    "aformat=sample_rates=48000:channel_layouts=stereo[bedv]")
+                audio_chains.append(
+                    "[bedv][aside]sidechaincompress=threshold=0.03:ratio=6:"
+                    "attack=200:release=500[bedd]")
+                mix_inputs += ["[amain]", "[bedd]"]
+            else:
+                mix_inputs.append("[0:a]")
+        elif bed_file is not None:
+            audio_chains.append(
+                f"[{bed_input}:a]volume={MUSIC_BED_SOLO_VOLUME},"
+                "aformat=sample_rates=48000:channel_layouts=stereo[bedv]")
+            mix_inputs.append("[bedv]")
+        mix_inputs += sfx_inputs
+        if not source_info["has_audio"] and bed_file is None and sfx_inputs:
+            # SFX only: the mix needs a duration-defining input —
+            # amix duration=first would stop at the first (short)
+            # SFX and truncate the clip's audio. Silence for the
+            # full clip duration does it; the SFX ride on top.
+            audio_chains.append(
+                "anullsrc=r=48000:cl=stereo:"
+                f"duration={render_duration:.3f}[sil]")
+            mix_inputs = ["[sil]"] + mix_inputs
+        if len(mix_inputs) == 1:
+            audio_chains.append(
+                f"{mix_inputs[0]}loudnorm=I=-14:TP=-1.5:LRA=11[aout]")
+        else:
+            audio_chains.append(
+                "".join(mix_inputs)
+                + f"amix=inputs={len(mix_inputs)}:duration=first:"
+                "dropout_transition=0,"
+                "loudnorm=I=-14:TP=-1.5:LRA=11[aout]")
+    filter_complex = ";".join(chains + audio_chains)
 
     cmd = [FFMPEG, "-y", "-v", "error",
-           "-ss", str(render_start), "-i", str(render_source),
+           *input_args,
            "-filter_complex", filter_complex,
            "-map", "[vout]"]
-    if source_info["has_audio"]:
+    if audio_chains:
+        cmd += ["-map", "[aout]"]
+        cmd += ["-c:a", "aac", "-b:a", "192k"]
+    elif source_info["has_audio"]:
         # Batch 2: loudness-normalised to -14 LUFS (the level TikTok /
         # Instagram expect) and AAC 192k. Single-pass loudnorm on the
         # trimmed clip; it does not change the duration.
@@ -4627,6 +5684,127 @@ def extract_thumbnail_candidates(clip_path: Path, job_dir: Path, prefix: str,
 
 
 # ---------------------------------------------------------------------------
+# Smart best-frame thumbnail (Batch 9, item 14d)
+# ---------------------------------------------------------------------------
+#
+# The MAIN thumbnail is the best frame of the clip — sharpest +
+# brightest + face-present, scored honestly from the pixels — instead
+# of a fixed time. The 3 fixed picker candidates from Batch 4
+# (10/50/90%) are untouched: this only chooses the main thumbnail.
+# Weights: sharpness dominates (a blurry thumbnail is useless),
+# brightness next (well-exposed beats dark/blown-out), face is a
+# bonus (a face sells the clip, but a sharp bright frame without one
+# still beats a blurry dark one with one).
+THUMB_SHARPNESS_WEIGHT = 0.5
+THUMB_BRIGHTNESS_WEIGHT = 0.3
+THUMB_FACE_WEIGHT = 0.2
+# The best-exposed frame: mean luminance 150 (bright but not blown
+# out); the brightness term falls to 0 at pure black or pure white.
+THUMB_IDEAL_BRIGHTNESS = 150.0
+
+
+def score_thumbnail_frame(frame_path: Path, cascade=None) -> dict | None:
+    """Score one candidate thumbnail frame.
+
+    Returns {"sharpness": float (variance of Laplacian — higher is
+    sharper), "brightness": float 0-1 (1 at the ideal exposure),
+    "face": 0/1 (Haar face found)} — or None when OpenCV is
+    unavailable or the frame cannot be read. The sharpness term is
+    RAW (unbounded); the picker normalises it against the sharpest
+    sampled frame, like the ranking normalises density. ``cascade``
+    is injected by tests; None loads the bundled cascade.
+    """
+    try:
+        import cv2
+    except ImportError:
+        return None
+    img = cv2.imread(str(frame_path))
+    if img is None:
+        return None
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    mean_lum = float(gray.mean())
+    brightness = max(
+        0.0, 1.0 - abs(mean_lum - THUMB_IDEAL_BRIGHTNESS) / THUMB_IDEAL_BRIGHTNESS)
+    face = 0
+    if cascade is None:
+        cascade, _path = _load_face_cascade()
+    if cascade is not None:
+        try:
+            faces = cascade.detectMultiScale(gray, 1.1, 5, minSize=(40, 40))
+            face = 1 if len(faces) > 0 else 0
+        except Exception:  # noqa: BLE001 - face detection never fails scoring
+            face = 0
+    return {"sharpness": sharpness, "brightness": brightness, "face": face}
+
+
+def pick_best_thumbnail_frame(clip_path: Path, job_dir: Path, prefix: str,
+                              duration: float, skip_seconds: float = 0.0,
+                              skip_tail_seconds: float = 0.0,
+                              samples: int = 9
+                              ) -> tuple[Path | None, dict | None]:
+    """Pick the best thumbnail frame for a clip.
+
+    Samples ``samples`` frames evenly across the clip content —
+    after ``skip_seconds`` (the brand intro) and before the last
+    ``skip_tail_seconds`` (the brand outro) — scores each with
+    score_thumbnail_frame, and returns (best_path, best_scores)
+    where best_scores carries the winning frame's time + the three
+    terms + the weighted score. Losing frames are deleted; only the
+    winner is kept. Returns (None, None) when nothing could be
+    scored (no OpenCV, no frames, empty range) — the caller falls
+    back to the fixed-time frame, never fails the clip.
+    """
+    if duration <= 0 or samples < 1:
+        return None, None
+    start = max(0.0, skip_seconds)
+    end = duration - max(0.0, skip_tail_seconds)
+    if end <= start:
+        return None, None
+    span = end - start
+    times = [start + span * (i + 0.5) / samples for i in range(samples)]
+    frames: list[tuple[Path, float, dict]] = []
+    max_sharp = 0.0
+    for i, t in enumerate(times):
+        path = job_dir / f"{prefix}_best{i + 1}.jpg"
+        got = extract_thumbnail(clip_path, path, at_seconds=round(t, 3))
+        if got is None:
+            continue
+        raw = score_thumbnail_frame(got)
+        if raw is None:
+            path.unlink(missing_ok=True)
+            continue
+        frames.append((path, t, raw))
+        max_sharp = max(max_sharp, raw["sharpness"])
+    if not frames:
+        return None, None
+    best: tuple[Path, float, dict] | None = None
+    best_score = -1.0
+    for path, t, raw in frames:
+        sharp_n = raw["sharpness"] / max_sharp if max_sharp > 0 else 0.0
+        score = (THUMB_SHARPNESS_WEIGHT * sharp_n
+                 + THUMB_BRIGHTNESS_WEIGHT * raw["brightness"]
+                 + THUMB_FACE_WEIGHT * raw["face"])
+        if score > best_score:
+            best_score = score
+            best = (path, t, {**raw, "sharpness_n": round(sharp_n, 3),
+                              "score": round(score, 3),
+                              "at_seconds": round(t, 3)})
+    if best is None:
+        return None, None
+    best_path, _t, best_scores = best
+    for path, _t2, _raw in frames:
+        if path != best_path:
+            path.unlink(missing_ok=True)
+    log.info("Best thumbnail frame: %s at %.1fs (score %.2f: sharpness %.0f, "
+             "brightness %.2f, face %d).",
+             best_path.name, best_scores["at_seconds"], best_scores["score"],
+             best_scores["sharpness"], best_scores["brightness"],
+             best_scores["face"])
+    return best_path, best_scores
+
+
+# ---------------------------------------------------------------------------
 # Brand assets (intro / outro)
 # ---------------------------------------------------------------------------
 
@@ -4691,6 +5869,54 @@ def download_brand_assets(api: "JobApi", brand_assets: dict | None,
         assets[kind] = dest
         log.info("Brand %s asset downloaded: %s", kind, dest.name)
     return assets
+
+
+def _download_music_bed(api: "JobApi", job: dict, job_dir: Path
+                        ) -> tuple[Path | None, str | None, str | None]:
+    """Download a job's music bed once, for all its clips (Batch 9).
+
+    Returns (path, name, note): the local bed file + its original
+    name when downloaded and ffprobe-validated as having an audio
+    stream; (None, name, reason) when the job has a bed URL but it
+    could not be used (download failed / no audio stream) — the job
+    still renders, without the bed, and the note says why;
+    (None, None, None) when the job has no bed at all.
+    """
+    url = job.get("music_bed_url")
+    name = job.get("music_bed_name")
+    if not url:
+        return None, None, None
+    # The downloaded file keeps the original name (sanitised), so the
+    # job note can say which bed was mixed in.
+    safe = "".join(ch if ch.isalnum() or ch in "._-" else "_"
+                   for ch in (name or "music-bed"))[:80] or "music-bed"
+    dest = job_dir / f"music_bed_{safe}"
+    try:
+        api.download_brand_asset(url, dest)
+    except Exception as exc:  # noqa: BLE001 - a bad bed never fails the job
+        log.warning("Job %s: music bed download failed (%s); rendering "
+                    "without it.", job.get("id"), exc)
+        return None, name, "music bed download failed — rendered without it"
+    # BUG FIX (Batch 9, 2026-11-25 — found by proof Job #67): the bed
+    # is AUDIO-ONLY, so it must NOT be probed with probe_summary —
+    # that helper requires a VIDEO stream and raises "No video stream
+    # found" for a perfectly good MP3, which this except swallowed as
+    # "has no audio stream" and the bed was silently dropped. Probe
+    # the streams directly and accept any file with an audio stream.
+    try:
+        info = ffprobe_json(dest)
+        has_audio = any(
+            s.get("codec_type") == "audio" for s in info.get("streams", [])
+        )
+    except Exception:  # noqa: BLE001 - unprobeable bed, same fallback
+        has_audio = False
+    if not has_audio:
+        log.warning("Job %s: music bed has no audio stream; rendering "
+                    "without it.", job.get("id"))
+        dest.unlink(missing_ok=True)
+        return None, name, "music bed has no audio stream — rendered without it"
+    log.info("Job %s: music bed downloaded: %s.", job.get("id"), name or dest.name)
+    return dest, name, None
 
 
 def apply_brand_assets(clip_path: Path, intro_path: Path | None = None,
@@ -5030,11 +6256,20 @@ def process_rerender(api: JobApi, rerender: dict) -> None:
     style = rerender["caption_style"]
     log.info("Processing re-render %s: clip %s of job %s with style '%s'.",
              rerender_id, clip_id, job_id, style)
+    _ensure_repo_fonts()
     try:
         api.set_rerender_status(rerender_id, "processing")
         job = api.get_job(job_id)
         settings = dict(job.get("settings") or {})
         settings["caption_style"] = style
+        # Batch 9: an A/B variant renders a NEW clip (Variant B) with
+        # its own headline style when one was requested; a plain
+        # re-render keeps the job's headline style and replaces the
+        # file in place.
+        is_variant = bool(rerender.get("is_variant"))
+        variant_headline = (rerender.get("variant_headline_style") or "").lower()
+        if is_variant and variant_headline in HEADLINE_STYLES:
+            settings["headline_style"] = variant_headline
         job_dir = WORK_DIR / f"rerender-{rerender_id}"
         job_dir.mkdir(parents=True, exist_ok=True)
         source, source_note = acquire_source(api, job, job_dir)
@@ -5043,6 +6278,11 @@ def process_rerender(api: JobApi, rerender: dict) -> None:
         # The parent job's brand assets ride along on a re-render too:
         # a re-rendered clip keeps the job's intro/outro.
         brand = download_brand_assets(api, job.get("brand_assets"), job_dir)
+        # Batch 9: the job's music bed rides along on a re-render too
+        # (same download, same ducking; a failed download renders
+        # without the bed, never fails the re-render).
+        music_bed_path, _music_bed_name, _music_bed_note = _download_music_bed(
+            api, job, job_dir)
         clip = {
             "start": float(rerender["start_seconds"]),
             "end": float(rerender["end_seconds"]),
@@ -5083,9 +6323,10 @@ def process_rerender(api: JobApi, rerender: dict) -> None:
                     clip["_zoom_moments"] = moments
         out_path = job_dir / "clip.mp4"
         render_clip(source, clip, settings, segments, out_path,
-                    source_info, job_dir)
+                    source_info, job_dir, music_bed_path=music_bed_path)
         info = validate_clip(out_path, {"settings": settings}, source_info)
         rerender_intro_ok = False
+        rerender_outro_ok = False
         if brand:
             # Same concat as a fresh render; on any failure the plain
             # re-rendered clip is uploaded instead — never a failure.
@@ -5096,6 +6337,7 @@ def process_rerender(api: JobApi, rerender: dict) -> None:
                 info = probe_summary(final_path)
                 out_path = final_path
                 rerender_intro_ok = _intro_ok
+                rerender_outro_ok = _outro_ok
         # Batch 4: the re-rendered clip keeps the job's logo overlay
         # (same rule as a fresh render — OFF unless the job asked for
         # it, and a failure keeps the plain re-render).
@@ -5105,23 +6347,50 @@ def process_rerender(api: JobApi, rerender: dict) -> None:
             if final_path != out_path:
                 info = probe_summary(final_path)
                 out_path = final_path
-        # Thumbnail: see process_job — skip past a stitched-on intro.
+        # Thumbnail: see process_job — the BEST frame across the clip
+        # content (after the intro, before the outro); the fixed-time
+        # frame is the fallback when nothing scores.
         thumb_at = 1.0
+        intro_dur = 0.0
+        outro_dur = 0.0
         if rerender_intro_ok and "intro" in brand:
             intro_info = _probe_video_info(brand["intro"])
             if intro_info is not None:
-                thumb_at = intro_info["duration"] + 1.0
-        thumb = extract_thumbnail(out_path, job_dir / "thumb.jpg",
-                                  at_seconds=thumb_at)
+                intro_dur = intro_info["duration"]
+                thumb_at = intro_dur + 1.0
+        if rerender_outro_ok and "outro" in brand:
+            outro_info = _probe_video_info(brand["outro"])
+            if outro_info is not None:
+                outro_dur = outro_info["duration"]
+        best_thumb, _best_scores = pick_best_thumbnail_frame(
+            out_path, job_dir, "rerender_best", info["duration"],
+            skip_seconds=intro_dur, skip_tail_seconds=outro_dur)
+        thumb = best_thumb if best_thumb is not None else extract_thumbnail(
+            out_path, job_dir / "thumb.jpg", at_seconds=thumb_at)
         # Batch 4: fresh thumbnail-picker candidates for the new file.
         cands = extract_thumbnail_candidates(out_path, job_dir,
                                              "rerender_cand", info["duration"])
-        api.upload_replacement_clip(clip_id, out_path, rerender_id,
-                                    thumbnail=thumb,
-                                    duration_seconds=info["duration"],
-                                    candidates=cands)
-        log.info("Re-render %s ready: clip %s now uses style '%s' (%.2fs).",
-                 rerender_id, clip_id, style, info["duration"])
+        if is_variant:
+            # Batch 9: a variant is a NEW clip row (Variant B) — the
+            # original clip is never touched.
+            api.upload_variant_clip(
+                clip_id, out_path, rerender_id,
+                thumbnail=thumb,
+                duration_seconds=info["duration"],
+                candidates=cands,
+                face_tracked=bool(
+                    (clip.get("_batch1_stats") or {}).get("face_tracked")))
+            log.info("Variant %s ready: new Variant B clip for clip %s "
+                     "(style '%s', headline '%s').",
+                     rerender_id, clip_id, style,
+                     settings.get("headline_style"))
+        else:
+            api.upload_replacement_clip(clip_id, out_path, rerender_id,
+                                        thumbnail=thumb,
+                                        duration_seconds=info["duration"],
+                                        candidates=cands)
+            log.info("Re-render %s ready: clip %s now uses style '%s' (%.2fs).",
+                     rerender_id, clip_id, style, info["duration"])
     except Exception as exc:
         reason = str(exc)[:500]
         log.error("Re-render %s failed: %s", rerender_id, reason)
@@ -5140,6 +6409,9 @@ def process_job(api: JobApi, job: dict) -> None:
     log.info("Processing job %s (platform=%s ratio=%s clips=%s mode=%s)",
              job_id, settings.get("platform"), settings.get("aspect_ratio"),
              settings.get("clip_count"), settings.get("duration_mode"))
+    # Batch 9: the repo's shipped fonts must be in fontconfig before
+    # any render, so every style burns in its own typeface.
+    _ensure_repo_fonts()
     # Notes travel with the job (campaign brief, extra instructions).
     # Log them so the worker record shows the brief it clipped to;
     # Muse reads the full text from the job detail when processing.
@@ -5180,6 +6452,10 @@ def process_job(api: JobApi, job: dict) -> None:
         logo_applied = False
         if used_brand_assets:
             log.info("Job %s brand assets: %s", job_id, sorted(brand))
+        # Batch 9: the music bed is downloaded ONCE for the whole job
+        # (all clips share it); a failed download never fails the job.
+        music_bed_path, music_bed_name, music_bed_note = _download_music_bed(
+            api, job, job_dir)
 
         api.set_status(job_id, "Processing", stage="transcribing", progress=20)
         wav_path = job_dir / "audio_16k.wav"
@@ -5346,9 +6622,11 @@ def process_job(api: JobApi, job: dict) -> None:
                 out_path = job_dir / f"clip_{i:02d}_{slug}.mp4"
                 try:
                     render_clip(source, clip_r, ratio_settings, segments, out_path,
-                                source_info, job_dir)
+                                source_info, job_dir,
+                                music_bed_path=music_bed_path)
                     info = validate_clip(out_path, {"settings": ratio_settings}, source_info)
                     clip_intro_ok = False
+                    clip_outro_ok = False
                     if brand:
                         # Brand the clip: [intro?] + clip + [outro?]. Any
                         # concat failure falls back to the plain clip
@@ -5365,6 +6643,7 @@ def process_job(api: JobApi, job: dict) -> None:
                                 outro_applied = outro_applied or outro_ok
                                 out_path = final_path
                                 clip_intro_ok = intro_ok
+                                clip_outro_ok = outro_ok
                         except Exception as brand_exc:  # noqa: BLE001 - branding never fails the clip
                             log.warning("Job %s: clip %d (%s) branding failed (%s); "
                                         "uploading the plain clip.",
@@ -5388,14 +6667,30 @@ def process_job(api: JobApi, job: dict) -> None:
                                         job_id, i, ratio, logo_exc)
                     # Thumbnail: a branded clip opens with its intro, so a
                     # frame at 1.0s would show the intro card, not the clip.
-                    # Take the frame just after the intro instead.
+                    # Batch 9: the main thumbnail is the BEST frame
+                    # (sharpest + brightest + face-present) sampled across
+                    # the clip content — after the intro, before the outro;
+                    # the fixed-time frame is the fallback when nothing
+                    # scores (no OpenCV, no frames).
                     thumb_at = 1.0
+                    intro_dur = 0.0
+                    outro_dur = 0.0
                     if clip_intro_ok and "intro" in brand:
                         intro_info = _probe_video_info(brand["intro"])
                         if intro_info is not None:
-                            thumb_at = intro_info["duration"] + 1.0
-                    thumb = extract_thumbnail(out_path, job_dir / f"thumb_{i:02d}_{slug}.jpg",
-                                              at_seconds=thumb_at)
+                            intro_dur = intro_info["duration"]
+                            thumb_at = intro_dur + 1.0
+                    if clip_outro_ok and "outro" in brand:
+                        outro_info = _probe_video_info(brand["outro"])
+                        if outro_info is not None:
+                            outro_dur = outro_info["duration"]
+                    best_thumb, _best_scores = pick_best_thumbnail_frame(
+                        out_path, job_dir, f"best_{i:02d}_{slug}",
+                        info["duration"], skip_seconds=intro_dur,
+                        skip_tail_seconds=outro_dur)
+                    thumb = best_thumb if best_thumb is not None else extract_thumbnail(
+                        out_path, job_dir / f"thumb_{i:02d}_{slug}.jpg",
+                        at_seconds=thumb_at)
                     # Batch 4: thumbnail-picker candidates from the
                     # FINAL clip (after branding + logo overlay).
                     cands = extract_thumbnail_candidates(
@@ -5438,6 +6733,11 @@ def process_job(api: JobApi, job: dict) -> None:
                 "reason": clip.get("reason", ""),
                 "transcript_excerpt": clip.get("text", ""),
                 "caption_style": (settings.get("caption_style") or "punchy"),
+                # Batch 9 (item 14b): the worker's own face-tracking
+                # measurement for this clip — the viral checklist
+                # reads it, never a guess. Older clips have no field.
+                "face_tracked": bool(
+                    (clip.get("_batch1_stats") or {}).get("face_tracked")),
             }
             # The selector attaches a score_breakdown to every window;
             # a window with none (defensive — none exists today) sends
@@ -5503,6 +6803,67 @@ def process_job(api: JobApi, job: dict) -> None:
         # the other ratios repeat the same cuts, and counting them twice
         # would double-report the trimmed seconds.
         primary_rendered = [c for _, c, _, _, r, _, _ in rendered if r == ratios[0]]
+        # Batch 9: OST language — from the renders' stats (never the
+        # settings alone): the headline was translated only when a
+        # render actually translated one. Aggregated over the primary
+        # ratio's renders, like the music-bed / SFX lines below.
+        _ost_ok = sum(
+            1 for c in primary_rendered
+            if (c.get("_batch1_stats") or {}).get("ost_translation") == "ok")
+        _ost_failed = sum(
+            1 for c in primary_rendered
+            if (c.get("_batch1_stats") or {}).get("ost_translation") == "failed")
+        _ost_target = (settings.get("ost_language") or "source").lower()
+        if _ost_target in TRANSLATION_TARGETS:
+            _ost_lang = TRANSLATION_TARGETS[_ost_target]
+            if _ost_ok and not _ost_failed:
+                extra_notes.append(
+                    f"On-screen headline translated to {_ost_lang}.")
+            elif _ost_ok:
+                extra_notes.append(
+                    f"On-screen headline translated to {_ost_lang} where "
+                    f"possible — {_ost_failed} headline(s) in the source "
+                    f"language.")
+            elif _ost_failed:
+                extra_notes.append(
+                    "On-screen headline translation unavailable — headline "
+                    "in the source language.")
+            # "same"/"none" (already in that language, or no headline
+            # was derived): nothing to report.
+        # Batch 9: music bed + SFX — stated on every job, applied or
+        # not, from the renders' stats (never the settings alone).
+        bed_names = sorted({(c.get("_batch1_stats") or {}).get("music_bed")
+                            for c in primary_rendered} - {None})
+        bed_skipped = sorted({(c.get("_batch1_stats") or {}).get("music_bed_skipped")
+                              for c in primary_rendered} - {None})
+        if bed_names:
+            extra_notes.append(
+                f"Music bed: {', '.join(bed_names)} (ducked under speech).")
+        elif bed_skipped:
+            extra_notes.append("Music bed: " + "; ".join(bed_skipped) + ".")
+        elif music_bed_note:
+            extra_notes.append(f"Music bed: {music_bed_note}.")
+        else:
+            extra_notes.append("Music bed: none set.")
+        sfx_setting = (settings.get("sfx") or "none").lower()
+        sfx_whoosh = sum((c.get("_batch1_stats") or {}).get("sfx_counts", {}).get("whoosh", 0)
+                         for c in primary_rendered)
+        sfx_pop = sum((c.get("_batch1_stats") or {}).get("sfx_counts", {}).get("pop", 0)
+                      for c in primary_rendered)
+        if sfx_whoosh or sfx_pop:
+            bits = []
+            if sfx_whoosh:
+                bits.append(f"whoosh x{sfx_whoosh}")
+            if sfx_pop:
+                bits.append(f"pop x{sfx_pop}")
+            extra_notes.append(
+                f"Sound effects ({sfx_setting}): " + ", ".join(bits) + ".")
+        elif sfx_setting == "none":
+            extra_notes.append("Sound effects: none set.")
+        else:
+            extra_notes.append(
+                f"Sound effects ({sfx_setting}): no trigger in these "
+                f"clips, so none sounded.")
         api.set_status(job_id, "Ready", stage="ready", progress=100,
                        note=_ready_note(clips, windows_requested, failed,
                                         rendered=primary_rendered,

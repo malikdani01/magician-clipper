@@ -258,8 +258,11 @@ class JobCreationSettingsTest extends TestCase
             ->assertStatus(422)
             ->assertJsonValidationErrors(['beat_sync']);
 
+        // Batch 9 (2026-11-25): the translation list expanded from
+        // none/ur/hi/en to 32 languages, so 'fr' is valid now — the
+        // rejection case uses a code that is in no list.
         $this->actingAs($user, 'sanctum')
-            ->postJson('/api/v1/jobs', $this->payload(['caption_translation' => 'fr']))
+            ->postJson('/api/v1/jobs', $this->payload(['caption_translation' => 'xx']))
             ->assertStatus(422)
             ->assertJsonValidationErrors(['caption_translation']);
 

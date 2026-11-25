@@ -13,7 +13,8 @@
  * (pop / karaoke fill / bounce / typewriter / sweep / neon pulse /
  * slam / outline pop / gradient pop / kinetic slide / glow pop /
  * word zoom / word fade / highlight box / bounce pop / glitch pop /
- * tiktok bold pop / reels clean / shorts minimal).
+ * tiktok bold pop / reels clean / shorts minimal / comic wobble /
+ * marker pop).
  * The preview and the burned-in captions must match: same
  * words-per-screen, same colours, same motion. `wordColors` (gradient
  * only) cycles one colour per word.
@@ -43,6 +44,8 @@ export type CaptionStyleId =
   | 'tiktok_bold'
   | 'reels_clean'
   | 'shorts_minimal'
+  | 'comic'
+  | 'marker'
 
 export type CaptionPreviewAnim =
   | 'pop'
@@ -66,6 +69,8 @@ export type CaptionPreviewAnim =
   | 'tiktok_bold'
   | 'reels_clean'
   | 'shorts_minimal'
+  | 'comic'
+  | 'marker'
 
 export interface CaptionStyle {
   id: CaptionStyleId
@@ -182,7 +187,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     id: 'neon',
     name: 'Neon Glow',
     description:
-      'Bright cyan glow with a magenta edge — like a neon sign, gently pulsing.',
+      'Pink and cyan words alternate with a soft glowing halo — like a neon sign, gently pulsing.',
     bestFor: 'Gaming and night-time edits',
     sample: 'NEON NIGHTS',
     anim: 'neon',
@@ -311,6 +316,27 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     sample: 'Small, quiet captions.',
     anim: 'shorts_minimal',
   },
+  // Batch 9 (2026-11-25): Comic Pop and Marker — two more concepts,
+  // our own names, samples, colours and rendering. Same generic
+  // concepts as the competitor's Comic/Marker, nothing copied.
+  {
+    id: 'comic',
+    name: 'Comic Pop',
+    description:
+      'Playful slanted words with a bright pink shadow — each word pops in mint, yellow or cyan with a bouncy wobble.',
+    bestFor: 'Funny moments and playful edits',
+    sample: 'THAT WAS SO FUNNY',
+    anim: 'comic',
+  },
+  {
+    id: 'marker',
+    name: 'Marker',
+    description:
+      'Casual slanted handwritten words with a black outline — each spoken word turns orange and lands with a slight tilt.',
+    bestFor: 'Notes, callouts and key points',
+    sample: 'REMEMBER THIS ONE',
+    anim: 'marker',
+  },
 ]
 
 /** The matching style, or Punchy for unknown / missing ids. */
@@ -348,6 +374,9 @@ export const LEGACY_CAPTION_PRESET_TO_STYLE: Record<string, CaptionStyleId> = {
   'tiktok-bold': 'tiktok_bold',
   'reels-clean': 'reels_clean',
   'shorts-minimal': 'shorts_minimal',
+  // Batch 9 (2026-11-25): Comic Pop and Marker, same treatment.
+  'comic-pop': 'comic',
+  marker: 'marker',
 }
 
 /**
@@ -364,4 +393,76 @@ export function translateLegacyCaptionPreset(id: string | null | undefined): Cap
 /** True when the id is one of the known styles. */
 export function isCaptionStyleId(id: unknown): id is CaptionStyleId {
   return typeof id === 'string' && CAPTION_STYLES.some((s) => s.id === id)
+}
+
+/**
+ * Batch 9 — one distinct typeface per style (the FONT MAP, mirrored
+ * from the worker's FONT_MAP in muse_worker.py — family names must
+ * match the worker's ASS Fontnames EXACTLY, or the preview lies
+ * about the burn). `family` is the @font-face family (see
+ * index.css), `weight` its CSS weight, `style` how the preview
+ * renders it:
+ * - marker is `normal`, not italic: the burn renders Caveat-Bold
+ *   upright (no italic Caveat face exists for libass to pick), so
+ *   an italic preview would be a lie; the handwriting itself reads
+ *   slanted.
+ * - comic is `italic`: the burn picks the real Comic Neue
+ *   BoldItalic face, so the preview slants the same way.
+ * The files ship in the repo (services/video-engine/fonts/ and
+ * apps/web/public/fonts/, see scripts/sync-fonts.sh).
+ */
+export interface StyleFont {
+  family: string
+  weight: number
+  style: 'normal' | 'italic'
+  file: string
+}
+
+export const CAPTION_STYLE_FONTS: Record<CaptionStyleId, StyleFont> = {
+  punchy: { family: 'Noto Sans Black', weight: 900, style: 'normal', file: 'NotoSans-Black.ttf' },
+  word_pop: { family: 'Noto Sans ExtraBold', weight: 800, style: 'normal', file: 'NotoSans-ExtraBold.ttf' },
+  title_card: { family: 'Noto Serif Black', weight: 900, style: 'normal', file: 'NotoSerif-Black.ttf' },
+  clean_subs: { family: 'Noto Sans', weight: 400, style: 'normal', file: 'NotoSans-Regular.ttf' },
+  classic: { family: 'Noto Serif Display', weight: 700, style: 'normal', file: 'NotoSerifDisplay-Bold.ttf' },
+  karaoke: { family: 'Noto Sans', weight: 700, style: 'normal', file: 'NotoSans-Bold.ttf' },
+  bounce: { family: 'Noto Sans Display', weight: 700, style: 'normal', file: 'NotoSansDisplay-Bold.ttf' },
+  typewriter: { family: 'Noto Sans Mono', weight: 700, style: 'normal', file: 'NotoSansMono-Bold.ttf' },
+  sweep: { family: 'Noto Sans SemiBold', weight: 600, style: 'normal', file: 'NotoSans-SemiBold.ttf' },
+  neon: { family: 'Noto Sans Condensed', weight: 700, style: 'normal', file: 'NotoSans-CondensedBold.ttf' },
+  slam: { family: 'Noto Sans ExtraCondensed Black', weight: 900, style: 'normal', file: 'NotoSans-ExtraCondensedBlack.ttf' },
+  outline: { family: 'Noto Sans Display Black', weight: 900, style: 'normal', file: 'NotoSansDisplay-Black.ttf' },
+  gradient: { family: 'Noto Sans Display ExtraBold', weight: 800, style: 'normal', file: 'NotoSansDisplay-ExtraBold.ttf' },
+  kinetic: { family: 'Noto Sans Medium', weight: 500, style: 'normal', file: 'NotoSans-Medium.ttf' },
+  glow_pop: { family: 'Noto Sans Light', weight: 300, style: 'normal', file: 'NotoSans-Light.ttf' },
+  word_zoom: { family: 'Noto Sans Display SemiBold', weight: 600, style: 'normal', file: 'NotoSansDisplay-SemiBold.ttf' },
+  word_fade: { family: 'Noto Sans Display Light', weight: 300, style: 'normal', file: 'NotoSansDisplay-Light.ttf' },
+  highlight_sweep: { family: 'Noto Sans Condensed Black', weight: 900, style: 'normal', file: 'NotoSans-CondensedBlack.ttf' },
+  bounce_in: { family: 'Noto Sans Display Condensed', weight: 700, style: 'normal', file: 'NotoSansDisplay-CondensedBold.ttf' },
+  glitch_pop: { family: 'DejaVu Sans Mono', weight: 700, style: 'normal', file: 'DejaVuSansMono-Bold.ttf' },
+  tiktok_bold: { family: 'Noto Sans ExtraCondensed', weight: 700, style: 'normal', file: 'NotoSans-ExtraCondensedBold.ttf' },
+  reels_clean: { family: 'DejaVu Sans', weight: 700, style: 'normal', file: 'DejaVuSans-Bold.ttf' },
+  shorts_minimal: { family: 'DejaVu Serif', weight: 700, style: 'normal', file: 'DejaVuSerif-Bold.ttf' },
+  comic: { family: 'Comic Neue', weight: 700, style: 'italic', file: 'ComicNeue-BoldItalic.otf' },
+  marker: { family: 'Caveat', weight: 700, style: 'normal', file: 'Caveat-Bold.ttf' },
+}
+
+/** The CleanSubs sub-style inside title_card shares clean_subs' font. */
+export const TITLE_CARD_SUB_FONT: StyleFont = CAPTION_STYLE_FONTS.clean_subs
+
+/** The typeface for one caption style (Punchy when unknown). */
+export function fontForCaptionStyle(id: CaptionStyleId): StyleFont {
+  return CAPTION_STYLE_FONTS[id] ?? CAPTION_STYLE_FONTS.punchy
+}
+
+export type HeadlineStyleId = 'bold_bar' | 'lower_third' | 'big_centre'
+
+export const HEADLINE_STYLE_FONTS: Record<HeadlineStyleId, StyleFont> = {
+  bold_bar: { family: 'Noto Serif', weight: 700, style: 'normal', file: 'NotoSerif-Bold.ttf' },
+  lower_third: { family: 'Noto Sans Display Condensed Black', weight: 900, style: 'normal', file: 'NotoSansDisplay-CondensedBlack.ttf' },
+  big_centre: { family: 'Noto Serif Display Black', weight: 900, style: 'normal', file: 'NotoSerifDisplay-Black.ttf' },
+}
+
+/** The typeface for one headline style (bold_bar when unknown). */
+export function fontForHeadlineStyle(id: HeadlineStyleId): StyleFont {
+  return HEADLINE_STYLE_FONTS[id] ?? HEADLINE_STYLE_FONTS.bold_bar
 }

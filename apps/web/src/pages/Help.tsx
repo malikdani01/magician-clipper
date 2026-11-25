@@ -39,7 +39,7 @@ export function HelpPage() {
         {[
           { to: '/clipper', label: 'Import & clip a video', icon: <Wand2 className="h-5 w-5" /> },
           { to: '/editor', label: 'Trim in the Studio Editor', icon: <Scissors className="h-5 w-5" /> },
-          { to: '/captions', label: 'Style animated captions', icon: <Captions className="h-5 w-5" /> },
+          { to: '/clipper', label: 'Style animated captions', icon: <Captions className="h-5 w-5" /> },
           { to: '/brand-kit', label: 'Set up your Brand Kit', icon: <Palette className="h-5 w-5" /> },
         ].map((g) => (
           <Link

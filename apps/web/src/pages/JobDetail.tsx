@@ -13,12 +13,14 @@ import {
   X,
 } from 'lucide-react'
 import { EmptyState } from '../components/EmptyState'
+import { BulkRerenderBar } from '../components/BulkRerenderBar'
 import { ClipFavouriteButton, ClipThumbnailPicker } from '../components/ClipActions'
 import { ClipPlayerModal } from '../components/ClipPlayerModal'
 import { ClipThumbnail } from '../components/ClipThumbnail'
 import { JobStatusPill, jobSummary } from '../components/JobStatusPill'
 import { PageHeader } from '../components/PageHeader'
 import { ScoreBreakdown } from '../components/ScoreBreakdown'
+import { ViralChecklist } from '../components/ViralChecklist'
 import { CaptionStylePicker } from '../components/StylePicker'
 import { CAPTION_STYLES, getCaptionStyle } from '../lib/captionStyles'
 import { formatBytes, formatDuration } from '../lib/format'
@@ -27,22 +29,33 @@ import {
   cancelJob,
   CAPTION_POSITION_LABELS,
   CAPTION_TRANSLATION_LABELS,
+  COLOUR_GRADE_LABELS,
+  createClipVariant,
+  defaultOstPosition,
   downloadClip,
   downloadClipAudio,
   getClipRerenders,
   getJob,
   HEADLINE_STYLE_LABELS,
+  LAYOUT_LABELS,
   OST_ANIMATION_LABELS,
+  OST_LANGUAGE_LABELS,
+  OST_POSITION_LABELS,
   requestClipRerender,
   retryJob,
   SELECTION_MODE_LABELS,
+  SFX_LABELS,
   type CaptionPosition,
   type CaptionTranslation,
+  type ClipLayout,
   type ClipRerender,
+  type ColourGrade,
   type HeadlineStyle,
   type Job,
   type JobClip,
   type OstAnimation,
+  type OstLanguage,
+  type Sfx,
 } from '../lib/jobs'
 import { useAuth } from '../state/auth'
 import { mapLaravelStatus, useProjects } from '../state/projects'
@@ -100,6 +113,28 @@ function settingRows(job: Job): Array<[string, string]> {
         (s.headline_style as HeadlineStyle | undefined) ?? 'bold_bar'
       ] ?? 'Bold bar (top)',
     ],
+    // Batch 9 (2026-11-25) — OST position is where the headline
+    // sits, independent of the style. Absent on older jobs means
+    // the style default, labelled as the default.
+    [
+      'OST position',
+      s.ost_position === 'top' || s.ost_position === 'centre' || s.ost_position === 'bottom'
+        ? OST_POSITION_LABELS[s.ost_position]
+        : `${OST_POSITION_LABELS[defaultOstPosition((s.headline_style as HeadlineStyle | undefined) ?? 'bold_bar')]} (default for ${HEADLINE_STYLE_LABELS[(s.headline_style as HeadlineStyle | undefined) ?? 'bold_bar']})`,
+    ],
+    // Batch 9 (2026-11-25) — SFX sting + music bed. Absent SFX
+    // means 'none'; a null bed name means no bed was uploaded.
+    [
+      'Sound effect (SFX)',
+      SFX_LABELS[(s.sfx as Sfx | undefined) ?? 'none'] ?? 'None',
+    ],
+    // Batch 9 (2026-11-25) — colour grade. Absent on older jobs
+    // means 'none': no filter, the render pipeline untouched.
+    [
+      'Colour grade',
+      COLOUR_GRADE_LABELS[(s.colour_grade as ColourGrade | undefined) ?? 'none'] ?? 'None (default)',
+    ],
+    ['Music bed', job.music_bed_name ?? 'No music bed'],
     [
       'Caption position',
       CAPTION_POSITION_LABELS[
@@ -115,6 +150,16 @@ function settingRows(job: Job): Array<[string, string]> {
       CAPTION_TRANSLATION_LABELS[
         (s.caption_translation as CaptionTranslation | undefined) ?? 'none'
       ] ?? 'None (original language)',
+    ],
+    // Batch 9 (2026-11-25) — OST language. Absent on older jobs means
+    // 'source': the headline stays in the video's own language, which
+    // is what the worker renders for them. Only the derived headline
+    // is translated — never the end card, tag or keyword pop-ups.
+    [
+      'OST language',
+      OST_LANGUAGE_LABELS[
+        (s.ost_language as OstLanguage | undefined) ?? 'source'
+      ] ?? 'Source language',
     ],
     [
       'Export ratios',
@@ -146,9 +191,12 @@ function settingRows(job: Job): Array<[string, string]> {
     ['Lower-third tag', s.lower_third_text?.trim() || 'Off'],
     ['Progress bar', s.progress_bar ? 'On' : 'Off'],
     ['Job type', s.job_type === 'campaign' ? 'For a campaign' : 'For myself'],
+    // Batch 9 (2026-11-25) — the old split-vs-centre-crop ternary
+    // lied about blur_fill (and every other layout): use the label
+    // for the stored layout, whatever it is.
     [
       'Layout',
-      s.layout === 'split' ? 'Split (streamer top / gameplay bottom)' : 'Centre crop',
+      LAYOUT_LABELS[(s.layout as ClipLayout | undefined) ?? 'center_crop'] ?? 'Centre crop',
     ],
     ['Content type', s.content_type],
     ['Quality', s.quality === 'draft' ? 'Draft preview' : s.quality === 'high' ? 'High quality' : 'Standard'],
@@ -349,6 +397,141 @@ function ClipRerenderControl({
 }
 
 /**
+ * Batch 9: create an A/B variant of one clip — a different caption
+ * style and/or headline style. The worker renders the SAME window
+ * and uploads a NEW clip (Variant B) instead of replacing this file;
+ * this polls the clip's re-render history until the variant row
+ * lands, then refreshes the job so Variant B appears next to this
+ * clip. A variant identical to the original is rejected by the
+ * server with an honest message.
+ */
+function ClipVariantControl({
+  clip,
+  onVariantReady,
+}: {
+  clip: JobClip
+  onVariantReady: () => void
+}) {
+  const [style, setStyle] = useState<string>('neon')
+  const [headline, setHeadline] = useState<string>('same')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [latest, setLatest] = useState<ClipRerender | null>(null)
+  const prevStatusRef = useRef<string | null>(null)
+
+  const refresh = useCallback(async () => {
+    const list = await getClipRerenders(clip.id)
+    const variant = list.find((r) => r.is_variant) ?? null
+    const prev = prevStatusRef.current
+    setLatest(variant)
+    prevStatusRef.current = variant?.status ?? null
+    if (
+      variant &&
+      (variant.status === 'ready' || variant.status === 'failed') &&
+      (prev === 'queued' || prev === 'processing')
+    ) {
+      onVariantReady()
+    }
+  }, [clip.id, onVariantReady])
+
+  useEffect(() => {
+    void refresh()
+    if (!latest || latest.status === 'queued' || latest.status === 'processing') {
+      const timer = setInterval(() => void refresh(), 5000)
+      return () => clearInterval(timer)
+    }
+    return undefined
+  }, [refresh, latest?.status])
+
+  const submit = async () => {
+    setSubmitting(true)
+    setError(null)
+    const result = await createClipVariant(
+      clip.id,
+      style,
+      headline === 'same' ? null : headline,
+    )
+    setSubmitting(false)
+    if (!result.ok) {
+      setError(result.error)
+      return
+    }
+    prevStatusRef.current = null
+    setLatest(result.rerender)
+  }
+
+  const inFlight = latest?.status === 'queued' || latest?.status === 'processing'
+
+  return (
+    <div className="mt-3 w-full rounded-xl border border-ink-border bg-ink-panel px-3 py-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-medium text-white">Create Variant B</span>
+        <label className="flex items-center gap-1.5 text-xs text-[var(--color-text-muted)]">
+          Captions
+          <select
+            value={style}
+            onChange={(e) => setStyle(e.target.value)}
+            disabled={submitting || inFlight}
+            aria-label="Caption style for the variant"
+            className="rounded-lg border border-ink-border bg-ink-panel2 px-2 py-1.5 text-xs text-white disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {CAPTION_STYLES.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-1.5 text-xs text-[var(--color-text-muted)]">
+          Headline
+          <select
+            value={headline}
+            onChange={(e) => setHeadline(e.target.value)}
+            disabled={submitting || inFlight}
+            aria-label="Headline style for the variant (optional)"
+            className="rounded-lg border border-ink-border bg-ink-panel2 px-2 py-1.5 text-xs text-white disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <option value="same">Same as original</option>
+            {(Object.keys(HEADLINE_STYLE_LABELS) as HeadlineStyle[]).map((h) => (
+              <option key={h} value={h}>
+                {HEADLINE_STYLE_LABELS[h]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          onClick={() => void submit()}
+          disabled={submitting || inFlight}
+          className="flex items-center gap-1.5 rounded-lg btn-aurora px-3 py-1.5 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {submitting ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <RotateCcw className="h-3.5 w-3.5" />
+          )}
+          {inFlight ? 'Rendering variant…' : 'Create variant'}
+        </button>
+      </div>
+      {latest ? (
+        <p className="mt-1.5 text-xs text-[var(--color-text-muted)]">
+          {latest.status === 'ready'
+            ? `Variant B ready with ${getCaptionStyle(latest.caption_style).name} — it appears next to this clip.`
+            : latest.status === 'failed'
+              ? `Variant failed${latest.error_message ? `: ${latest.error_message}` : '.'}`
+              : `Variant ${latest.status} with ${getCaptionStyle(latest.caption_style).name}…`}
+        </p>
+      ) : null}
+      {error ? (
+        <p role="alert" className="mt-1.5 text-xs text-red-300">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+/**
  * Copy-to-clipboard button with a brief "Copied" state. Falls back to
  * a hidden textarea when the Clipboard API is unavailable.
  */
@@ -448,6 +631,15 @@ export function JobDetailPage() {
   const [audioDownloadingId, setAudioDownloadingId] = useState<number | null>(null)
   const [audioError, setAudioError] = useState<string | null>(null)
   const [previewingClip, setPreviewingClip] = useState<JobClip | null>(null)
+  // Batch 9: bulk re-render selection (checkboxes on the clip cards).
+  const [selectedClips, setSelectedClips] = useState<ReadonlySet<number>>(new Set())
+  const toggleClipSelected = (id: number) =>
+    setSelectedClips((current) => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
   const requestRef = useRef(0)
 
   const fetchJob = useCallback(async () => {
@@ -609,6 +801,25 @@ export function JobDetailPage() {
   const isTerminal = job.status === 'ready' || job.status === 'failed' || job.status === 'cancelled'
   const hasProgress = typeof job.progress === 'number'
 
+  // Batch 9: Variant B clips render directly after their Variant A
+  // (originals best-viral-score first, variants in id order). A
+  // variant whose parent is missing still shows, at the end, instead
+  // of vanishing.
+  const orderedClips = (() => {
+    const originals = [...job.clips]
+      .filter((c) => c.variant_of_clip_id == null)
+      .sort((a, b) => (b.score ?? -1) - (a.score ?? -1))
+    const ordered = originals.flatMap((o) => [
+      o,
+      ...job.clips
+        .filter((v) => v.variant_of_clip_id === o.id)
+        .sort((a, b) => a.id - b.id),
+    ])
+    const seen = new Set(ordered.map((c) => c.id))
+    ordered.push(...job.clips.filter((c) => !seen.has(c.id)))
+    return ordered
+  })()
+
   return (
     <div>
       <PageHeader
@@ -679,7 +890,7 @@ export function JobDetailPage() {
                   </button>
                 ) : null}
                 <Link
-                  to={`/jobs/new?clone=${job.id}`}
+                  to={`/clipper?clone=${job.id}`}
                   title="Copy this job's settings into a new job. You will pick the video again — the old source is not reused."
                   className="flex items-center gap-2 rounded-xl border border-ink-border bg-ink-panel2 px-4 py-2.5 text-sm font-semibold text-white hover:bg-ink-border"
                 >
@@ -800,6 +1011,12 @@ export function JobDetailPage() {
                 Shorter clips or a longer, talk-heavy source fits more.
               </p>
             ) : null}
+            {selectedClips.size > 0 ? (
+              <BulkRerenderBar
+                clipIds={[...selectedClips]}
+                onDone={() => void fetchJob()}
+              />
+            ) : null}
             {job.clips.length === 0 ? (
               <p className="mt-3 text-sm text-[var(--color-text-muted)]">
                 {job.status === 'ready'
@@ -810,8 +1027,7 @@ export function JobDetailPage() {
               </p>
             ) : (
               <ul className="mt-4 space-y-3">
-                {[...job.clips]
-                  .sort((a, b) => (b.score ?? -1) - (a.score ?? -1))
+                {orderedClips
                   .map((clip) => {
                     const viral = viralScore(clip.score)
                     return (
@@ -819,6 +1035,13 @@ export function JobDetailPage() {
                     key={clip.id}
                     className="aurora-card flex flex-wrap items-center gap-4 rounded-xl border border-ink-border bg-ink-panel2 p-4"
                   >
+                    <input
+                      type="checkbox"
+                      checked={selectedClips.has(clip.id)}
+                      onChange={() => toggleClipSelected(clip.id)}
+                      aria-label={`Select ${clip.title} for bulk re-render`}
+                      className="h-4 w-4 shrink-0 accent-fuchsia-500"
+                    />
                     <ClipThumbnail
                       clipId={clip.id}
                       hasThumbnail={clip.thumbnail_path != null}
@@ -837,7 +1060,14 @@ export function JobDetailPage() {
                       </span>
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="truncate font-semibold text-white">{clip.title}</p>
+                      <p className="truncate font-semibold text-white">
+                        {clip.title}
+                        {clip.variant_of_clip_id != null ? (
+                          <span className="ml-2 rounded-full border border-fuchsia-500/40 bg-fuchsia-500/10 px-2 py-0.5 align-middle text-[10px] font-semibold text-fuchsia-300">
+                            Variant B
+                          </span>
+                        ) : null}
+                      </p>
                       {viral.value != null ? (
                         <p className="mt-0.5 text-xs font-medium text-[var(--color-text-muted)]">
                           {viral.label}
@@ -862,11 +1092,18 @@ export function JobDetailPage() {
                         </p>
                       ) : null}
                       <ScoreBreakdown breakdown={clip.score_breakdown} />
+                      <ViralChecklist clip={clip} job={job} />
                     </div>
                     <ClipRerenderControl
                       clip={clip}
                       onRerendered={() => void fetchJob()}
                     />
+                    {clip.variant_of_clip_id == null ? (
+                      <ClipVariantControl
+                        clip={clip}
+                        onVariantReady={() => void fetchJob()}
+                      />
+                    ) : null}
                     <button
                       type="button"
                       onClick={() => setPreviewingClip(clip)}

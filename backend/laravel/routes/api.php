@@ -93,6 +93,12 @@ Route::prefix('v1')->group(function () {
         Route::patch('/clips/{clip}', [ClipController::class, 'update']);
         Route::post('/clips/{clip}/render', [ClipController::class, 'render'])
             ->middleware('throttle:6,1');
+        // Batch 9: bulk re-render (before /clips/{clip} captures) +
+        // A/B variants of one clip.
+        Route::post('/clips/bulk-rerender', [ClipController::class, 'bulkRerender'])
+            ->middleware('throttle:6,1');
+        Route::post('/clips/{clip}/variants', [ClipController::class, 'createVariant'])
+            ->middleware('throttle:6,1');
         Route::get('/clips/{clip}/rerenders', [ClipController::class, 'rerenders']);
         // Batch 4: favourite toggle, thumbnail picker, candidate frames.
         Route::patch('/clips/{clip}/favourite', [ClipController::class, 'toggleFavourite']);
@@ -136,6 +142,18 @@ Route::prefix('v1')->group(function () {
             Route::get('/clips', [AdminController::class, 'clips']);
             Route::post('/jobs/{job}/retry', [AdminController::class, 'retryJob']);
             Route::post('/jobs/{job}/cancel', [AdminController::class, 'cancelJob']);
+            // Batch 9: the admin changes their own email + password
+            // in Admin Panel → Settings. Throttled: it verifies a
+            // password, so brute-forcing it must be expensive.
+            Route::patch('/settings/credentials', [AdminController::class, 'updateCredentials'])
+                ->middleware('throttle:5,1');
+            // Batch 9: database backup & restore (deploy-safety).
+            // Create is throttled: a dump is real server work.
+            // Restore stays an artisan command — no panel endpoint.
+            Route::get('/backup', [AdminController::class, 'backupInfo']);
+            Route::post('/backup', [AdminController::class, 'createBackup'])
+                ->middleware('throttle:5,1');
+            Route::get('/backup/download', [AdminController::class, 'downloadBackup']);
             Route::get('/system/health', [AdminController::class, 'health']);
             Route::get('/system/logs', [AdminController::class, 'logs']);
         });
@@ -150,6 +168,9 @@ Route::prefix('v1')->group(function () {
         Route::get('/jobs', [MuseJobController::class, 'index']);
         Route::get('/jobs/{job}', [MuseJobController::class, 'show']);
         Route::get('/jobs/{job}/source', [MuseJobController::class, 'source']);
+        // Batch 9: the worker downloads the job's music bed here
+        // (404 when no bed was uploaded).
+        Route::get('/jobs/{job}/music-bed', [MuseJobController::class, 'musicBed']);
         Route::get('/brand-assets/{asset}/download', [MuseJobController::class, 'downloadBrandAsset']);
         Route::patch('/jobs/{job}/status', [MuseJobController::class, 'updateStatus']);
         Route::post('/jobs/{job}/clips', [MuseJobController::class, 'storeClip'])
@@ -158,6 +179,10 @@ Route::prefix('v1')->group(function () {
         Route::get('/rerenders', [MuseJobController::class, 'listRerenders']);
         Route::patch('/rerenders/{rerender}/status', [MuseJobController::class, 'updateRerenderStatus']);
         Route::post('/clips/{clip}/file', [MuseJobController::class, 'replaceClipFile'])
+            ->middleware('throttle:30,1');
+        // Batch 9: an A/B variant render uploads as a NEW clip row
+        // (Variant B) instead of replacing the original in place.
+        Route::post('/clips/{clip}/variant-file', [MuseJobController::class, 'uploadVariantClip'])
             ->middleware('throttle:30,1');
     });
 });

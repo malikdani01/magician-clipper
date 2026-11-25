@@ -163,7 +163,7 @@ class MuseJobApiTest extends TestCase
     {
         // Job creation is throttled (6/min per user), so each layout gets
         // its own user — the point is the layout validation, not the limit.
-        foreach (['center_crop', 'split', 'pip_facecam', 'blur_fill', 'streamer_full'] as $layout) {
+        foreach (['center_crop', 'split', 'pip_facecam', 'blur_fill', 'streamer_full', 'gradient_fill', 'stacked', 'letterbox', 'face_closeup', 'framed'] as $layout) {
             $user = User::factory()->create();
             $job = $this->createLinkJob($user, ['layout' => $layout]);
 

@@ -26,6 +26,7 @@ import {
 } from 'lucide-react'
 import { API_URL, engineHealth, getToken, laravelHealth } from '../../lib/api'
 import { formatBytes } from '../../lib/format'
+import { useAuth } from '../../state/auth'
 import { AreaChart } from '../../components/charts'
 import { EmptyState } from '../../components/EmptyState'
 import { NotImplemented } from '../../components/NotImplemented'
@@ -1596,6 +1597,424 @@ interface AdminPageProps {
   billingNotEnabled?: boolean
 }
 
+/* ------------------------------------------------------------------ */
+/* Admin Settings — admin credentials (Batch 9)                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The signed-in admin changes their OWN email + password here.
+ * Each Save replaces the previous credentials and the old ones stop
+ * working. The seeder never touches credentials after the first
+ * admin exists, so a change made here survives deploys. The current
+ * password must be proven first; the current session stays signed
+ * in. No credential value is ever displayed back.
+ */
+function AdminCredentialsSection({ title, subtitle }: { title: string; subtitle: string }) {
+  const { user } = useAuth()
+  const [currentPassword, setCurrentPassword] = useState('')
+  const [newEmail, setNewEmail] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [message, setMessage] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
+  const [saving, setSaving] = useState(false)
+
+  // Prefill the new-email field with the signed-in admin's email —
+  // changing only the password means leaving this untouched.
+  useEffect(() => {
+    if (user?.email) setNewEmail(user.email)
+  }, [user?.email])
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setMessage(null)
+    setError(null)
+    setFieldErrors({})
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail.trim())) {
+      setFieldErrors({ new_email: 'Enter a valid email address.' })
+      return
+    }
+    if (newPassword.length < 8) {
+      setFieldErrors({ new_password: 'New password must be at least 8 characters.' })
+      return
+    }
+    if (newPassword !== confirmPassword) {
+      setFieldErrors({ new_password_confirmation: 'New passwords do not match.' })
+      return
+    }
+    const token = getToken()
+    if (!token) {
+      setError('Sign in again — your session expired.')
+      return
+    }
+    setSaving(true)
+    try {
+      const res = await fetch(`${API_URL}/admin/settings/credentials`, {
+        method: 'PATCH',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          current_password: currentPassword,
+          new_email: newEmail.trim(),
+          new_password: newPassword,
+          new_password_confirmation: confirmPassword,
+        }),
+      })
+      const body = (await res.json().catch(() => null)) as {
+        message?: unknown
+        errors?: Record<string, string[]>
+      } | null
+      if (!res.ok) {
+        if (body?.errors) {
+          const first: Record<string, string> = {}
+          for (const [key, messages] of Object.entries(body.errors)) {
+            if (messages.length > 0) first[key] = messages[0]
+          }
+          setFieldErrors(first)
+          setError(
+            typeof body.message === 'string' && body.message
+              ? body.message
+              : 'Could not update credentials.',
+          )
+        } else {
+          setError(
+            typeof body?.message === 'string' && body.message
+              ? body.message
+              : `Could not update credentials (HTTP ${res.status}).`,
+          )
+        }
+        return
+      }
+      setMessage('Credentials updated — use the new email and password next time you sign in.')
+      setCurrentPassword('')
+      setNewPassword('')
+      setConfirmPassword('')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not reach the backend.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const inputClass =
+    'mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)] focus:border-brand focus:outline-none disabled:cursor-not-allowed disabled:opacity-50'
+
+  return (
+    <div>
+      <PageHeader title={title} subtitle={subtitle} />
+      <div className="max-w-lg rounded-2xl border border-ink-border bg-ink-panel p-6">
+        <h2 className="flex items-center gap-2 text-lg font-semibold text-white">
+          <ShieldCheck className="h-5 w-5 text-brand-light" /> Admin credentials
+        </h2>
+        <p className="mt-2 text-sm text-[var(--color-text-muted)]">
+          Change the admin sign-in email and password. Saving replaces the previous
+          credentials — the old ones stop working immediately, and the change survives
+          deploys. You stay signed in.
+        </p>
+        <form onSubmit={onSubmit} className="mt-5 space-y-4" noValidate>
+          <label className="block">
+            <span className="text-sm font-medium text-white">Current password</span>
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+              disabled={saving}
+              className={inputClass}
+            />
+            {fieldErrors.current_password ? (
+              <span className="mt-1 block text-sm text-red-300">{fieldErrors.current_password}</span>
+            ) : null}
+          </label>
+          <label className="block">
+            <span className="text-sm font-medium text-white">New email</span>
+            <input
+              type="email"
+              autoComplete="email"
+              value={newEmail}
+              onChange={(e) => setNewEmail(e.target.value)}
+              disabled={saving}
+              className={inputClass}
+            />
+            {fieldErrors.new_email ? (
+              <span className="mt-1 block text-sm text-red-300">{fieldErrors.new_email}</span>
+            ) : null}
+          </label>
+          <label className="block">
+            <span className="text-sm font-medium text-white">New password</span>
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              disabled={saving}
+              className={inputClass}
+            />
+            {fieldErrors.new_password ? (
+              <span className="mt-1 block text-sm text-red-300">{fieldErrors.new_password}</span>
+            ) : null}
+          </label>
+          <label className="block">
+            <span className="text-sm font-medium text-white">Confirm new password</span>
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              disabled={saving}
+              className={inputClass}
+            />
+            {fieldErrors.new_password_confirmation ? (
+              <span className="mt-1 block text-sm text-red-300">{fieldErrors.new_password_confirmation}</span>
+            ) : null}
+          </label>
+          {message ? <p className="text-sm text-emerald-300">{message}</p> : null}
+          {error ? <p className="text-sm text-red-300">{error}</p> : null}
+          <button
+            type="submit"
+            disabled={saving}
+            className="rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save credentials'}
+          </button>
+        </form>
+      </div>
+      <p className="mt-4 max-w-lg text-sm text-[var(--color-text-muted)]">
+        Platform-wide settings (site name, AI, FFmpeg and the rest) are not built yet —
+        their pages say so honestly. The credentials form and the Backup &amp; Restore
+        section below are the live settings here.
+      </p>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Backup & Restore (Batch 9, 2026-11-25 — deploy-safety work)         */
+/* ------------------------------------------------------------------ */
+
+interface BackupInfo {
+  filename: string
+  size_bytes: number
+  created_at: string
+  driver: string
+  method: string | null
+  cloud_key: string | null
+  cloud_error: string | null
+  location: string
+}
+
+interface BackupPayload {
+  backup: BackupInfo | null
+  cloud_configured: boolean
+  restore_command: string
+}
+
+function AdminBackupSection() {
+  const { data, loading, error, retry } = useAdminFetch<BackupPayload>('/admin/backup')
+  // A backup created from this section replaces the fetched one until
+  // the next reload — same pattern as the credentials success message.
+  const [created, setCreated] = useState<BackupInfo | null>(null)
+  const [restoreCommand, setRestoreCommand] = useState<string | null>(null)
+  const [cloudConfigured, setCloudConfigured] = useState<boolean | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const [creating, setCreating] = useState(false)
+  const [downloading, setDownloading] = useState(false)
+
+  const latest = created ?? data?.backup ?? null
+  const cloud = cloudConfigured ?? data?.cloud_configured ?? false
+  const restoreCmd = restoreCommand ?? data?.restore_command ?? null
+
+  async function onCreate() {
+    setMessage(null)
+    setErrorMsg(null)
+    const token = getToken()
+    if (!token) {
+      setErrorMsg('Sign in again — your session expired.')
+      return
+    }
+    setCreating(true)
+    try {
+      const res = await fetch(`${API_URL}/admin/backup`, {
+        method: 'POST',
+        headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
+      })
+      const body = (await res.json().catch(() => null)) as {
+        message?: unknown
+        backup?: BackupInfo
+        restore_command?: string
+        cloud_configured?: boolean
+      } | null
+      if (!res.ok) {
+        setErrorMsg(
+          typeof body?.message === 'string' && body.message
+            ? body.message
+            : `Could not create a backup (HTTP ${res.status}).`,
+        )
+        return
+      }
+      if (body?.backup) {
+        setCreated(body.backup)
+        if (body.restore_command) setRestoreCommand(body.restore_command)
+        if (typeof body.cloud_configured === 'boolean') setCloudConfigured(body.cloud_configured)
+      }
+      setMessage('Backup created.')
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Could not reach the backend.')
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  async function onDownload() {
+    if (!latest) return
+    setErrorMsg(null)
+    const token = getToken()
+    if (!token) {
+      setErrorMsg('Sign in again — your session expired.')
+      return
+    }
+    setDownloading(true)
+    try {
+      const res = await fetch(`${API_URL}/admin/backup/download`, {
+        headers: { Accept: 'application/gzip', Authorization: `Bearer ${token}` },
+      })
+      if (!res.ok) {
+        setErrorMsg('Could not download the backup — create a fresh one and try again.')
+        return
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = latest.filename
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Could not reach the backend.')
+    } finally {
+      setDownloading(false)
+    }
+  }
+
+  return (
+    <div className="mt-8 max-w-lg rounded-2xl border border-ink-border bg-ink-panel p-6">
+      <h2 className="flex items-center gap-2 text-lg font-semibold text-white">
+        <Server className="h-5 w-5 text-brand-light" /> Backup &amp; Restore
+      </h2>
+      <p className="mt-2 text-sm text-[var(--color-text-muted)]">
+        Backups cover the <strong className="text-white">database only</strong> — jobs, clips
+        metadata, settings, presets, users and brand asset records. Clip, upload and
+        brand-asset <strong className="text-white">files are not included</strong>; they live on
+        the server disk and are wiped on deploy. Use Cloud Storage (Settings → Cloud
+        Storage) for those.
+      </p>
+
+      {loading ? (
+        <p className="mt-4 text-sm text-[var(--color-text-muted)]">Loading backup info…</p>
+      ) : error ? (
+        <div className="mt-4">
+          <LoadError error={error} onRetry={retry} />
+        </div>
+      ) : latest ? (
+        <dl className="mt-4 space-y-1 text-sm">
+          <div className="flex justify-between gap-4">
+            <dt className="text-[var(--color-text-muted)]">Latest backup</dt>
+            <dd className="text-right font-mono text-xs text-white">{latest.filename}</dd>
+          </div>
+          <div className="flex justify-between gap-4">
+            <dt className="text-[var(--color-text-muted)]">Created</dt>
+            <dd className="text-white">{formatDate(latest.created_at)}</dd>
+          </div>
+          <div className="flex justify-between gap-4">
+            <dt className="text-[var(--color-text-muted)]">Size</dt>
+            <dd className="text-white">{formatBytes(latest.size_bytes)}</dd>
+          </div>
+          <div className="flex justify-between gap-4">
+            <dt className="text-[var(--color-text-muted)]">Stored</dt>
+            <dd className="text-white">
+              {latest.location === 'local+cloud' ? 'Local disk + cloud bucket' : 'Local disk only'}
+              {latest.method ? ` (${latest.method})` : ''}
+            </dd>
+          </div>
+          {latest.cloud_error ? (
+            <p className="pt-1 text-sm text-amber-300">
+              Cloud upload failed for this backup: {latest.cloud_error} The local file is fine —
+              download it.
+            </p>
+          ) : null}
+        </dl>
+      ) : (
+        <p className="mt-4 text-sm text-[var(--color-text-muted)]">
+          No backup exists yet — create one first.
+        </p>
+      )}
+
+      {cloud ? (
+        <p className="mt-4 text-sm text-[var(--color-text-muted)]">
+          Cloud storage is configured — new backups are also uploaded to your bucket.
+        </p>
+      ) : (
+        <p className="mt-4 text-sm text-[var(--color-text-muted)]">
+          Cloud storage is not configured — backups sit on this server&apos;s disk under{' '}
+          <code className="font-mono text-xs text-white">storage/app/backups</code> and are
+          wiped on deploy, so download each backup and keep it somewhere safe.
+        </p>
+      )}
+
+      {message ? <p className="mt-4 text-sm text-emerald-300">{message}</p> : null}
+      {errorMsg ? <p className="mt-4 text-sm text-red-300">{errorMsg}</p> : null}
+      <div className="mt-4 flex flex-wrap gap-3">
+        <button
+          type="button"
+          onClick={onCreate}
+          disabled={creating}
+          className="rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {creating ? 'Creating backup…' : 'Create backup now'}
+        </button>
+        <button
+          type="button"
+          onClick={onDownload}
+          disabled={!latest || downloading}
+          className="rounded-xl border border-ink-border bg-ink-panel2 px-5 py-2.5 text-sm font-medium text-white hover:bg-ink-border disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {downloading ? 'Downloading…' : 'Download backup'}
+        </button>
+      </div>
+
+      {restoreCmd ? (
+        <div className="mt-5">
+          <p className="text-sm font-medium text-white">Restore</p>
+          <p className="mt-1 text-sm text-[var(--color-text-muted)]">
+            Restore is a server command, not a button — a web request can time out mid-restore
+            and corrupt data. Run it in the Render shell (or locally). It takes a fresh safety
+            backup first and needs <code className="font-mono text-xs text-white">--force</code>.
+          </p>
+          <code className="mt-2 block overflow-x-auto rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2 font-mono text-xs text-white">
+            {restoreCmd}
+          </code>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+export function AdminSettingsPage() {
+  return (
+    <>
+      <AdminCredentialsSection title="Admin Settings" subtitle="Platform-wide admin configuration." />
+      <AdminBackupSection />
+    </>
+  )
+}
+
 export function AdminGenericPage({ title, subtitle }: AdminPageProps) {
   const { pathname } = useLocation()
 
@@ -1669,14 +2088,7 @@ export function AdminGenericPage({ title, subtitle }: AdminPageProps) {
     case '/admin/reports':
       return <ReportsSection title={title} subtitle={subtitle} />
     case '/admin/settings':
-      return (
-        <DisabledSettingsSection
-          title={title}
-          subtitle={subtitle}
-          icon={<Settings className="h-5 w-5 text-brand-light" />}
-          intro="Platform-wide admin configuration lives here once a backend settings endpoint exists."
-        />
-      )
+      return <AdminCredentialsSection title={title} subtitle={subtitle} />
     default:
       return (
         <div>

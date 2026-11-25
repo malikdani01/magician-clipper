@@ -138,6 +138,10 @@ class ProcessingJob extends Model
         'source_type',
         'source_url',
         'source_path',
+        // Batch 9: optional music bed (nullable path + original
+        // name; both null when no bed was uploaded).
+        'music_bed_path',
+        'music_bed_name',
         // Batch 5: which disk the source file lives on ('local' or
         // 'cloud'). Defaults to 'local'.
         'disk',
@@ -265,6 +269,11 @@ class ProcessingJob extends Model
                 // clips) and the favourite flag.
                 'thumbnail_candidates' => $clip->thumbnail_candidates,
                 'is_favourite' => (bool) $clip->is_favourite,
+                // Batch 9: face tracking as reported by the worker
+                // (false when it did not send it) and the Variant B
+                // link (null = this clip is an original).
+                'face_tracked' => (bool) $clip->face_tracked,
+                'variant_of_clip_id' => $clip->variant_of_clip_id,
                 'caption_style' => $clip->caption_style ?? $jobStyle,
                 'download_url' => url("/api/v1/clips/{$clip->id}/download"),
                 'created_at' => $clip->created_at,
@@ -281,6 +290,11 @@ class ProcessingJob extends Model
             'settings' => $this->settings,
             'source_type' => $this->source_type,
             'source_url' => $this->source_url,
+            // Batch 9: the music bed's original file name (null =
+            // no bed uploaded). The internal storage path is never
+            // exposed here; the worker downloads over the muse
+            // music-bed endpoint instead.
+            'music_bed_name' => $this->music_bed_name,
             'clips' => $clips,
             'error_code' => $this->error_code,
             'error_message' => $this->error_message,
