@@ -7,6 +7,7 @@ import { useAuth } from '../state/auth'
 import { useProjects } from '../state/projects'
 import { NotImplemented } from '../components/NotImplemented'
 import { CloudStorageForm } from '../components/CloudStorageForm'
+import { usePlatform } from '../lib/platform'
 import { LANGUAGES, THEMES, type TranslationKey } from '../lib/i18n'
 import { usePreferences } from '../state/preferences'
 import { PageHeader } from '../components/PageHeader'
@@ -80,6 +81,12 @@ export function SettingsPage() {
   const { theme, language, setTheme, setLanguage, t } = usePreferences()
   const { projects } = useProjects()
   const [tab, setTab] = useState<SettingsTab>('profile')
+  // Batch 10 (2026-11-25): platform gating — the Cloud Storage tab
+  // is hidden when cloud storage is off (loading/unavailable shows
+  // everything, as everywhere else).
+  const { platform } = usePlatform()
+  const cloudOff = platform?.features.cloud_storage === false
+  const visibleTabs = cloudOff ? TABS.filter((t) => t.id !== 'cloud') : TABS
   const [local, setLocal] = useState<LocalSettings>(loadLocal)
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
@@ -241,7 +248,7 @@ export function SettingsPage() {
             role="tablist"
             aria-label="Settings sections"
           >
-            {TABS.map((tabItem) => (
+            {visibleTabs.map((tabItem) => (
               <button
                 key={tabItem.id}
                 type="button"
@@ -520,7 +527,13 @@ export function SettingsPage() {
         ) : null}
 
         {tab === 'cloud' ? (
-          <CloudStorageForm />
+          cloudOff ? (
+            <p className="text-sm text-[var(--color-text-muted)]">
+              Cloud storage is disabled by the admin.
+            </p>
+          ) : (
+            <CloudStorageForm />
+          )
         ) : null}
 
         {tab === 'billing' ? (

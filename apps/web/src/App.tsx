@@ -19,6 +19,9 @@ import { RegisterPage } from './pages/Register'
 import { SettingsPage } from './pages/Settings'
 import { UsagePage } from './pages/Usage'
 import { AdminDashboardPage, AdminGenericPage, AdminSettingsPage } from './pages/admin/AdminPages'
+import { AdminClipsPage, AdminFailedJobsPage, AdminJobsPage, AdminProjectsPage, AdminUserDetailPage, AdminUsersPage } from './pages/admin/AdminUsers'
+import { AdminPlatformPage } from './pages/admin/AdminPlatform'
+import { AdminLogsPage, AdminMonitorPage, AdminNotificationsPage, AdminReportsPage } from './pages/admin/AdminSystem'
 
 /**
  * Batch 9 (2026-11-25): the hidden creation/list pages redirect to
@@ -67,11 +70,17 @@ export function App() {
               non-admins get a 403, signed-out visitors get a sign-in notice. */}
           <Route path="admin" element={<AdminLayout />}>
             <Route index element={<AdminDashboardPage />} />
-            <Route path="users" element={<AdminGenericPage title="Users Management" subtitle="All registered users." />} />
-            <Route path="projects" element={<AdminGenericPage title="Projects" subtitle="Every project on the platform." />} />
-            <Route path="clips" element={<AdminGenericPage title="Generated Clips" subtitle="Every clip the engine has generated." />} />
-            <Route path="jobs" element={<AdminGenericPage title="Processing Jobs" subtitle="Jobs in the processing queue." />} />
-            <Route path="failed-jobs" element={<AdminGenericPage title="Failed Jobs" subtitle="Jobs that failed, with their errors." />} />
+            {/* Batch 10: full admin pages (users, projects, clips, jobs,
+                failed jobs, platform controls, notifications, logs,
+                monitor, reports). The remaining routes stay honest
+                placeholders until their backend exists. */}
+            <Route path="users" element={<AdminUsersPage />} />
+            <Route path="users/:id" element={<AdminUserDetailPage />} />
+            <Route path="projects" element={<AdminProjectsPage />} />
+            <Route path="clips" element={<AdminClipsPage />} />
+            <Route path="jobs" element={<AdminJobsPage />} />
+            <Route path="failed-jobs" element={<AdminFailedJobsPage />} />
+            <Route path="platform" element={<AdminPlatformPage />} />
             <Route
               path="payments"
               element={<AdminGenericPage title="Payments & Billing" subtitle="Payments and invoices." billingNotEnabled />}
@@ -87,11 +96,11 @@ export function App() {
             <Route path="opencv" element={<AdminGenericPage title="OpenCV Settings" subtitle="Scene detection and face tracking settings." />} />
             <Route path="queue" element={<AdminGenericPage title="Queue & Worker Settings" subtitle="Queue, workers and concurrency." />} />
             <Route path="website" element={<AdminGenericPage title="Website Settings" subtitle="Site name, branding and public pages." />} />
-            <Route path="notifications" element={<AdminGenericPage title="Notifications" subtitle="Platform notifications and templates." />} />
+            <Route path="notifications" element={<AdminNotificationsPage />} />
             <Route path="tickets" element={<AdminGenericPage title="Support Tickets" subtitle="User support requests." />} />
-            <Route path="logs" element={<AdminGenericPage title="System Logs" subtitle="Application and worker logs." />} />
-            <Route path="monitor" element={<AdminGenericPage title="Server Monitor" subtitle="CPU, RAM, disk and queue health." />} />
-            <Route path="reports" element={<AdminGenericPage title="Reports & Analytics" subtitle="Usage, revenue and growth reports." />} />
+            <Route path="logs" element={<AdminLogsPage />} />
+            <Route path="monitor" element={<AdminMonitorPage />} />
+            <Route path="reports" element={<AdminReportsPage />} />
             <Route path="settings" element={<AdminSettingsPage />} />
           </Route>
 

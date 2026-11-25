@@ -5,6 +5,8 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Models\CloudStorageSetting;
 use App\Support\MediaStorage;
+use App\Support\PlatformGate;
+use App\Support\PlatformSettings;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
@@ -36,6 +38,11 @@ class CloudStorageController extends Controller
 
     public function update(Request $request)
     {
+        // Batch 10: cloud storage is an admin-controlled feature.
+        if (! PlatformSettings::feature('cloud_storage')) {
+            return PlatformGate::featureDenied('cloud_storage', 'Cloud storage is disabled by the admin.');
+        }
+
         $validated = $request->validate([
             'provider' => ['required', 'string', Rule::in(CloudStorageSetting::PROVIDERS)],
             // R2 and custom endpoints need an endpoint URL; plain AWS
@@ -99,6 +106,12 @@ class CloudStorageController extends Controller
      */
     public function test(Request $request)
     {
+        // Batch 10: cloud storage is an admin-controlled feature —
+        // testing a disabled feature is refused the same way.
+        if (! PlatformSettings::feature('cloud_storage')) {
+            return PlatformGate::featureDenied('cloud_storage', 'Cloud storage is disabled by the admin.');
+        }
+
         $settings = CloudStorageSetting::where('user_id', $request->user()->id)->first();
         if ($settings === null) {
             return response()->json([

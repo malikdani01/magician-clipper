@@ -4,6 +4,8 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Models\BrandAsset;
+use App\Support\PlatformGate;
+use App\Support\PlatformSettings;
 use App\Support\VideoProbe;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
@@ -41,6 +43,15 @@ class BrandAssetController extends Controller
             'kind' => ['required', 'string', Rule::in(BrandAsset::KINDS)],
         ]);
         $kind = $request->input('kind');
+
+        // Batch 10: logo upload needs the logo-overlay feature;
+        // intro/outro upload needs the intro/outro feature.
+        if ($kind === BrandAsset::KIND_LOGO && ! PlatformSettings::feature('logo_overlay')) {
+            return PlatformGate::featureDenied('logo_overlay', 'Logo overlay is disabled by the admin.');
+        }
+        if ($kind !== BrandAsset::KIND_LOGO && ! PlatformSettings::feature('intro_outro')) {
+            return PlatformGate::featureDenied('intro_outro', 'Intro and outro videos are disabled by the admin.');
+        }
 
         $validated = $request->validate([
             'file' => $kind === BrandAsset::KIND_LOGO

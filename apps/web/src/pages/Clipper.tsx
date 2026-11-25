@@ -51,6 +51,7 @@ import {
   type Sfx,
 } from '../lib/jobs'
 import { getCaptionStyle, isCaptionStyleId, translateLegacyCaptionPreset } from '../lib/captionStyles'
+import { usePlatform } from '../lib/platform'
 import { createPreset, listPresets, type JobPreset, type PresetSettings } from '../lib/presets'
 import { useAuth } from '../state/auth'
 import {
@@ -464,6 +465,46 @@ export function ClipperPage() {
     durationError === null &&
     durationRangeError === null &&
     !campaignInvalid
+  // Batch 10 (2026-11-25): platform gating. A feature is off ONLY
+  // when the payload says so (`=== false`) — while the payload is
+  // loading or unavailable, every control renders unchanged (never
+  // hide on a loading state). The backend enforces the same rules;
+  // the `gated*` values below are what the submitted payload sends,
+  // so a disabled setting can never go out as enabled.
+  const { platform } = usePlatform()
+  const captionsOff = platform?.features.captions === false
+  const ostOff = platform?.features.on_screen_text === false
+  const beatSyncOff = platform?.features.beat_sync === false
+  const translationOff = platform?.features.translation === false
+  const logoOff = platform?.features.logo_overlay === false
+  const musicOff = platform?.features.music_bed_sfx === false
+  const maintenanceOn = platform?.maintenance.enabled === true
+  const maintenanceMessage =
+    platform?.maintenance.message ||
+    'Magician Clipper is under maintenance — please check back soon.'
+  const daily = platform?.daily ?? null
+  const dailyExhausted =
+    daily !== null && daily.limit !== null && daily.remaining <= 0
+  // The wizard's own range is 1–20; the platform cap can only lower
+  // it (an admin cap of 5 means 5, a cap of 50 still means 20 here).
+  const platformMaxClips = platform?.limits.max_clips_per_job
+  const effectiveMaxClips =
+    platformMaxClips != null
+      ? Math.min(Math.max(1, platformMaxClips), 20)
+      : 20
+  const gatedCaptions = captionsOff ? false : spec.captions
+  const gatedOnScreenText = ostOff ? false : spec.onScreenText
+  const gatedBeatSync = beatSyncOff ? false : (spec.beatSync ?? true)
+  const gatedCaptionTranslation: CaptionTranslation = translationOff
+    ? 'none'
+    : (spec.captionTranslation ?? 'none')
+  const gatedOstLanguage: OstLanguage = translationOff
+    ? 'source'
+    : (spec.ostLanguage ?? 'source')
+  const gatedLogoOverlay = logoOff ? false : (spec.logoOverlay ?? false)
+  const gatedMusicBed = musicOff ? null : musicBed
+  const gatedSfx: Sfx = musicOff ? 'none' : (spec.sfx ?? 'none')
+  const gatedClipCount = Math.min(spec.clipCount, effectiveMaxClips)
   // Stepper: step 1 is always reachable; later steps need a probed project
   // and must have been visited (or be the immediate next step, so every
   // step stays reachable even though Step 4's Continue is disabled).
@@ -801,9 +842,13 @@ export function ClipperPage() {
   const startRealProcessing = async () => {
     if ((!file && !linkSource) || processing) return
     if (!specValid) return
+    // Batch 10: job creation is blocked during maintenance and once
+    // the daily limit is used up (the button is disabled too — this
+    // is the defence in depth, the backend rejects it as well).
+    if (maintenanceOn || dailyExhausted) return
     // A music bed rides with an uploaded video file; a link job has
     // no file upload to carry it (same rule as New Job had).
-    if (linkSource && musicBed) {
+    if (linkSource && gatedMusicBed) {
       setProcessingError('Music bed needs an uploaded video file — switch to Upload to use one, or remove the music bed.')
       return
     }
@@ -823,16 +868,18 @@ export function ClipperPage() {
       sourceUrl: linkSource ?? undefined,
       platform: spec.platform,
       aspectRatio: spec.aspect,
-      clipCount: spec.clipCount,
+      // Batch 10: gated values — a disabled feature never goes out
+      // as enabled, and the clip count never exceeds the platform cap.
+      clipCount: gatedClipCount,
       durationMode: spec.durationMode,
       durationSeconds,
       durationMinSeconds: spec.durationMode === 'exact' ? null : spec.durationMinSeconds,
       durationMaxSeconds: spec.durationMode === 'exact' ? null : spec.durationMaxSeconds,
-      captionsEnabled: spec.captions,
+      captionsEnabled: gatedCaptions,
       captionsLanguage: spec.captionsLanguage,
       captionStyle: spec.captionStyle,
       selectionMode: spec.selectionMode ?? 'interesting_only',
-      onScreenText: spec.onScreenText,
+      onScreenText: gatedOnScreenText,
       autoZoom: spec.autoZoom ?? true,
       faceTracking: spec.faceTracking ?? true,
       silenceRemoval: spec.silenceRemoval ?? true,
@@ -840,14 +887,14 @@ export function ClipperPage() {
       headlineStyle: spec.headlineStyle ?? 'bold_bar',
       captionPosition: spec.captionPosition ?? 'bottom',
       ostPosition: spec.ostPosition ?? defaultOstPosition(spec.headlineStyle ?? 'bold_bar'),
-      ostLanguage: spec.ostLanguage ?? 'source',
-      sfx: spec.sfx ?? 'none',
+      ostLanguage: gatedOstLanguage,
+      sfx: gatedSfx,
       colourGrade: spec.colourGrade ?? 'none',
-      musicBed,
-      beatSync: spec.beatSync ?? true,
-      captionTranslation: spec.captionTranslation ?? 'none',
+      musicBed: gatedMusicBed,
+      beatSync: gatedBeatSync,
+      captionTranslation: gatedCaptionTranslation,
       exportRatios: spec.exportRatios ?? ['9:16'],
-      logoOverlay: spec.logoOverlay ?? false,
+      logoOverlay: gatedLogoOverlay,
       captionSafeZone: spec.captionSafeZone ?? true,
       ostPersistent: spec.ostPersistent ?? false,
       // Batch 9: OST is always static — no animation is sent.
@@ -877,16 +924,17 @@ export function ClipperPage() {
   }
 
   const applyClipCount = (n: number) => {
-    setClipCountText(String(n))
+    const clamped = Math.min(Math.max(1, n), effectiveMaxClips)
+    setClipCountText(String(clamped))
     setClipCountError(null)
-    updateSpec({ clipCount: n })
+    updateSpec({ clipCount: clamped })
   }
 
   const onClipCountText = (value: string) => {
     setClipCountText(value)
     const n = Number(value)
-    if (value.trim() === '' || !Number.isInteger(n) || n < 1 || n > 20) {
-      setClipCountError('Enter a whole number between 1 and 20.')
+    if (value.trim() === '' || !Number.isInteger(n) || n < 1 || n > effectiveMaxClips) {
+      setClipCountError(`Enter a whole number between 1 and ${effectiveMaxClips}.`)
       return
     }
     setClipCountError(null)
@@ -1166,7 +1214,7 @@ export function ClipperPage() {
     spec.durationMode === 'exact'
       ? `exact ${spec.durationSeconds}s`
       : `${spec.durationMinSeconds}–${spec.durationMaxSeconds}s (${spec.durationMode})`
-  const summary = `${spec.clipCount} clip${spec.clipCount === 1 ? '' : 's'} · ${durationModeLabel} · ${spec.aspect} · ${spec.platform === 'tiktok' ? 'TikTok' : 'Instagram'} · captions ${spec.captions ? 'on' : 'off'} · ${SELECTION_MODE_LABELS[spec.selectionMode ?? 'interesting_only']}`
+  const summary = `${gatedClipCount} clip${gatedClipCount === 1 ? '' : 's'} · ${durationModeLabel} · ${spec.aspect} · ${spec.platform === 'tiktok' ? 'TikTok' : 'Instagram'} · captions ${gatedCaptions ? 'on' : 'off'} · ${SELECTION_MODE_LABELS[spec.selectionMode ?? 'interesting_only']}`
   const captionLabel = getCaptionStyle(spec.captionStyle).name
   const contentLabel =
     CONTENT_TYPES.find((c) => c.id === spec.contentType)?.label ?? spec.contentType
@@ -1177,6 +1225,18 @@ export function ClipperPage() {
         title="AI Clipper"
         subtitle="Let AI find the best moments in your video."
       />
+
+      {/* Batch 10: maintenance — job creation is blocked server-side
+          with 503; the banner says so and the submit button (Step 3)
+          is disabled while it is on. */}
+      {maintenanceOn ? (
+        <div
+          role="alert"
+          className="mb-4 rounded-2xl border border-amber-400/40 bg-amber-400/10 p-4 text-sm font-medium text-amber-200"
+        >
+          {maintenanceMessage}
+        </div>
+      ) : null}
 
       {/* Stepper — numbered circles on a connecting line (design reference). */}
       <ol className="mb-8 flex items-start justify-between gap-1 sm:gap-2">
@@ -1588,19 +1648,22 @@ export function ClipperPage() {
                 <label className="mt-4 block">
                   <span className="text-sm font-medium text-white">Number of Clips</span>
                   <select
-                    value={spec.clipCount}
+                    value={gatedClipCount}
                     onChange={(e) => applyClipCount(Number(e.target.value))}
                     className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none"
                   >
-                    {[1, 3, 5, 10].map((n) => (
+                    {[1, 3, 5, 10].filter((n) => n <= effectiveMaxClips).map((n) => (
                       <option key={n} value={n}>
                         {n} clip{n === 1 ? '' : 's'}
                       </option>
                     ))}
-                    {![1, 3, 5, 10].includes(spec.clipCount) ? (
-                      <option value={spec.clipCount}>{spec.clipCount} clips (custom)</option>
+                    {![1, 3, 5, 10].includes(gatedClipCount) ? (
+                      <option value={gatedClipCount}>{gatedClipCount} clips (custom)</option>
                     ) : null}
                   </select>
+                  <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                    Max {effectiveMaxClips} clips per job.
+                  </span>
                 </label>
                 <label className="mt-4 block">
                   <span className="text-sm font-medium text-white">Clip Duration</span>
@@ -1659,19 +1722,31 @@ export function ClipperPage() {
                   </div>
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-sm text-white">Add Animated Captions</span>
-                    <Toggle
-                      checked={spec.captions}
-                      onChange={(v) => updateSpec({ captions: v })}
-                      label="Animated captions on or off"
-                    />
+                    {captionsOff ? (
+                      <span className="text-xs text-[var(--color-text-muted)]">
+                        Captions are disabled by the admin
+                      </span>
+                    ) : (
+                      <Toggle
+                        checked={spec.captions}
+                        onChange={(v) => updateSpec({ captions: v })}
+                        label="Animated captions on or off"
+                      />
+                    )}
                   </div>
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-sm text-white">On-screen text</span>
-                    <Toggle
-                      checked={spec.onScreenText}
-                      onChange={(v) => updateSpec({ onScreenText: v })}
-                      label="On-screen text on or off"
-                    />
+                    {ostOff ? (
+                      <span className="text-xs text-[var(--color-text-muted)]">
+                        On-screen text is disabled by the admin
+                      </span>
+                    ) : (
+                      <Toggle
+                        checked={spec.onScreenText}
+                        onChange={(v) => updateSpec({ onScreenText: v })}
+                        label="On-screen text on or off"
+                      />
+                    )}
                   </div>
                 </div>
                 <button
@@ -1832,10 +1907,10 @@ export function ClipperPage() {
               <fieldset>
                 <legend className="text-sm font-medium text-white">Number of clips</legend>
                 <div className="mt-2 flex flex-wrap gap-2">
-                  {CLIP_COUNT_PRESETS.map((n) => (
+                  {CLIP_COUNT_PRESETS.filter((n) => n <= effectiveMaxClips).map((n) => (
                     <ChoiceButton
                       key={n}
-                      selected={spec.clipCount === n}
+                      selected={gatedClipCount === n}
                       onClick={() => applyClipCount(n)}
                     >
                       {n}
@@ -1847,10 +1922,10 @@ export function ClipperPage() {
                       type="number"
                       inputMode="numeric"
                       min={1}
-                      max={20}
+                      max={effectiveMaxClips}
                       value={clipCountText}
                       onChange={(e) => onClipCountText(e.target.value)}
-                      aria-label="Custom number of clips (1 to 20)"
+                      aria-label={`Custom number of clips (1 to ${effectiveMaxClips})`}
                       className="w-20 rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
                     />
                   </label>
@@ -1858,7 +1933,7 @@ export function ClipperPage() {
                 {clipCountError ? (
                   <p role="alert" className="mt-2 text-xs text-red-300">{clipCountError}</p>
                 ) : (
-                  <p className="mt-2 text-xs text-[var(--color-text-muted)]">Between 1 and 20 clips.</p>
+                  <p className="mt-2 text-xs text-[var(--color-text-muted)]">Max {effectiveMaxClips} clips per job.</p>
                 )}
               </fieldset>
 
@@ -1988,6 +2063,17 @@ export function ClipperPage() {
                 </div>
               ) : null}
 
+              {/* Batch 10: when captions are off, the whole block
+                  (toggle, style picker, language + translation
+                  selectors) is replaced by an honest note. */}
+              {captionsOff ? (
+                <div className="md:col-span-2">
+                  <span className="text-sm font-medium text-white">Captions</span>
+                  <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                    Captions are disabled by the admin.
+                  </p>
+                </div>
+              ) : (
               <div className="md:col-span-2">
                 <span className="text-sm font-medium text-white">Captions</span>
                 <div className="mt-2 flex items-center gap-3">
@@ -2058,6 +2144,14 @@ export function ClipperPage() {
                     transcription (Batch 9: 32 languages). If the free
                     service is unavailable, captions stay in the
                     original language and the job says so. */}
+                {/* Batch 10: caption translation is hidden when the
+                    translation feature is off (captions themselves
+                    stay on). */}
+                {translationOff ? (
+                  <p className="mt-3 text-xs text-[var(--color-text-muted)]">
+                    Caption translation is disabled by the admin.
+                  </p>
+                ) : (
                 <label className="mt-3 block">
                   <span className="text-sm font-medium text-white">Translate captions</span>
                   <select
@@ -2080,6 +2174,7 @@ export function ClipperPage() {
                     original language and the job says so.
                   </span>
                 </label>
+                )}
                 <div className="mt-3">
                   <span className="text-sm font-medium text-white">Caption style</span>
                   <div className="mt-2">
@@ -2095,7 +2190,19 @@ export function ClipperPage() {
                   {' '}— kept with this wizard session; captions are rendered in Phase 3.
                 </p>
               </div>
+              )}
 
+              {/* Batch 10: when on-screen text is off, the whole block
+                  (toggle, position + language selectors) is replaced
+                  by an honest note. */}
+              {ostOff ? (
+                <div>
+                  <span className="text-sm font-medium text-white">On-screen text</span>
+                  <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                    On-screen text is disabled by the admin.
+                  </p>
+                </div>
+              ) : (
               <div>
                 <span className="text-sm font-medium text-white">On-screen text</span>
                 <div className="mt-2 flex items-center gap-3">
@@ -2141,6 +2248,13 @@ export function ClipperPage() {
                     'Source language' keeps the headline in the
                     video's own language. The end-card text and
                     lower-third tag are never translated. */}
+                {/* Batch 10: the OST language selector is a translation
+                    control — hidden when translation is off. */}
+                {translationOff ? (
+                  <p className="mt-3 text-xs text-[var(--color-text-muted)]">
+                    On-screen text translation is disabled by the admin.
+                  </p>
+                ) : (
                 <label className="mt-3 block">
                   <span className="text-sm font-medium text-white">On-screen text language</span>
                   <select
@@ -2163,7 +2277,9 @@ export function ClipperPage() {
                     in the source language and the job says so.
                   </span>
                 </label>
+                )}
               </div>
+              )}
 
               {/* Batch 2 headline style — defaults are the pre-Batch-2
                   behaviour (bold bar). Batch 8: static card grid, no
@@ -2182,7 +2298,10 @@ export function ClipperPage() {
               {/* Batch 7 whole-clip on-screen text (2026-11-25). The
                   persistent headline and its animation need on-screen
                   text on; the end card, keyword pop-ups, lower-third
-                  tag and progress bar work on their own. */}
+                  tag and progress bar work on their own. Batch 10:
+                  hidden entirely when on-screen text is off (the
+                  note above already says why). */}
+              {ostOff ? null : (
               <div>
                 <span className="text-sm font-medium text-white">Persistent headline</span>
                 <div className="mt-2 flex items-center gap-3">
@@ -2203,6 +2322,7 @@ export function ClipperPage() {
                   </span>
                 ) : null}
               </div>
+              )}
 
               {/* Batch 9: the headline animation control was removed —
                   OST is always static now. */}
@@ -2285,7 +2405,18 @@ export function ClipperPage() {
               </div>
 
               {/* Batch 9 music bed + SFX. No file = no music bed —
-                  the section says so instead of faking a preview. */}
+                  the section says so instead of faking a preview.
+                  Batch 10: both are replaced by an honest note when
+                  the music bed / SFX feature is off. */}
+              {musicOff ? (
+                <div>
+                  <span className="text-sm font-medium text-white">Music bed</span>
+                  <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                    Music bed and sound effects are disabled by the admin.
+                  </p>
+                </div>
+              ) : (
+              <>
               <div>
                 <span className="text-sm font-medium text-white">Music bed</span>
                 <div className="mt-2">
@@ -2341,6 +2472,8 @@ export function ClipperPage() {
                   A short sting over clip cuts. The worker mixes it in; None means no added sound.
                 </span>
               </label>
+              </>
+              )}
 
               <label className="block">
                 <span className="text-sm font-medium text-white">Colour grade</span>
@@ -2363,7 +2496,16 @@ export function ClipperPage() {
               {/* Batch 3 beat sync + export ratios. The Translate
                   captions control lives with the caption controls
                   above (directly below the Caption language
-                  dropdown), not here. */}
+                  dropdown), not here. Batch 10: hidden with an
+                  honest note when beat sync is off. */}
+              {beatSyncOff ? (
+                <div>
+                  <span className="text-sm font-medium text-white">Beat sync</span>
+                  <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                    Beat sync is disabled by the admin.
+                  </p>
+                </div>
+              ) : (
               <div>
                 <span className="text-sm font-medium text-white">Beat sync</span>
                 <div className="mt-2 flex items-center gap-3">
@@ -2377,6 +2519,7 @@ export function ClipperPage() {
                   </span>
                 </div>
               </div>
+              )}
 
               <div>
                 <span className="text-sm font-medium text-white">Export ratios</span>
@@ -2413,7 +2556,16 @@ export function ClipperPage() {
 
               {/* Batch 4 logo overlay — default OFF. When ON and a logo
                   is uploaded in Brand Kit, the worker overlays it
-                  bottom-right on every clip of this job. */}
+                  bottom-right on every clip of this job. Batch 10:
+                  hidden with an honest note when logo overlay is off. */}
+              {logoOff ? (
+                <div>
+                  <span className="text-sm font-medium text-white">Logo overlay</span>
+                  <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                    Logo overlay is disabled by the admin.
+                  </p>
+                </div>
+              ) : (
               <div>
                 <span className="text-sm font-medium text-white">Logo overlay</span>
                 <div className="mt-2 flex items-center gap-3">
@@ -2432,6 +2584,7 @@ export function ClipperPage() {
                   uploaded, the job renders without one and says so.
                 </span>
               </div>
+              )}
 
               {/* Batch 6 caption safe zone — default ON. When ON,
                   captions keep clear of TikTok's right action rail
@@ -2738,7 +2891,7 @@ export function ClipperPage() {
               <button
                 type="button"
                 onClick={() => void startRealProcessing()}
-                disabled={processing || !specValid}
+                disabled={processing || !specValid || maintenanceOn || dailyExhausted}
                 className="flex items-center gap-2 rounded-xl btn-aurora px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {processing ? (
@@ -2752,6 +2905,21 @@ export function ClipperPage() {
                 )}
               </button>
             </div>
+            {/* Batch 10: daily usage (admins have no limit, so no line)
+                and the honest reason the button is disabled. */}
+            {daily !== null && daily.limit !== null ? (
+              <p className="mt-3 text-right text-xs text-[var(--color-text-muted)]">
+                {daily.used_today} of {daily.limit} jobs used today
+                {dailyExhausted
+                  ? ' — you have used all your jobs for today. New jobs will be available tomorrow.'
+                  : ''}
+              </p>
+            ) : null}
+            {maintenanceOn ? (
+              <p role="alert" className="mt-3 rounded-xl border border-amber-400/40 bg-amber-400/10 px-4 py-3 text-sm text-amber-200">
+                {maintenanceMessage}
+              </p>
+            ) : null}
             {processingError ? (
               <p role="alert" className="mt-3 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
                 {processingError}

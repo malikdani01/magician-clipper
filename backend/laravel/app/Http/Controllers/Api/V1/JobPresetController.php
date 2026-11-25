@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Models\JobPreset;
 use App\Support\JobSettingsRules;
+use App\Support\PlatformGate;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 
@@ -41,6 +42,12 @@ class JobPresetController extends Controller
             ],
             'settings' => ['required', 'array'],
         ], $settingsRules));
+
+        // Batch 10: a preset must not hold settings for a feature the
+        // admin turned off — it could never be used to create a job.
+        if (($featureError = PlatformGate::forJobSettings($validated['settings'])) !== null) {
+            return $featureError;
+        }
 
         $preset = JobPreset::create([
             'user_id' => $user->id,

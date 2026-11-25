@@ -24,6 +24,10 @@ class User extends Authenticatable
         'role',
         'plan',
         'storage_quota_mb',
+        // Batch 10: admin-set suspension + per-user limit overrides.
+        'suspended_at',
+        'daily_limit_override',
+        'max_clips_override',
     ];
 
     /**
@@ -47,12 +51,22 @@ class User extends Authenticatable
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
             'storage_quota_mb' => 'integer',
+            // Batch 10: suspension + per-user limit overrides.
+            'suspended_at' => 'datetime',
+            'daily_limit_override' => 'integer',
+            'max_clips_override' => 'integer',
         ];
     }
 
     public function isAdmin(): bool
     {
         return $this->role === 'admin';
+    }
+
+    /** Batch 10: a suspended account cannot log in or create jobs. */
+    public function isSuspended(): bool
+    {
+        return $this->suspended_at !== null;
     }
 
     public function projects()

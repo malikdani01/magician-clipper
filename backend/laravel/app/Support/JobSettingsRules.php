@@ -35,12 +35,19 @@ class JobSettingsRules
         ];
     }
 
-    public static function rules(): array
+    /**
+     * Batch 10: $maxClips is the caller's effective cap — the
+     * platform default for presets, the signed-in user's effective
+     * cap (per-user override wins) for job creation.
+     */
+    public static function rules(?int $maxClips = null): array
     {
+        $maxClips ??= PlatformSettings::limit('max_clips_per_job');
+
         return [
             'platform' => ['required', 'string', Rule::in(['tiktok', 'instagram'])],
             'aspect_ratio' => ['required', 'string', Rule::in(['9:16', '16:9', '1:1', '4:5'])],
-            'clip_count' => ['required', 'integer', 'min:1', 'max:50'],
+            'clip_count' => ['required', 'integer', 'min:1', 'max:'.$maxClips],
             'duration_mode' => ['required', 'string', Rule::in(['exact', 'minimum', 'maximum'])],
             'duration_seconds' => ['required', 'integer', 'min:5', 'max:180'],
             'duration_min_seconds' => ['sometimes', 'nullable', 'integer', 'min:5', 'max:180'],

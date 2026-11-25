@@ -11,6 +11,7 @@ import { ScoreBreakdown } from '../components/ScoreBreakdown'
 import { useProjects, getProjectFile, getProjectVideoUrl } from '../state/projects'
 import { usePreferences } from '../state/preferences'
 import { downloadClip, downloadClipAudio, downloadClipsZip, listJobs, type Job, type JobClip } from '../lib/jobs'
+import { usePlatform } from '../lib/platform'
 import { formatBytes } from '../lib/format'
 import { formatDuration } from '../lib/format'
 
@@ -51,6 +52,11 @@ export function LibraryPage() {
   // Library upgrade: sort, Ready-only filter, multi-select + ZIP.
   const [sort, setSort] = useState<ClipSort>('newest')
   const [readyOnly, setReadyOnly] = useState(true)
+  // Batch 10 (2026-11-25): platform gating — favourites (and the
+  // thumbnail picker) are hidden when the payload says so.
+  const { platform } = usePlatform()
+  const favouritesOff = platform?.features.favourites === false
+  const thumbnailPickerOff = platform?.features.thumbnail_picker === false
   // Batch 4: "Favourites only" filter (default off).
   const [favouritesOnly, setFavouritesOnly] = useState(false)
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set())
@@ -263,15 +269,18 @@ export function LibraryPage() {
             />
             Ready clips only
           </label>
-          <label className="flex cursor-pointer items-center gap-2 text-sm text-white">
-            <input
-              type="checkbox"
-              checked={favouritesOnly}
-              onChange={(e) => setFavouritesOnly(e.target.checked)}
-              className="h-4 w-4 accent-[#7c3aed]"
-            />
-            {t('favouritesOnly')}
-          </label>
+          {/* Batch 10: hidden when favourites are off. */}
+          {favouritesOff ? null : (
+            <label className="flex cursor-pointer items-center gap-2 text-sm text-white">
+              <input
+                type="checkbox"
+                checked={favouritesOnly}
+                onChange={(e) => setFavouritesOnly(e.target.checked)}
+                className="h-4 w-4 accent-[#7c3aed]"
+              />
+              {t('favouritesOnly')}
+            </label>
+          )}
           <span className="text-xs text-[var(--color-text-muted)]">
             {filteredClips.length} clip{filteredClips.length === 1 ? '' : 's'}
             {searching || !readyOnly || favouritesOnly || sort !== 'newest'
@@ -511,11 +520,17 @@ export function LibraryPage() {
                     >
                       Open job
                     </Link>
-                    <ClipFavouriteButton clip={clip} onChanged={() => void loadJobs()} />
+                    {/* Batch 10: favourite hearts hidden when off. */}
+                    {favouritesOff ? null : (
+                      <ClipFavouriteButton clip={clip} onChanged={() => void loadJobs()} />
+                    )}
                   </div>
-                  <div className="mt-3 border-t border-ink-border/60 pt-3">
-                    <ClipThumbnailPicker clip={clip} onChanged={() => void loadJobs()} />
-                  </div>
+                  {/* Batch 10: thumbnail picker hidden when off. */}
+                  {thumbnailPickerOff ? null : (
+                    <div className="mt-3 border-t border-ink-border/60 pt-3">
+                      <ClipThumbnailPicker clip={clip} onChanged={() => void loadJobs()} />
+                    </div>
+                  )}
                 </div>
               </article>
             ))}

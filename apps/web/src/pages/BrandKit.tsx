@@ -16,6 +16,7 @@ import {
 } from '../lib/brandAssets'
 import { formatBytes, formatDuration } from '../lib/format'
 import { PageHeader } from '../components/PageHeader'
+import { usePlatform } from '../lib/platform'
 import { usePreferences } from '../state/preferences'
 
 const STORAGE_KEY = 'magician-clipper.brand-kit.v1'
@@ -402,6 +403,11 @@ function LogoAsset() {
 export function BrandKitPage() {
   const [initial] = useState(loadSaved)
   const { t } = usePreferences()
+  // Batch 10 (2026-11-25): platform gating — logo upload and
+  // intro/outro uploads are hidden with an honest note when off.
+  const { platform } = usePlatform()
+  const logoOff = platform?.features.logo_overlay === false
+  const introOutroOff = platform?.features.intro_outro === false
   const [brandName, setBrandName] = useState(initial.brandName)
   const [primary, setPrimary] = useState(initial.primary)
   const [accent, setAccent] = useState(initial.accent)
@@ -537,7 +543,13 @@ export function BrandKitPage() {
 
             <div>
               <span className="text-sm font-medium text-white">{t('logoImage')}</span>
-              <LogoAsset />
+              {logoOff ? (
+                <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                  Logo upload is disabled by the admin.
+                </p>
+              ) : (
+                <LogoAsset />
+              )}
             </div>
           </div>
 
@@ -600,7 +612,13 @@ export function BrandKitPage() {
           Optional brand intro/outro clips you own, added to the start and end of
           every export. Only use clips you have the rights to.
         </p>
-        <IntroOutroAssets />
+        {introOutroOff ? (
+          <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+            Intro and outro uploads are disabled by the admin.
+          </p>
+        ) : (
+          <IntroOutroAssets />
+        )}
       </div>
     </div>
   )

@@ -37,7 +37,7 @@ import { StatCard } from '../../components/StatCard'
 /* Types — exact shapes from AdminController (backend/laravel)         */
 /* ------------------------------------------------------------------ */
 
-interface AdminUserRow {
+export interface AdminUserRow {
   id: number
   name: string
   email: string
@@ -46,9 +46,13 @@ interface AdminUserRow {
   created_at: string
   projects_count?: number
   processing_jobs_count?: number
+  /** Batch 10: suspension + per-user limit overrides. */
+  suspended_at?: string | null
+  daily_limit_override?: number | null
+  max_clips_override?: number | null
 }
 
-interface AdminProjectRow {
+export interface AdminProjectRow {
   id: number
   user_id: number
   title: string
@@ -58,14 +62,19 @@ interface AdminProjectRow {
   user?: { id: number; name: string; email?: string }
   jobs_total?: number
   jobs_completed?: number
+  /** Batch 10: withCount fields from /admin/projects. */
+  media_assets_count?: number
+  clips_count?: number
+  processing_jobs_count?: number
 }
 
-interface AdminClipRow {
+export interface AdminClipRow {
   id: number
   job_id: number
   title: string | null
   status: string
   file_size_bytes: number | null
+  thumbnail_path?: string | null
   created_at: string
   job?: {
     id: number
@@ -89,13 +98,15 @@ interface UsageEntry {
   value: number
 }
 
-interface AdminJobRow {
+export interface AdminJobRow {
   id: number
   state: string
   stage?: string | null
   progress?: number | null
   error_code?: string | null
   error_message?: string | null
+  /** Batch 10: clip count (for the delete warning). */
+  clips_count?: number
   created_at: string
   user?: { id: number; name: string; email: string }
   project?: { id: number; title: string }
@@ -121,7 +132,7 @@ interface DashboardPayload {
   recent_clips?: { id: number; job_id: number; title: string | null; created_at: string }[]
 }
 
-interface Paginated<T> {
+export interface Paginated<T> {
   data: T[]
   current_page: number
   last_page: number
@@ -149,7 +160,7 @@ interface EngineHealth {
 /* ------------------------------------------------------------------ */
 
 /** GET an admin endpoint with the admin Bearer token. Throws the backend's exact error message. */
-async function fetchAdmin<T>(path: string): Promise<T> {
+export async function fetchAdmin<T>(path: string): Promise<T> {
   const token = getToken()
   const res = await fetch(`${API_URL}${path}`, {
     headers: {
@@ -166,7 +177,32 @@ async function fetchAdmin<T>(path: string): Promise<T> {
   return body as T
 }
 
-function useAdminFetch<T>(path: string | null) {
+/**
+ * Batch 10: POST/PATCH/DELETE an admin endpoint with the admin Bearer
+ * token. Throws the backend's exact error message. Returns the parsed
+ * JSON body (or null for an empty body).
+ */
+export async function mutateAdmin<T>(path: string, method: 'POST' | 'PATCH' | 'DELETE', body?: unknown): Promise<T> {
+  const token = getToken()
+  const res = await fetch(`${API_URL}${path}`, {
+    method,
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  const parsed = (await res.json().catch(() => null)) as Record<string, unknown> | null
+  if (!res.ok) {
+    const message =
+      parsed && typeof parsed.message === 'string' ? parsed.message : `HTTP ${res.status}`
+    throw new Error(message)
+  }
+  return parsed as T
+}
+
+export function useAdminFetch<T>(path: string | null) {
   const [data, setData] = useState<T | null>(null)
   const [loading, setLoading] = useState(path !== null)
   const [error, setError] = useState<string | null>(null)
@@ -212,7 +248,7 @@ function useAdminFetch<T>(path: string | null) {
   return { data, loading, error, retry }
 }
 
-function useEngineHealth() {
+export function useEngineHealth() {
   const [engine, setEngine] = useState<EngineHealth | null>(null)
   useEffect(() => {
     let cancelled = false
@@ -226,19 +262,19 @@ function useEngineHealth() {
   return engine
 }
 
-function formatDate(value: string | null | undefined): string {
+export function formatDate(value: string | null | undefined): string {
   if (!value) return '—'
   const d = new Date(value)
   return Number.isNaN(d.getTime()) ? value : d.toLocaleString()
 }
 
-function SourceNote({ source }: { source: string }) {
+export function SourceNote({ source }: { source: string }) {
   return (
     <p className="mt-4 text-xs text-[var(--color-text-muted)]">Source: {source}</p>
   )
 }
 
-function LoadError({ error, onRetry }: { error: string; onRetry: () => void }) {
+export function LoadError({ error, onRetry }: { error: string; onRetry: () => void }) {
   return (
     <div className="flex flex-col items-start gap-3 rounded-2xl border border-red-500/40 bg-red-500/10 p-5">
       <p className="flex items-center gap-2 text-sm font-medium text-red-300">
@@ -256,11 +292,11 @@ function LoadError({ error, onRetry }: { error: string; onRetry: () => void }) {
   )
 }
 
-function LoadingNote() {
+export function LoadingNote() {
   return <p className="text-sm text-[var(--color-text-muted)]">Loading…</p>
 }
 
-function AdminTable({ headers, children }: { headers: string[]; children: ReactNode }) {
+export function AdminTable({ headers, children }: { headers: string[]; children: ReactNode }) {
   return (
     <div className="overflow-x-auto rounded-2xl border border-ink-border bg-ink-panel">
       <table className="w-full text-left text-sm">
@@ -279,17 +315,17 @@ function AdminTable({ headers, children }: { headers: string[]; children: ReactN
   )
 }
 
-function TableRow({ children }: { children: ReactNode }) {
+export function TableRow({ children }: { children: ReactNode }) {
   return <tr className="border-b border-ink-border text-white last:border-0">{children}</tr>
 }
 
-function Cell({ children, muted }: { children: ReactNode; muted?: boolean }) {
+export function Cell({ children, muted }: { children: ReactNode; muted?: boolean }) {
   return (
     <td className={`px-4 py-3 ${muted ? 'text-[var(--color-text-muted)]' : ''}`}>{children}</td>
   )
 }
 
-function Pager({
+export function Pager({
   page,
   lastPage,
   total,
@@ -355,7 +391,7 @@ function DisabledAdminFormNote({ detail }: { detail: string }) {
 /* Dashboard helpers — all charts/bars render REAL data only           */
 /* ------------------------------------------------------------------ */
 
-function relativeTime(value: string): string {
+export function relativeTime(value: string): string {
   const d = new Date(value)
   if (Number.isNaN(d.getTime())) return value
   const seconds = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000))
@@ -369,7 +405,7 @@ function relativeTime(value: string): string {
   return d.toLocaleDateString()
 }
 
-function planPill(plan: string): string {
+export function planPill(plan: string): string {
   const p = plan.toLowerCase()
   if (p.includes('pro') && p.includes('year')) return 'bg-blue-500/15 text-blue-300'
   if (p.includes('pro')) return 'bg-brand/20 text-brand-light'
@@ -377,7 +413,7 @@ function planPill(plan: string): string {
   return 'bg-ink-panel2 text-[var(--color-text-muted)]'
 }
 
-function statusPill(status: string): string {
+export function statusPill(status: string): string {
   const s = status.toLowerCase()
   if (s === 'completed' || s === 'complete' || s === 'ready') return 'bg-emerald-500/15 text-emerald-300'
   if (s === 'processing' || s === 'running') return 'bg-amber-500/15 text-amber-300'

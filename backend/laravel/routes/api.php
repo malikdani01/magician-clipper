@@ -12,6 +12,7 @@ use App\Http\Controllers\Api\V1\JobPresetController;
 use App\Http\Controllers\Api\V1\MediaController;
 use App\Http\Controllers\Api\V1\MuseJobController;
 use App\Http\Controllers\Api\V1\NotificationController;
+use App\Http\Controllers\Api\V1\PlatformSettingsController;
 use App\Http\Controllers\Api\V1\ProjectController;
 use App\Http\Controllers\Api\V1\SettingsController;
 use Illuminate\Support\Facades\Route;
@@ -46,6 +47,11 @@ Route::prefix('v1')->group(function () {
         Route::post('/auth/logout', [AuthController::class, 'logout']);
         Route::get('/me', [AuthController::class, 'me']);
         Route::get('/me/stats', [AuthController::class, 'stats']);
+
+        // Batch 10: the platform view — limits, feature toggles, page
+        // visibility, maintenance mode, announcement + this user's
+        // daily usage. The user panel reads this once per session.
+        Route::get('/platform', [PlatformSettingsController::class, 'publicView']);
 
         // --- Projects ---
         Route::get('/projects', [ProjectController::class, 'index']);
@@ -137,11 +143,34 @@ Route::prefix('v1')->group(function () {
         Route::prefix('admin')->middleware('admin')->group(function () {
             Route::get('/dashboard', [AdminController::class, 'dashboard']);
             Route::get('/users', [AdminController::class, 'users']);
+            // Batch 10: user management — detail, role, suspend /
+            // activate, delete, password reset, per-user overrides.
+            Route::get('/users/{user}', [AdminController::class, 'showUser']);
+            Route::patch('/users/{user}/role', [AdminController::class, 'updateUserRole']);
+            Route::post('/users/{user}/suspend', [AdminController::class, 'suspendUser']);
+            Route::post('/users/{user}/activate', [AdminController::class, 'activateUser']);
+            Route::delete('/users/{user}', [AdminController::class, 'deleteUser']);
+            Route::post('/users/{user}/reset-password', [AdminController::class, 'resetUserPassword']);
+            Route::patch('/users/{user}/overrides', [AdminController::class, 'updateUserOverrides']);
             Route::get('/projects', [AdminController::class, 'projects']);
+            Route::delete('/projects/{project}', [AdminController::class, 'deleteProject']);
             Route::get('/jobs', [AdminController::class, 'jobs']);
+            Route::get('/jobs/failed', [AdminController::class, 'failedJobs']);
+            Route::delete('/jobs/{job}', [AdminController::class, 'deleteJob']);
             Route::get('/clips', [AdminController::class, 'clips']);
+            Route::delete('/clips/{clip}', [AdminController::class, 'deleteClip']);
             Route::post('/jobs/{job}/retry', [AdminController::class, 'retryJob']);
             Route::post('/jobs/{job}/cancel', [AdminController::class, 'cancelJob']);
+            // Batch 10: platform controls (limits, feature + page
+            // toggles, maintenance mode, announcement).
+            Route::get('/platform-settings', [PlatformSettingsController::class, 'show']);
+            Route::patch('/platform-settings', [PlatformSettingsController::class, 'update']);
+            // Batch 10: activity log, reports, monitor, broadcast.
+            Route::get('/activity-log', [AdminController::class, 'activityLog']);
+            Route::get('/reports', [AdminController::class, 'reports']);
+            Route::get('/monitor', [AdminController::class, 'monitor']);
+            Route::post('/notifications/broadcast', [AdminController::class, 'broadcast'])
+                ->middleware('throttle:5,1');
             // Batch 9: the admin changes their own email + password
             // in Admin Panel → Settings. Throttled: it verifies a
             // password, so brute-forcing it must be expensive.

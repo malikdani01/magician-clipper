@@ -50,6 +50,18 @@ class AuthController extends Controller
 
         /** @var User $user */
         $user = Auth::user();
+
+        // Batch 10: a suspended account cannot log in at all — even
+        // with the right password. The token is never issued.
+        if ($user->isSuspended()) {
+            Auth::logout();
+
+            return response()->json([
+                'error' => 'account_suspended',
+                'message' => 'Your account is suspended — you cannot sign in. Contact the admin.',
+            ], 403);
+        }
+
         $token = $user->createToken('api')->plainTextToken;
 
         return response()->json([

@@ -58,6 +58,7 @@ import {
   type Sfx,
 } from '../lib/jobs'
 import { useAuth } from '../state/auth'
+import { usePlatform } from '../lib/platform'
 import { mapLaravelStatus, useProjects } from '../state/projects'
 
 const POLL_MS = 5000
@@ -620,6 +621,13 @@ export function JobDetailPage() {
   const { id } = useParams<{ id: string }>()
   const jobId = Number(id)
   const { user, loading: authLoading } = useAuth()
+  // Batch 10 (2026-11-25): platform gating — a feature is off ONLY
+  // when the payload says so (`=== false`); loading/unavailable
+  // renders everything unchanged.
+  const { platform } = usePlatform()
+  const rerenderOff = platform?.features.clip_rerender === false
+  const favouritesOff = platform?.features.favourites === false
+  const thumbnailPickerOff = platform?.features.thumbnail_picker === false
   const { projects, updateProject } = useProjects()
   const [job, setJob] = useState<Job | null>(null)
   const [loading, setLoading] = useState(true)
@@ -1011,7 +1019,7 @@ export function JobDetailPage() {
                 Shorter clips or a longer, talk-heavy source fits more.
               </p>
             ) : null}
-            {selectedClips.size > 0 ? (
+            {selectedClips.size > 0 && !rerenderOff ? (
               <BulkRerenderBar
                 clipIds={[...selectedClips]}
                 onDone={() => void fetchJob()}
@@ -1035,13 +1043,15 @@ export function JobDetailPage() {
                     key={clip.id}
                     className="aurora-card flex flex-wrap items-center gap-4 rounded-xl border border-ink-border bg-ink-panel2 p-4"
                   >
-                    <input
-                      type="checkbox"
-                      checked={selectedClips.has(clip.id)}
-                      onChange={() => toggleClipSelected(clip.id)}
-                      aria-label={`Select ${clip.title} for bulk re-render`}
-                      className="h-4 w-4 shrink-0 accent-fuchsia-500"
-                    />
+                    {rerenderOff ? null : (
+                      <input
+                        type="checkbox"
+                        checked={selectedClips.has(clip.id)}
+                        onChange={() => toggleClipSelected(clip.id)}
+                        aria-label={`Select ${clip.title} for bulk re-render`}
+                        className="h-4 w-4 shrink-0 accent-fuchsia-500"
+                      />
+                    )}
                     <ClipThumbnail
                       clipId={clip.id}
                       hasThumbnail={clip.thumbnail_path != null}
@@ -1094,16 +1104,26 @@ export function JobDetailPage() {
                       <ScoreBreakdown breakdown={clip.score_breakdown} />
                       <ViralChecklist clip={clip} job={job} />
                     </div>
-                    <ClipRerenderControl
-                      clip={clip}
-                      onRerendered={() => void fetchJob()}
-                    />
-                    {clip.variant_of_clip_id == null ? (
-                      <ClipVariantControl
-                        clip={clip}
-                        onVariantReady={() => void fetchJob()}
-                      />
-                    ) : null}
+                    {/* Batch 10: re-render (single + variant) is hidden
+                        with an honest note when clip re-render is off. */}
+                    {rerenderOff ? (
+                      <p className="mt-3 w-full text-xs text-[var(--color-text-muted)]">
+                        Clip re-render is disabled by the admin.
+                      </p>
+                    ) : (
+                      <>
+                        <ClipRerenderControl
+                          clip={clip}
+                          onRerendered={() => void fetchJob()}
+                        />
+                        {clip.variant_of_clip_id == null ? (
+                          <ClipVariantControl
+                            clip={clip}
+                            onVariantReady={() => void fetchJob()}
+                          />
+                        ) : null}
+                      </>
+                    )}
                     <button
                       type="button"
                       onClick={() => setPreviewingClip(clip)}
@@ -1140,10 +1160,17 @@ export function JobDetailPage() {
                         {audioDownloadingId === clip.id ? 'Downloading…' : 'Audio'}
                       </button>
                     ) : null}
-                    <ClipFavouriteButton clip={clip} onChanged={() => void fetchJob()} />
-                    <div className="w-full border-t border-ink-border/60 pt-3">
-                      <ClipThumbnailPicker clip={clip} onChanged={() => void fetchJob()} />
-                    </div>
+                    {/* Batch 10: favourite hearts are hidden when
+                        favourites are off. */}
+                    {favouritesOff ? null : (
+                      <ClipFavouriteButton clip={clip} onChanged={() => void fetchJob()} />
+                    )}
+                    {/* Batch 10: thumbnail picker hidden when off. */}
+                    {thumbnailPickerOff ? null : (
+                      <div className="w-full border-t border-ink-border/60 pt-3">
+                        <ClipThumbnailPicker clip={clip} onChanged={() => void fetchJob()} />
+                      </div>
+                    )}
                   </li>
                     )
                   })}

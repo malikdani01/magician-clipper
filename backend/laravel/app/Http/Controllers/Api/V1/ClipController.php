@@ -8,6 +8,8 @@ use App\Models\ClipRerender;
 use App\Models\Project;
 use App\Models\UserSetting;
 use App\Support\MediaStorage;
+use App\Support\PlatformGate;
+use App\Support\PlatformSettings;
 use App\Support\VideoProbe;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
@@ -339,6 +341,11 @@ class ClipController extends Controller
     {
         $this->authorize('render', $clip);
 
+        // Batch 10: clip re-render is an admin-controlled feature.
+        if (! PlatformSettings::feature('clip_rerender')) {
+            return PlatformGate::featureDenied('clip_rerender', 'Clip re-render is disabled by the admin.');
+        }
+
         $validated = $request->validate([
             'caption_style' => ['required', 'string', Rule::in(UserSetting::CAPTION_STYLES)],
         ]);
@@ -395,6 +402,11 @@ class ClipController extends Controller
      */
     public function bulkRerender(Request $request)
     {
+        // Batch 10: clip re-render is an admin-controlled feature.
+        if (! PlatformSettings::feature('clip_rerender')) {
+            return PlatformGate::featureDenied('clip_rerender', 'Clip re-render is disabled by the admin.');
+        }
+
         $validated = $request->validate([
             'clip_ids' => ['required', 'array', 'min:1', 'max:50'],
             'clip_ids.*' => ['integer'],
@@ -466,6 +478,12 @@ class ClipController extends Controller
     {
         $this->authorize('render', $clip);
 
+        // Batch 10: clip re-render (variants included) is an
+        // admin-controlled feature.
+        if (! PlatformSettings::feature('clip_rerender')) {
+            return PlatformGate::featureDenied('clip_rerender', 'Clip re-render is disabled by the admin.');
+        }
+
         $validated = $request->validate([
             'caption_style' => ['required', 'string', Rule::in(UserSetting::CAPTION_STYLES)],
             'headline_style' => ['sometimes', 'nullable', 'string', Rule::in(['bold_bar', 'lower_third', 'big_centre'])],
@@ -529,6 +547,11 @@ class ClipController extends Controller
     {
         $this->authorize('update', $clip);
 
+        // Batch 10: favourites are an admin-controlled feature.
+        if (! PlatformSettings::feature('favourites')) {
+            return PlatformGate::featureDenied('favourites', 'Favourites are disabled by the admin.');
+        }
+
         $clip->is_favourite = ! $clip->is_favourite;
         $clip->save();
 
@@ -545,6 +568,11 @@ class ClipController extends Controller
     public function setThumbnail(Request $request, Clip $clip)
     {
         $this->authorize('update', $clip);
+
+        // Batch 10: the thumbnail picker is an admin-controlled feature.
+        if (! PlatformSettings::feature('thumbnail_picker')) {
+            return PlatformGate::featureDenied('thumbnail_picker', 'The thumbnail picker is disabled by the admin.');
+        }
 
         $validated = $request->validate([
             'candidate_index' => ['required', 'integer', 'min:0'],

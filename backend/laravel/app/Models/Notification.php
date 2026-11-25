@@ -11,6 +11,8 @@ class Notification extends Model
 
     public const TYPE_JOB_READY = 'job_ready';
     public const TYPE_JOB_FAILED = 'job_failed';
+    /** Batch 10: an admin broadcast (all users or one user). */
+    public const TYPE_BROADCAST = 'broadcast';
 
     protected $fillable = [
         'user_id',

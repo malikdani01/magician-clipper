@@ -3,10 +3,13 @@
 namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
+use App\Models\AdminActivityLog;
 use App\Models\Clip;
+use App\Models\Notification;
 use App\Models\ProcessingJob;
 use App\Models\Project;
 use App\Models\User;
+use App\Models\UserSetting;
 use App\Support\DatabaseBackup;
 use App\Support\MediaStorage;
 use App\Support\StorageUsage;
@@ -15,6 +18,8 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
 class AdminController extends Controller
@@ -172,17 +177,238 @@ class AdminController extends Controller
 
     public function users(Request $request)
     {
+        // Batch 10: sortable (name/email/created_at/jobs) + searchable.
+        $sort = $request->input('sort', 'created_at');
+        $dir = strtolower($request->input('dir', 'desc')) === 'asc' ? 'asc' : 'desc';
+        $sortColumn = match ($sort) {
+            'name' => 'name',
+            'email' => 'email',
+            'jobs' => 'processing_jobs_count',
+            default => 'created_at',
+        };
+
         $users = User::withCount(['projects', 'processingJobs'])
             ->when($request->filled('search'), function ($query) use ($request) {
                 $search = $request->input('search');
                 $query->where('name', 'like', "%{$search}%")
                     ->orWhere('email', 'like', "%{$search}%");
             })
-            ->latest()
+            ->orderBy($sortColumn, $dir)
             ->paginate(20);
 
         // Passwords/hashes are never serialized (User::$hidden).
         return response()->json($users);
+    }
+
+    /**
+     * GET /api/v1/admin/users/{user} — one user's full detail:
+     * counts, their latest jobs, clips, storage used, saved
+     * settings, suspension state and per-user overrides.
+     */
+    public function showUser(Request $request, User $user)
+    {
+        $user->loadCount(['projects', 'processingJobs']);
+        $clipsCount = Clip::whereIn(
+            'job_id',
+            $user->processingJobs()->pluck('id')
+        )->count();
+
+        return response()->json([
+            'user' => $user,
+            'counts' => [
+                'projects' => $user->projects_count,
+                'jobs' => $user->processing_jobs_count,
+                'clips' => $clipsCount,
+                'storage_bytes' => StorageUsage::totalBytes($user->id),
+            ],
+            'settings' => UserSetting::where('user_id', $user->id)->first(),
+            'jobs' => $user->processingJobs()->with('clips:id,job_id')
+                ->latest()->limit(10)->get(['id', 'state', 'created_at']),
+        ]);
+    }
+
+    /**
+     * PATCH /api/v1/admin/users/{user}/role — change a user's role.
+     * Guards: an admin cannot change their OWN role, and the LAST
+     * admin cannot be demoted (the panel would have no admin left).
+     */
+    public function updateUserRole(Request $request, User $user)
+    {
+        $admin = $request->user();
+        $validated = $request->validate([
+            'role' => ['required', 'string', Rule::in(['user', 'admin'])],
+        ]);
+
+        if ($user->id === $admin->id) {
+            return response()->json([
+                'error' => 'forbidden',
+                'message' => 'You cannot change your own role.',
+            ], 422);
+        }
+        if ($user->role === 'admin' && $validated['role'] !== 'admin'
+            && User::where('role', 'admin')->count() <= 1) {
+            return response()->json([
+                'error' => 'forbidden',
+                'message' => 'This is the last admin — demote another admin first.',
+            ], 422);
+        }
+
+        $oldRole = $user->role;
+        $user->role = $validated['role'];
+        $user->save();
+
+        AdminActivityLog::record($admin, 'user.role_changed', 'user', $user->id, [
+            'email' => $user->email, 'from' => $oldRole, 'to' => $user->role,
+        ]);
+
+        return response()->json(['user' => $user->fresh()]);
+    }
+
+    /**
+     * POST /api/v1/admin/users/{user}/suspend — suspend an account.
+     * A suspended user cannot log in and cannot create jobs (the
+     * login + job-creation gates enforce it). Guards: never self,
+     * never the last admin.
+     */
+    public function suspendUser(Request $request, User $user)
+    {
+        $admin = $request->user();
+
+        if ($user->id === $admin->id) {
+            return response()->json([
+                'error' => 'forbidden',
+                'message' => 'You cannot suspend your own account.',
+            ], 422);
+        }
+        if ($user->role === 'admin' && User::where('role', 'admin')->count() <= 1) {
+            return response()->json([
+                'error' => 'forbidden',
+                'message' => 'This is the last admin — suspending them would lock out the panel.',
+            ], 422);
+        }
+        if ($user->isSuspended()) {
+            return response()->json([
+                'error' => 'invalid_state',
+                'message' => 'This user is already suspended.',
+            ], 422);
+        }
+
+        $user->suspended_at = now();
+        $user->save();
+
+        AdminActivityLog::record($admin, 'user.suspended', 'user', $user->id, [
+            'email' => $user->email,
+        ]);
+
+        return response()->json(['user' => $user->fresh()]);
+    }
+
+    /** POST /api/v1/admin/users/{user}/activate — lift a suspension. */
+    public function activateUser(Request $request, User $user)
+    {
+        if (! $user->isSuspended()) {
+            return response()->json([
+                'error' => 'invalid_state',
+                'message' => 'This user is not suspended.',
+            ], 422);
+        }
+
+        $user->suspended_at = null;
+        $user->save();
+
+        AdminActivityLog::record($request->user(), 'user.activated', 'user', $user->id, [
+            'email' => $user->email,
+        ]);
+
+        return response()->json(['user' => $user->fresh()]);
+    }
+
+    /**
+     * DELETE /api/v1/admin/users/{user} — delete an account and
+     * everything it owns (foreign keys cascade: projects, jobs,
+     * clips, presets, notifications, brand assets, settings).
+     * Guards: never self, never the last admin. The response
+     * carries the exact counts that were deleted.
+     */
+    public function deleteUser(Request $request, User $user)
+    {
+        $admin = $request->user();
+
+        if ($user->id === $admin->id) {
+            return response()->json([
+                'error' => 'forbidden',
+                'message' => 'You cannot delete your own account.',
+            ], 422);
+        }
+        if ($user->role === 'admin' && User::where('role', 'admin')->count() <= 1) {
+            return response()->json([
+                'error' => 'forbidden',
+                'message' => 'This is the last admin — delete another admin first.',
+            ], 422);
+        }
+
+        $counts = [
+            'projects' => $user->projects()->count(),
+            'jobs' => $user->processingJobs()->count(),
+            'clips' => Clip::whereIn('job_id', $user->processingJobs()->pluck('id'))->count(),
+        ];
+        $email = $user->email;
+        $user->delete();
+
+        AdminActivityLog::record($admin, 'user.deleted', 'user', $user->id, [
+            'email' => $email, 'counts' => $counts,
+        ]);
+
+        return response()->json([
+            'message' => "User {$email} deleted.",
+            'deleted' => $counts,
+        ]);
+    }
+
+    /**
+     * POST /api/v1/admin/users/{user}/reset-password — set a fresh
+     * random password and show it to the admin ONCE, in this
+     * response only. The plaintext is never stored or logged.
+     */
+    public function resetUserPassword(Request $request, User $user)
+    {
+        $temporaryPassword = Str::password(12);
+        $user->password = Hash::make($temporaryPassword);
+        $user->save();
+
+        AdminActivityLog::record($request->user(), 'user.password_reset', 'user', $user->id, [
+            'email' => $user->email,
+        ]);
+
+        return response()->json([
+            'message' => 'Password reset — show this password to the user once; it will not be shown again.',
+            'temporary_password' => $temporaryPassword,
+            'user' => ['id' => $user->id, 'email' => $user->email],
+        ]);
+    }
+
+    /**
+     * PATCH /api/v1/admin/users/{user}/overrides — per-user limits
+     * (null = use the platform default). Daily limit 1–1000, max
+     * clips 1–200.
+     */
+    public function updateUserOverrides(Request $request, User $user)
+    {
+        $validated = $request->validate([
+            'daily_limit_override' => ['sometimes', 'nullable', 'integer', 'min:1', 'max:1000'],
+            'max_clips_override' => ['sometimes', 'nullable', 'integer', 'min:1', 'max:200'],
+        ]);
+
+        $user->fill($validated);
+        $user->save();
+
+        AdminActivityLog::record($request->user(), 'user.overrides_updated', 'user', $user->id, [
+            'email' => $user->email,
+            'daily_limit_override' => $user->daily_limit_override,
+            'max_clips_override' => $user->max_clips_override,
+        ]);
+
+        return response()->json(['user' => $user->fresh()]);
     }
 
     public function projects(Request $request)
@@ -190,20 +416,119 @@ class AdminController extends Controller
         $projects = Project::with(['user:id,name,email'])
             ->withCount(['mediaAssets', 'clips', 'processingJobs'])
             ->when($request->filled('status'), fn ($q) => $q->where('status', $request->input('status')))
+            ->when($request->filled('search'), function ($query) use ($request) {
+                $search = $request->input('search');
+                $query->where('title', 'like', "%{$search}%");
+            })
             ->latest()
             ->paginate(20);
 
         return response()->json($projects);
     }
 
+    /**
+     * DELETE /api/v1/admin/projects/{project} — delete any project.
+     * Jobs, clips, media and exports cascade (foreign keys); stored
+     * files are left on disk, like the user-side delete. Returns the
+     * exact counts that were deleted.
+     */
+    public function deleteProject(Request $request, Project $project)
+    {
+        $counts = [
+            'jobs' => $project->processingJobs()->count(),
+            'clips' => $project->clips()->count(),
+            'media_assets' => $project->mediaAssets()->count(),
+        ];
+        $title = $project->title;
+        $project->delete();
+
+        AdminActivityLog::record($request->user(), 'project.deleted', 'project', $project->id, [
+            'title' => $title, 'counts' => $counts,
+        ]);
+
+        return response()->json([
+            'message' => "Project '{$title}' deleted.",
+            'deleted' => $counts,
+        ]);
+    }
+
     public function jobs(Request $request)
     {
         $jobs = ProcessingJob::with(['user:id,name,email', 'project:id,title'])
+            ->withCount('clips')
             ->when($request->filled('state'), fn ($q) => $q->where('state', $request->input('state')))
+            ->when($request->filled('user_id'), fn ($q) => $q->where('user_id', (int) $request->input('user_id')))
+            ->when($request->filled('search'), function ($query) use ($request) {
+                $search = $request->input('search');
+                // Search by job id, or by project title.
+                if (ctype_digit($search)) {
+                    $query->where('id', (int) $search);
+                } else {
+                    $query->whereHas('project', fn ($q) => $q->where('title', 'like', "%{$search}%"));
+                }
+            })
             ->latest()
             ->paginate(20);
 
         return response()->json($jobs);
+    }
+
+    /**
+     * GET /api/v1/admin/jobs/failed — failed jobs with their exact
+     * error code + message, newest first. Search by job id.
+     */
+    public function failedJobs(Request $request)
+    {
+        $jobs = ProcessingJob::with(['user:id,name,email', 'project:id,title'])
+            ->withCount('clips')
+            ->where('state', ProcessingJob::STATE_FAILED)
+            ->when($request->filled('search'), function ($query) use ($request) {
+                $search = $request->input('search');
+                if (ctype_digit($search)) {
+                    $query->where('id', (int) $search);
+                }
+            })
+            ->latest()
+            ->paginate(20);
+
+        return response()->json($jobs);
+    }
+
+    /**
+     * DELETE /api/v1/admin/jobs/{job} — delete a job AND its clips
+     * (clips do not cascade on job delete — their job_id is
+     * nullOnDelete — so they are deleted explicitly). Clip files
+     * and the music bed are removed best-effort; a missing file
+     * never fails the delete. Returns the exact clip count deleted.
+     */
+    public function deleteJob(Request $request, ProcessingJob $job)
+    {
+        $clips = $job->clips()->get();
+        $clipCount = $clips->count();
+
+        foreach ($clips as $clip) {
+            $this->deleteClipFiles($clip);
+            $clip->delete();
+        }
+
+        if ($job->music_bed_path !== null) {
+            try {
+                Storage::disk('local')->delete($job->music_bed_path);
+            } catch (\Throwable) {
+                // A missing music bed never fails the delete.
+            }
+        }
+
+        $job->delete();
+
+        AdminActivityLog::record($request->user(), 'job.deleted', 'job', $job->id, [
+            'clips_deleted' => $clipCount,
+        ]);
+
+        return response()->json([
+            'message' => "Job #{$job->id} and its {$clipCount} clip(s) deleted.",
+            'deleted' => ['clips' => $clipCount],
+        ]);
     }
 
     public function clips(Request $request)
@@ -212,9 +537,50 @@ class AdminController extends Controller
             'job:id,project_id,user_id',
             'job.user:id,name',
             'job.project:id,title',
-        ])->latest()->paginate(20);
+        ])
+            ->when($request->filled('search'), function ($query) use ($request) {
+                $search = $request->input('search');
+                if (ctype_digit($search)) {
+                    $query->where('id', (int) $search);
+                } else {
+                    $query->where('title', 'like', "%{$search}%");
+                }
+            })
+            ->when($request->filled('status'), fn ($q) => $q->where('status', $request->input('status')))
+            ->latest()->paginate(20);
 
         return response()->json($clips);
+    }
+
+    /**
+     * DELETE /api/v1/admin/clips/{clip} — delete a clip and its
+     * files (rendered file, thumbnails) best-effort. Re-renders
+     * cascade on the clip row.
+     */
+    public function deleteClip(Request $request, Clip $clip)
+    {
+        $this->deleteClipFiles($clip);
+        $clipId = $clip->id;
+        $clip->delete();
+
+        AdminActivityLog::record($request->user(), 'clip.deleted', 'clip', $clipId, []);
+
+        return response()->json(['message' => "Clip #{$clipId} deleted."]);
+    }
+
+    /** Remove a clip's files from its disk; never throws. */
+    private function deleteClipFiles(Clip $clip): void
+    {
+        try {
+            $disk = MediaStorage::disk($clip->disk ?? MediaStorage::DISK_LOCAL, $clip->job?->user);
+            foreach ([$clip->output_path, $clip->thumbnail_path, ...(array) ($clip->thumbnail_candidates ?? [])] as $path) {
+                if (is_string($path) && $path !== '') {
+                    $disk->delete($path);
+                }
+            }
+        } catch (\Throwable) {
+            // A missing or unreachable file never fails the delete.
+        }
     }
 
     public function retryJob(Request $request, ProcessingJob $job)
@@ -228,6 +594,8 @@ class AdminController extends Controller
             ], 422);
         }
 
+        AdminActivityLog::record($request->user(), 'job.retried', 'job', $job->id, []);
+
         return response()->json(['job' => $job->fresh()]);
     }
 
@@ -240,6 +608,8 @@ class AdminController extends Controller
             ], 422);
         }
 
+        $previousState = $job->state;
+
         try {
             $job->transitionTo(ProcessingJob::STATE_CANCELLING);
         } catch (\InvalidArgumentException $e) {
@@ -248,6 +618,10 @@ class AdminController extends Controller
                 'message' => $e->getMessage(),
             ], 422);
         }
+
+        AdminActivityLog::record($request->user(), 'job.cancelled', 'job', $job->id, [
+            'previous_state' => $previousState,
+        ]);
 
         return response()->json(['job' => $job->fresh()]);
     }
@@ -289,6 +663,10 @@ class AdminController extends Controller
         $admin->email = $validated['new_email'];
         $admin->password = Hash::make($validated['new_password']);
         $admin->save();
+
+        // Batch 10: credential changes are admin actions too — logged
+        // without any credential value.
+        AdminActivityLog::record($admin, 'admin.credentials_changed', 'user', $admin->id, []);
 
         return response()->json([
             'message' => 'Credentials updated — use the new email and password next time you sign in.',
@@ -338,6 +716,10 @@ class AdminController extends Controller
             ], 500);
         }
 
+        AdminActivityLog::record($request->user(), 'admin.backup_created', null, null, [
+            'filename' => $meta['filename'],
+        ]);
+
         return response()->json([
             'message' => 'Backup created.',
             'backup' => $this->backupArray($meta),
@@ -381,6 +763,169 @@ class AdminController extends Controller
             // Where the file lives: local disk, or local + cloud bucket.
             'location' => $meta['cloud_key'] !== null ? 'local+cloud' : 'local',
         ];
+    }
+
+    /**
+     * GET /api/v1/admin/activity-log — the admin activity trail,
+     * newest first. Every admin mutation writes a row here.
+     */
+    public function activityLog(Request $request)
+    {
+        $entries = AdminActivityLog::with('admin:id,name,email')
+            ->when($request->filled('action'), fn ($q) => $q->where('action', 'like', '%'.$request->input('action').'%'))
+            ->latest()
+            ->paginate(30);
+
+        return response()->json($entries);
+    }
+
+    /**
+     * GET /api/v1/admin/reports — real aggregates only: jobs/day
+     * and clips/day for the last 30 days, plus the top 10 users by
+     * clips rendered. No revenue anywhere — billing does not exist.
+     */
+    public function reports(Request $request)
+    {
+        $topUsers = DB::table('users')
+            ->join('processing_jobs', 'processing_jobs.user_id', '=', 'users.id')
+            ->join('clips', 'clips.job_id', '=', 'processing_jobs.id')
+            ->select(
+                'users.id', 'users.name', 'users.email',
+                DB::raw('count(distinct processing_jobs.id) as jobs_count'),
+                DB::raw('count(clips.id) as clips_count')
+            )
+            ->groupBy('users.id', 'users.name', 'users.email')
+            ->orderByDesc('clips_count')
+            ->limit(10)
+            ->get();
+
+        return response()->json([
+            'daily' => $this->dailySeries(),
+            'top_users' => $topUsers,
+            'totals' => [
+                'users' => User::count(),
+                'jobs' => ProcessingJob::count(),
+                'clips' => Clip::count(),
+                'clips_ready' => Clip::where('status', Clip::STATUS_READY)->count(),
+            ],
+        ]);
+    }
+
+    /**
+     * GET /api/v1/admin/monitor — measurable system facts only.
+     * Worker last-report + queue depth, ffmpeg/ffprobe versions as
+     * last reported by the worker, database size, file disk usage
+     * and totals. Nothing is estimated: a missing report is null.
+     */
+    public function monitor(Request $request)
+    {
+        $engine = Cache::get('engine_versions') ?? [
+            'ffmpeg' => null, 'ffprobe' => null, 'reported_at' => null,
+        ];
+
+        $databaseSize = null;
+        try {
+            if (config('database.default') === 'pgsql') {
+                $databaseSize = (int) DB::selectOne(
+                    'SELECT pg_database_size(current_database()) as size'
+                )->size;
+            } else {
+                $path = config('database.connections.sqlite.database');
+                $databaseSize = is_string($path) && is_file($path) ? filesize($path) : null;
+            }
+        } catch (\Throwable) {
+            $databaseSize = null;
+        }
+
+        $diskTotal = @disk_total_space(storage_path('app'));
+        $diskFree = @disk_free_space(storage_path('app'));
+
+        return response()->json([
+            'worker' => [
+                'last_report_at' => $engine['reported_at'],
+                'ffmpeg' => $engine['ffmpeg'],
+                'ffprobe' => $engine['ffprobe'],
+            ],
+            'queue' => [
+                'queued_jobs' => ProcessingJob::whereIn('state', [
+                    ProcessingJob::STATE_UPLOADED, ProcessingJob::STATE_QUEUED,
+                ])->count(),
+                'processing_jobs' => ProcessingJob::whereNotIn('state', array_merge(
+                    ProcessingJob::TERMINAL_STATES,
+                    [ProcessingJob::STATE_FAILED, ProcessingJob::STATE_CANCELLED,
+                     ProcessingJob::STATE_UPLOADED, ProcessingJob::STATE_QUEUED]
+                ))->count(),
+                'failed_jobs' => ProcessingJob::where('state', ProcessingJob::STATE_FAILED)->count(),
+            ],
+            'database' => [
+                'connection' => config('database.default'),
+                'ok' => $this->databaseOk(),
+                'size_bytes' => $databaseSize,
+            ],
+            'disk' => [
+                'path' => storage_path('app'),
+                'total_bytes' => $diskTotal === false ? null : $diskTotal,
+                'free_bytes' => $diskFree === false ? null : $diskFree,
+                'app_files_bytes' => StorageUsage::totalBytes(),
+            ],
+            'totals' => [
+                'users' => User::count(),
+                'projects' => Project::count(),
+                'jobs' => ProcessingJob::count(),
+                'clips' => Clip::count(),
+            ],
+        ]);
+    }
+
+    /**
+     * POST /api/v1/admin/notifications/broadcast — send a
+     * notification to ALL users or ONE selected user. It uses the
+     * existing notifications system, so it appears in the user's
+     * bell exactly like a job notification. Throttled: a broadcast
+     * is real fan-out work.
+     */
+    public function broadcast(Request $request)
+    {
+        $validated = $request->validate([
+            'title' => ['required', 'string', 'max:200'],
+            'message' => ['required', 'string', 'max:2000'],
+            'target' => ['required', 'string', Rule::in(['all', 'user'])],
+            'user_id' => ['required_if:target,user', 'nullable', 'integer', 'exists:users,id'],
+        ]);
+
+        $userIds = $validated['target'] === 'all'
+            ? User::pluck('id')
+            : collect([(int) $validated['user_id']]);
+
+        $now = now();
+        $created = 0;
+        foreach ($userIds->chunk(500) as $chunk) {
+            $rows = $chunk->map(fn ($id) => [
+                'user_id' => $id,
+                'job_id' => null,
+                'type' => Notification::TYPE_BROADCAST,
+                'title' => $validated['title'],
+                'body' => $validated['message'],
+                'link' => null,
+                'read_at' => null,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ])->all();
+            Notification::insert($rows);
+            $created += count($rows);
+        }
+
+        AdminActivityLog::record($request->user(), 'notification.broadcast', null, null, [
+            'target' => $validated['target'],
+            'user_id' => $validated['target'] === 'user' ? (int) $validated['user_id'] : null,
+            'recipients' => $created,
+            'title' => $validated['title'],
+        ]);
+
+        return response()->json([
+            'message' => "Broadcast sent to {$created} user(s).",
+            'recipients' => $created,
+        ]);
     }
 
     /**

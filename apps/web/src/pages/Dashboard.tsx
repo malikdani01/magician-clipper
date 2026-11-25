@@ -12,6 +12,7 @@ import {
   Sparkles,
   Video,
   Wand2,
+  X,
   Youtube,
 } from 'lucide-react'
 import { EmptyState } from '../components/EmptyState'
@@ -23,6 +24,7 @@ import { listJobs, type Job, type JobClip } from '../lib/jobs'
 import { fetchSettingsInsights, type SettingsInsights } from '../lib/insights'
 import { getCaptionStyle } from '../lib/captionStyles'
 import { LAYOUT_LABELS } from '../lib/jobs'
+import { usePlatform } from '../lib/platform'
 import { viralScore } from '../lib/viralScore'
 import { useAuth } from '../state/auth'
 import { usePreferences } from '../state/preferences'
@@ -87,6 +89,16 @@ export function DashboardPage() {
   const [stats, setStats] = useState<UserStats | null>(null)
   // Top clips + recent activity — frontend-only, from real job data.
   const [recentJobs, setRecentJobs] = useState<Job[]>([])
+  // Batch 10 (2026-11-25): admin announcement banner — dismissible
+  // for this session only (useState, no persistence). Null/empty =
+  // no banner.
+  const { platform } = usePlatform()
+  const [announcementDismissed, setAnnouncementDismissed] = useState(false)
+  const announcement = platform?.announcement
+  const showAnnouncement =
+    !announcementDismissed &&
+    typeof announcement === 'string' &&
+    announcement.trim() !== ''
   // Batch 4: "What works best" — real aggregation of the user's own
   // Ready jobs (only values with ≥3 jobs qualify).
   const [insights, setInsights] = useState<SettingsInsights | null>(null)
@@ -147,6 +159,23 @@ export function DashboardPage() {
 
   return (
     <div>
+      {/* Batch 10: admin announcement — dismissible, this session only. */}
+      {showAnnouncement ? (
+        <div
+          role="status"
+          className="mb-4 flex items-start justify-between gap-3 rounded-2xl border border-brand/40 bg-brand/10 px-4 py-3 text-sm text-white"
+        >
+          <span>{announcement}</span>
+          <button
+            type="button"
+            onClick={() => setAnnouncementDismissed(true)}
+            aria-label="Dismiss announcement"
+            className="shrink-0 rounded-lg p-1 text-[var(--color-text-muted)] hover:bg-white/10 hover:text-white"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      ) : null}
       {/* Hero — design-reference welcome banner. */}
       <section className="aurora-card relative overflow-hidden rounded-2xl border border-ink-border bg-ink-panel p-6 shadow-card backdrop-blur-xl sm:p-8">
         <div

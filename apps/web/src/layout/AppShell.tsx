@@ -18,6 +18,7 @@ import {
   WandSparkles,
 } from 'lucide-react'
 import { NotificationsBell } from '../components/NotificationsBell'
+import { PlatformProvider, usePlatform, type PlatformPages } from '../lib/platform'
 import { useAuth } from '../state/auth'
 import { usePreferences } from '../state/preferences'
 import type { TranslationKey } from '../lib/i18n'
@@ -47,10 +48,30 @@ const ADMIN_NAV_ITEM = { to: '/admin', labelKey: 'navAdminPanel', icon: ShieldCh
 function Sidebar({ mobileOpen, onClose }: { mobileOpen: boolean; onClose: () => void }) {
   const { user, loading } = useAuth()
   const { t } = usePreferences()
+  const { platform, loading: platformLoading } = usePlatform()
   // Admin-only sidebar entry (last in the list). The /admin route
   // itself is still guarded by AdminLayout — this is navigation
   // only, never the enforcement.
   const navItems = user?.role === 'admin' ? [...NAV_ITEMS, ADMIN_NAV_ITEM] : NAV_ITEMS
+  // Batch 10 (2026-11-25): platform gating — hide the pages the
+  // admin turned off. Dashboard, AI Clipper, My Projects and
+  // Settings are never hidden. While the platform payload is still
+  // loading (or unavailable), show everything — never flash-hide.
+  const PAGE_KEYS: Record<string, keyof PlatformPages> = {
+    '/editor': 'editor',
+    '/library': 'library',
+    '/brand-kit': 'brand_kit',
+    '/exports': 'exports',
+    '/usage': 'usage',
+    '/help': 'help',
+  }
+  const visibleNavItems =
+    platformLoading || !platform
+      ? navItems
+      : navItems.filter((item) => {
+          const key = PAGE_KEYS[item.to]
+          return !key || platform.pages[key]
+        })
   // While the stored session is still being verified, show a loading
   // state — never the guest UI. Rendering "Guest User" + Sign in /
   // Register for a signed-in user (even for a second) is the flash
@@ -82,7 +103,7 @@ function Sidebar({ mobileOpen, onClose }: { mobileOpen: boolean; onClose: () => 
       </Link>
 
       <nav className="mt-4 flex-1 space-y-1 overflow-y-auto px-3 pb-4">
-        {navItems.map((item) => (
+        {visibleNavItems.map((item) => (
           <NavLink
             key={item.to}
             to={item.to}
@@ -216,14 +237,35 @@ function TopBar({ onMenuClick }: { onMenuClick: () => void }) {
 }
 
 export function AppShell() {
+  return (
+    <PlatformProvider>
+      <AppShellInner />
+    </PlatformProvider>
+  )
+}
+
+function AppShellInner() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const location = useLocation()
+  const { platform } = usePlatform()
+  const maintenanceOn = platform?.maintenance.enabled === true
+  const maintenanceMessage =
+    platform?.maintenance.message ||
+    'Magician Clipper is under maintenance — please check back soon.'
   return (
     <div className="relative flex h-full">
       <div className="aurora-mesh" aria-hidden="true" />
       <Sidebar mobileOpen={mobileNavOpen} onClose={() => setMobileNavOpen(false)} />
       <div className="relative z-10 flex min-w-0 flex-1 flex-col">
         <TopBar onMenuClick={() => setMobileNavOpen(true)} />
+        {maintenanceOn ? (
+          <div
+            role="alert"
+            className="border-b border-amber-400/40 bg-amber-400/10 px-6 py-3 text-sm font-medium text-amber-200"
+          >
+            {maintenanceMessage}
+          </div>
+        ) : null}
         <main key={location.pathname} className="animate-page-in flex-1 overflow-y-auto p-6">
           <Outlet />
         </main>

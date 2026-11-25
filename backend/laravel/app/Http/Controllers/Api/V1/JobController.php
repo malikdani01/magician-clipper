@@ -8,6 +8,8 @@ use App\Models\ProcessingJob;
 use App\Models\Project;
 use App\Support\JobSettingsRules;
 use App\Support\MediaStorage;
+use App\Support\PlatformGate;
+use App\Support\PlatformSettings;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -72,6 +74,12 @@ class JobController extends Controller
      */
     public function store(Request $request)
     {
+        // Batch 10: suspended users and maintenance mode stop here,
+        // before any validation or file handling.
+        if (($gateError = PlatformGate::forJobCreation($request->user())) !== null) {
+            return $gateError;
+        }
+
         // Multipart (FormData) clients send booleans as the strings
         // "true"/"false"; Laravel's `boolean` rule only accepts
         // true/false/1/0/"1"/"0", so normalise the string forms first.
@@ -96,17 +104,22 @@ class JobController extends Controller
             return $this->storeBulk($request);
         }
 
+        $user = $request->user();
+
         // Settings rules live in JobSettingsRules so presets validate
         // against the exact same rules as job creation (no drift).
+        // Batch 10: the file-size cap and the clip-count cap come from
+        // the platform settings (admin-controlled), with the user's
+        // per-user clip override winning over the platform default.
         $validated = $request->validate(array_merge([
             'title' => ['sometimes', 'nullable', 'string', 'max:255'],
             'project_id' => ['sometimes', 'nullable', 'integer', 'exists:projects,id'],
-            'file' => ['sometimes', 'file', 'mimes:mp4,mov,mkv,webm', 'max:2097152'],
+            'file' => ['sometimes', 'file', 'mimes:mp4,mov,mkv,webm', 'max:' . (PlatformSettings::limit('max_upload_mb') * 1024)],
             'source_url' => ['sometimes', 'nullable', 'url', 'max:2048'],
             // Batch 9: optional music bed (mp3/wav/m4a, max 50 MB).
             // ffprobe-validated as audio in checkMusicBed below.
             'music_bed' => ['sometimes', 'file', 'mimes:mp3,wav,m4a', 'max:51200'],
-        ], JobSettingsRules::rules()));
+        ], JobSettingsRules::rules(PlatformSettings::maxClipsFor($user))));
 
         $hasFile = $request->hasFile('file');
         $hasUrl = ! empty($validated['source_url']);
@@ -126,7 +139,14 @@ class JobController extends Controller
             return $bedError;
         }
 
-        $user = $request->user();
+        // Batch 10: disabled features and the free daily limit are
+        // enforced here — before any file is stored or job created.
+        if (($featureError = PlatformGate::forJobSettings($validated, $request->hasFile('music_bed'))) !== null) {
+            return $featureError;
+        }
+        if (($limitError = PlatformGate::dailyLimit($user)) !== null) {
+            return $limitError;
+        }
 
         $project = null;
         if (! empty($validated['project_id'])) {
@@ -251,14 +271,25 @@ class JobController extends Controller
      */
     private function storeBulk(Request $request)
     {
+        // Batch 10: suspended users, maintenance mode and the bulk
+        // feature toggle stop here, before any validation or probing.
+        if (($gateError = PlatformGate::forJobCreation($request->user())) !== null) {
+            return $gateError;
+        }
+        if (! PlatformSettings::feature('bulk_jobs')) {
+            return PlatformGate::featureDenied('bulk_jobs', 'Bulk jobs are disabled by the admin.');
+        }
+
+        $user = $request->user();
+
         $validated = $request->validate(array_merge([
             'title' => ['sometimes', 'nullable', 'string', 'max:255'],
             'project_id' => ['sometimes', 'nullable', 'integer', 'exists:projects,id'],
-            'files' => ['required', 'array', 'min:1', 'max:5'],
-            'files.*' => ['file', 'mimes:mp4,mov,mkv,webm', 'max:2097152'],
+            'files' => ['required', 'array', 'min:1', 'max:' . PlatformSettings::limit('max_bulk_files')],
+            'files.*' => ['file', 'mimes:mp4,mov,mkv,webm', 'max:' . (PlatformSettings::limit('max_upload_mb') * 1024)],
             // Batch 9: one shared music bed for all bulk jobs.
             'music_bed' => ['sometimes', 'file', 'mimes:mp3,wav,m4a', 'max:51200'],
-        ], JobSettingsRules::rules()));
+        ], JobSettingsRules::rules(PlatformSettings::maxClipsFor($user))));
 
         if (! empty($request->input('source_url'))) {
             return response()->json([
@@ -275,7 +306,17 @@ class JobController extends Controller
             return $bedError;
         }
 
-        $user = $request->user();
+        // Batch 10: disabled features and the daily limit (counted
+        // across ALL files in this bulk request) are enforced before
+        // any file is probed or job created.
+        if (($featureError = PlatformGate::forJobSettings($validated, $request->hasFile('music_bed'))) !== null) {
+            return $featureError;
+        }
+        /** @var \Illuminate\Http\UploadedFile[] $files */
+        $files = $request->file('files');
+        if (($limitError = PlatformGate::dailyLimit($user, count($files))) !== null) {
+            return $limitError;
+        }
 
         $project = null;
         if (! empty($validated['project_id'])) {
@@ -284,9 +325,6 @@ class JobController extends Controller
                 return response()->json(['error' => 'forbidden', 'message' => 'You do not own this project.'], 403);
             }
         }
-
-        /** @var \Illuminate\Http\UploadedFile[] $files */
-        $files = $request->file('files');
 
         // Probe EVERY file first — a single unplayable file rejects
         // the request before any job (or file) is created.
