@@ -29,8 +29,10 @@ function CardCheck() {
   )
 }
 
-/** Schematic 9:16 composition diagram for one layout. */
-function LayoutMiniPreview({ layout }: { layout: ClipLayout }) {
+/** Schematic 9:16 composition diagram for one layout. Exported for
+ * the wizard's collapsible layout dropdown header (Batch 13) — the
+ * header shows the selected layout's mini-preview. */
+export function LayoutMiniPreview({ layout }: { layout: ClipLayout }) {
   return (
     <div
       aria-hidden="true"
@@ -100,12 +102,20 @@ export function LayoutPicker({
   value,
   onChange,
   disabled = false,
+  // Batch 13: only the layouts that genuinely render on the chosen
+  // ratio are shown (all ten on portrait, six on 16:9/1:1). Defaults
+  // to the full list — callers that do not pass a ratio keep the old
+  // behaviour (the JobDetail re-render modal passes nothing).
+  allowed,
 }: {
   value: ClipLayout
   onChange: (id: ClipLayout) => void
   disabled?: boolean
+  allowed?: ClipLayout[]
 }) {
-  const ids = Object.keys(LAYOUT_LABELS) as ClipLayout[]
+  const ids = (allowed ?? (Object.keys(LAYOUT_LABELS) as ClipLayout[])).filter((id) =>
+    (Object.keys(LAYOUT_LABELS) as ClipLayout[]).includes(id),
+  )
   return (
     <div
       role="group"

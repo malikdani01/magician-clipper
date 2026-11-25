@@ -505,7 +505,9 @@ class LayoutChainsTests(unittest.TestCase):
         self.assertNotIn("vstack", joined)
 
     # Batch 9 (2026-11-25): five new layouts — gradient_fill, stacked,
-    # letterbox, face_closeup, framed. All 9:16-only like the old five.
+    # letterbox, face_closeup, framed. (Batch 13: the agnostic ones now
+    # render on every ratio; only the portrait compositions stay
+    # 9:16/4:5 — see Batch13LayoutRatioTests.)
     def test_gradient_fill_uses_gradient_background_not_blur(self):
         joined = self._joined("gradient_fill")
         self.assertIn("gradients=size=1080x1920", joined)
@@ -514,9 +516,15 @@ class LayoutChainsTests(unittest.TestCase):
         self.assertIn("overlay=(W-w)/2:(H-h)/2", joined)
         self.assertNotIn("gblur=", joined)
 
-    def test_gradient_fill_at_16_9_falls_back_to_centre_crop(self):
-        self.assertNotIn("gradients=",
-                         self._joined("gradient_fill", ratio="16:9"))
+    def test_gradient_fill_at_16_9_renders_at_target_size(self):
+        # Batch 13: gradient_fill is canvas-agnostic — it renders on
+        # 16:9 now (the old 9:16-only fallback is gone).
+        chains = muse_worker.build_layout_chains(
+            self.SRC, 1280, 720, 1920, 1080, "16:9", "gradient_fill",
+            10.0, 30.0, face_box=self.BOX)
+        joined = ";".join(chains)
+        self.assertIn("gradients=size=1920x1080", joined)
+        self.assertNotIn("gblur=", joined)
 
     def test_stacked_video_top_dark_panel_below(self):
         joined = self._joined("stacked")
@@ -646,18 +654,30 @@ class NewLayoutsRenderBatch9Tests(unittest.TestCase):
             px = self._pixels(self._render("stacked", tmp), tmp)
             self.assertTrue(self._near(px[540, 1800], (15, 23, 42)),
                             f"stacked panel not slate: {px[540, 1800]}")
-            # gradient_fill: smooth Aurora gradient behind the video —
-            # top is navy-ish (blue-dominant), bottom is fuchsia-ish
-            # (red-dominant), and the two ends differ.
-            px = self._pixels(self._render("gradient_fill", tmp), tmp)
-            top, bottom = px[540, 100], px[540, 1800]
-            self.assertGreater(sum(top), 60,
-                               f"gradient top too dark: {top}")
-            self.assertGreater(top[2], top[0],
-                               f"gradient top not blue-dominant: {top}")
-            self.assertGreater(bottom[0], bottom[2],
-                               f"gradient bottom not red-dominant: {bottom}")
-            self.assertNotEqual(top, bottom, "gradient ends identical")
+            # gradient_fill: smooth Aurora gradient behind the video.
+            # The `gradients` source ANIMATES (its line rotates; the
+            # filter has no static mode), so the top colour cycles
+            # with the phase — it is blue-dominant only at some
+            # phases, and the two ends even coincide when the line
+            # goes horizontal. Asserting "top is navy at t=2.0" is
+            # therefore flaky by construction (it failed 2 of 3 full
+            # suite runs; the top pixel differs between identical
+            # renders). What is stable, and what this test proves:
+            # the bottom stays fuchsia (red-dominant) and the frame
+            # stays lit at every sampled time, and the ends differ
+            # at (at least) one sampled time — a real gradient, not
+            # a flat fill.
+            clip = self._render("gradient_fill", tmp)
+            ends_differ = False
+            for at in (0.5, 2.0):
+                px = self._pixels(clip, tmp, at=at)
+                top, bottom = px[540, 100], px[540, 1800]
+                self.assertGreater(sum(top), 60,
+                                   f"gradient top too dark at t={at}: {top}")
+                self.assertGreater(bottom[0], bottom[2],
+                                   f"gradient bottom not red-dominant at t={at}: {bottom}")
+                ends_differ = ends_differ or top != bottom
+            self.assertTrue(ends_differ, "gradient ends identical at both sampled times")
             # framed: dark slate margin + thin bright border around
             # the video rect (border at x=27..31, video starts x=30).
             px = self._pixels(self._render("framed", tmp), tmp)
@@ -2183,12 +2203,22 @@ class Batch3Tests(unittest.TestCase):
 
     # --- Multi-ratio export ---
 
-    def test_export_ratios_defaults_and_forces_primary(self):
+    def test_export_ratios_single_ratio_no_forced_916(self):
+        # Batch 13 (parent fix): one ratio in, same ratio out — 9:16
+        # is NO LONGER force-included.
         self.assertEqual(muse_worker.export_ratios({}), ["9:16"])
         self.assertEqual(
             muse_worker.export_ratios(
+                {"aspect_ratio": "16:9", "export_ratios": ["16:9"]}),
+            ["16:9"])
+        self.assertEqual(
+            muse_worker.export_ratios(
+                {"aspect_ratio": "4:5", "export_ratios": ["4:5"]}),
+            ["4:5"])
+        self.assertEqual(
+            muse_worker.export_ratios(
                 {"aspect_ratio": "1:1", "export_ratios": ["16:9"]}),
-            ["1:1", "9:16", "16:9"])
+            ["1:1", "16:9"])
         # Unknown ratios are dropped; duplicates collapse.
         self.assertEqual(
             muse_worker.export_ratios(
@@ -4512,6 +4542,443 @@ class CampaignBatch12Tests(unittest.TestCase):
         self.assertEqual(title, "Climb To The Highest Point")
         self.assertIn("#tower", tags)
         self.assertLessEqual(len(tags), 8)
+
+
+class Batch13AutoGradeTests(unittest.TestCase):
+    """Batch 13: automatic per-clip colour grading — the worker
+    analyses each clip's frames and picks the look that suits it.
+    New looks (clean / mono / vintage) join the Batch 9 set; "auto"
+    is the new default; "none" still means no filter."""
+
+    def test_new_look_filters_exist(self):
+        for grade in ("clean", "mono", "vintage"):
+            filt = muse_worker.colour_grade_filter(grade)
+            self.assertTrue(filt, grade)
+            self.assertIn("=", filt)
+        # auto resolves before the filter lookup; none/unknown -> "".
+        self.assertEqual(muse_worker.colour_grade_filter("auto"), "")
+        self.assertEqual(muse_worker.colour_grade_filter("none"), "")
+        self.assertEqual(muse_worker.colour_grade_filter("bogus"), "")
+
+    def _solid_image(self, rgb, size=(64, 36)):
+        from PIL import Image
+        return Image.new("RGB", size, rgb)
+
+    def test_measure_frame_stats_dark_and_balanced(self):
+        dark = muse_worker.measure_frame_stats(self._solid_image((40, 40, 40)))
+        self.assertLess(dark["luma"], 75)
+        self.assertAlmostEqual(dark["contrast"], 0.0, delta=0.5)
+        self.assertAlmostEqual(dark["saturation"], 0.0, delta=0.02)
+        grey = muse_worker.measure_frame_stats(self._solid_image((128, 128, 128)))
+        self.assertAlmostEqual(grey["luma"], 128, delta=1.0)
+        self.assertAlmostEqual(grey["r_minus_b"], 0.0, delta=0.5)
+
+    def test_measure_frame_stats_cast_and_saturation(self):
+        blue = muse_worker.measure_frame_stats(self._solid_image((30, 30, 120)))
+        self.assertLess(blue["r_minus_b"], -12)
+        red = muse_worker.measure_frame_stats(self._solid_image((120, 30, 30)))
+        self.assertGreater(red["r_minus_b"], 12)
+        vivid = muse_worker.measure_frame_stats(self._solid_image((220, 30, 30)))
+        self.assertGreater(vivid["saturation"], 0.7)
+
+    def test_pick_auto_grade_branches(self):
+        base = {"luma": 130.0, "contrast": 50.0, "saturation": 0.4, "r_minus_b": 0.0}
+        self.assertEqual(
+            muse_worker.pick_auto_grade({**base, "luma": 50.0}),
+            ("clean", "dark — brightened and lifted"))
+        self.assertEqual(
+            muse_worker.pick_auto_grade({**base, "r_minus_b": -30.0}),
+            ("warm", "cool cast — warmed up"))
+        self.assertEqual(
+            muse_worker.pick_auto_grade({**base, "r_minus_b": 30.0}),
+            ("cool", "warm cast — cooled down"))
+        self.assertEqual(
+            muse_worker.pick_auto_grade(
+                {**base, "contrast": 15.0, "saturation": 0.15}),
+            ("vibrant", "washed out — contrast and colour boosted"))
+        self.assertEqual(
+            muse_worker.pick_auto_grade({**base, "saturation": 0.2}),
+            ("vibrant", "flat colour — saturation boosted"))
+        self.assertEqual(
+            muse_worker.pick_auto_grade(base),
+            ("clean", "already balanced — gentle lift only"))
+        # Dark wins over a cast (priority order is documented).
+        self.assertEqual(
+            muse_worker.pick_auto_grade(
+                {**base, "luma": 50.0, "r_minus_b": -30.0})[0], "clean")
+
+    def test_analyse_clip_frames_fallback_never_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            grade, reason, stats = muse_worker.analyse_clip_frames(
+                Path(d) / "missing.mp4", 0.0, 5.0, Path(d))
+        self.assertEqual(grade, "clean")
+        self.assertIn("failed", reason)
+        self.assertEqual(stats, {})
+
+    def test_resolve_colour_grade_modes(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            self.assertEqual(
+                muse_worker.resolve_colour_grade(
+                    {"colour_grade": "none"}, tmp / "x.mp4", 0.0, 5.0, tmp),
+                ("none", None, {}))
+            self.assertEqual(
+                muse_worker.resolve_colour_grade(
+                    {"colour_grade": "vibrant"}, tmp / "x.mp4", 0.0, 5.0, tmp),
+                ("vibrant", None, {}))
+            self.assertEqual(
+                muse_worker.resolve_colour_grade(
+                    {"colour_grade": "bogus"}, tmp / "x.mp4", 0.0, 5.0, tmp),
+                ("none", None, {}))
+            # Missing setting behaves like "none" (old jobs).
+            self.assertEqual(
+                muse_worker.resolve_colour_grade(
+                    {}, tmp / "x.mp4", 0.0, 5.0, tmp),
+                ("none", None, {}))
+
+    def _make_colour_source(self, path, color="0x804040"):
+        """A 5s muted-colour MP4 via lavfi (no audio)."""
+        cmd = [muse_worker.FFMPEG, "-y", "-v", "error",
+               "-f", "lavfi",
+               "-i", f"color=c={color}:s=640x360:d=5:r=30",
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+               "-pix_fmt", "yuv420p", str(path)]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_auto_resolves_on_a_real_source(self):
+        # Muted dark red: luma ~83 (not dark), R-B = +64 (warm cast)
+        # -> the picker must choose "cool".
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = tmp / "src.mp4"
+            self._make_colour_source(src)
+            grade, reason, stats = muse_worker.resolve_colour_grade(
+                {"colour_grade": "auto"}, src, 0.0, 5.0, tmp)
+            self.assertEqual(grade, "cool")
+            self.assertIn("warm cast", reason)
+            self.assertGreater(stats["r_minus_b"], 12)
+
+    def _mean_rgb(self, video_path, png_path):
+        from PIL import Image, ImageStat
+        cmd = [muse_worker.FFMPEG, "-y", "-v", "error",
+               "-i", str(video_path), "-frames:v", "1",
+               "-f", "image2", str(png_path)]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        img = Image.open(png_path).convert("RGB")
+        return ImageStat.Stat(img).mean
+
+    def test_auto_render_stores_grade_and_reason(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = tmp / "src.mp4"
+            self._make_colour_source(src)
+            info = muse_worker.probe_summary(src)
+            out = tmp / "auto.mp4"
+            clip = {"start": 0.0, "end": 5.0}
+            muse_worker.render_clip(
+                src, clip,
+                _settings(layout="center_crop", captions_enabled=False,
+                          duration_mode="exact", duration_seconds=5,
+                          colour_grade="auto"),
+                [], out, info, tmp)
+            self.assertEqual(clip["_batch1_stats"]["colour_grade"], "cool")
+            self.assertIn("warm cast",
+                          clip["_batch1_stats"]["colour_grade_reason"])
+            self.assertGreater(
+                clip["_batch1_stats"]["colour_grade_stats"]["r_minus_b"], 12)
+            # And "none" renders with no grade and no reason.
+            out2 = tmp / "off.mp4"
+            clip2 = {"start": 0.0, "end": 5.0}
+            muse_worker.render_clip(
+                src, clip2,
+                _settings(layout="center_crop", captions_enabled=False,
+                          duration_mode="exact", duration_seconds=5,
+                          colour_grade="none"),
+                [], out2, info, tmp)
+            self.assertEqual(clip2["_batch1_stats"]["colour_grade"], "none")
+            self.assertIsNone(clip2["_batch1_stats"]["colour_grade_reason"])
+
+    def test_mono_and_vintage_change_frames(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = tmp / "src.mp4"
+            self._make_colour_source(src)
+            info = muse_worker.probe_summary(src)
+            out_plain = tmp / "plain.mp4"
+            clip_plain = {"start": 0.0, "end": 5.0}
+            muse_worker.render_clip(
+                src, clip_plain,
+                _settings(layout="center_crop", captions_enabled=False,
+                          duration_mode="exact", duration_seconds=5,
+                          colour_grade="none"),
+                [], out_plain, info, tmp)
+            plain = self._mean_rgb(out_plain, tmp / "plain.png")
+            for grade, out_name in (("mono", "mono.mp4"),
+                                    ("vintage", "vintage.mp4")):
+                out = tmp / out_name
+                clip = {"start": 0.0, "end": 5.0}
+                muse_worker.render_clip(
+                    src, clip,
+                    _settings(layout="center_crop", captions_enabled=False,
+                              duration_mode="exact", duration_seconds=5,
+                              colour_grade=grade),
+                    [], out, info, tmp)
+                self.assertEqual(clip["_batch1_stats"]["colour_grade"], grade)
+                shifted = self._mean_rgb(out, tmp / f"{grade}.png")
+                shift = sum(abs(a - b) for a, b in zip(plain, shifted))
+                self.assertGreater(shift, 3.0,
+                                   f"{grade}: plain {plain} vs {shifted}")
+            # Mono really is grey: R, G, B within a few levels.
+            mono = self._mean_rgb(tmp / "mono.mp4", tmp / "mono2.png")
+            self.assertLess(max(mono) - min(mono), 8.0, f"mono RGB {mono}")
+
+    def test_ready_note_reports_grade_and_quality(self):
+        rendered = [
+            {"_batch1_stats": {
+                "colour_grade": "vibrant",
+                "colour_grade_reason": "washed out — contrast and colour boosted",
+                "quality_mode": "high", "quality_encode": "slow/CRF 16"}},
+            {"_batch1_stats": {
+                "colour_grade": "clean",
+                "colour_grade_reason": "already balanced — gentle lift only",
+                "quality_mode": "high", "quality_encode": "slow/CRF 16"}},
+        ]
+        note = muse_worker._ready_note([{}, {}], 2, [], rendered=rendered)
+        self.assertIsNotNone(note)
+        self.assertIn(
+            "Colour grade: Clip 1: Vibrant (washed out — contrast and colour boosted); "
+            "Clip 2: Clean (already balanced — gentle lift only).", note)
+        self.assertIn("Quality: High (slow/CRF 16).", note)
+        # A manual look collapses to one line; Standard adds no line.
+        rendered2 = [
+            {"_batch1_stats": {
+                "colour_grade": "warm", "colour_grade_reason": None,
+                "quality_mode": "standard", "quality_encode": "medium/CRF 18"}},
+            {"_batch1_stats": {
+                "colour_grade": "warm", "colour_grade_reason": None,
+                "quality_mode": "standard", "quality_encode": "medium/CRF 18"}},
+        ]
+        note2 = muse_worker._ready_note([{}, {}], 2, [], rendered=rendered2)
+        self.assertIn("Colour grade: Warm applied to all 2 clip(s).", note2 or "")
+        self.assertNotIn("Quality:", note2 or "")
+
+
+class Batch13QualityTests(unittest.TestCase):
+    """Batch 13 quality boost v2: the Draft/Standard/High selector
+    finally drives the encoder (before this batch the worker ignored
+    it and always rendered veryfast/CRF 18)."""
+
+    def test_quality_encode_params(self):
+        self.assertEqual(muse_worker.quality_encode_params({"quality": "draft"}),
+                         ("fast", "20"))
+        self.assertEqual(muse_worker.quality_encode_params({"quality": "standard"}),
+                         ("medium", "18"))
+        self.assertEqual(muse_worker.quality_encode_params({"quality": "high"}),
+                         ("slow", "16"))
+        self.assertEqual(muse_worker.quality_encode_params({}),
+                         ("medium", "18"))
+        self.assertEqual(muse_worker.quality_encode_params({"quality": "bogus"}),
+                         ("medium", "18"))
+        self.assertEqual(muse_worker.quality_encode_params({"quality": "High"}),
+                         ("slow", "16"))
+
+    def test_scale_expr_flags(self):
+        expr = muse_worker.scale_expr(1080, 1920)
+        self.assertIn("flags=lanczos+accurate_rnd+full_chroma_int", expr)
+        self.assertTrue(expr.startswith("scale=1080:1920:"))
+        extra = muse_worker.scale_expr(
+            1080, 1920, "force_original_aspect_ratio=decrease")
+        self.assertIn("force_original_aspect_ratio=decrease", extra)
+        self.assertIn("flags=lanczos+accurate_rnd+full_chroma_int", extra)
+
+    def test_quality_modes_render_and_record_stats(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = tmp / "src.mp4"
+            cmd = [muse_worker.FFMPEG, "-y", "-v", "error",
+                   "-f", "lavfi",
+                   "-i", "color=c=0x804040:s=640x360:d=5:r=30",
+                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                   "-pix_fmt", "yuv420p", str(src)]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            info = muse_worker.probe_summary(src)
+            for quality, preset, crf in (("draft", "fast", "20"),
+                                         ("high", "slow", "16")):
+                out = tmp / f"{quality}.mp4"
+                clip = {"start": 0.0, "end": 5.0}
+                muse_worker.render_clip(
+                    src, clip,
+                    _settings(layout="center_crop", captions_enabled=False,
+                              duration_mode="exact", duration_seconds=5,
+                              quality=quality, colour_grade="none"),
+                    [], out, info, tmp)
+                self.assertTrue(out.exists())
+                self.assertGreater(out.stat().st_size, 0)
+                self.assertEqual(clip["_batch1_stats"]["quality_mode"], quality)
+                self.assertEqual(clip["_batch1_stats"]["quality_encode"],
+                                 f"{preset}/CRF {crf}")
+
+    def test_render_command_has_denoise_and_quality_flags(self):
+        # Capture the real ffmpeg command (delegating to the real run)
+        # and assert the Batch 13 chain is in it.
+        seen: list[list[str]] = []
+        real_run = muse_worker.run
+
+        def _recording_run(cmd, timeout=None):
+            seen.append(list(cmd))
+            return real_run(cmd, timeout=timeout)
+
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            src = tmp / "src.mp4"
+            cmd = [muse_worker.FFMPEG, "-y", "-v", "error",
+                   "-f", "lavfi",
+                   "-i", "color=c=0x804040:s=640x360:d=5:r=30",
+                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                   "-pix_fmt", "yuv420p", str(src)]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            info = muse_worker.probe_summary(src)
+            out = tmp / "q.mp4"
+            clip = {"start": 0.0, "end": 5.0}
+            with mock.patch.object(muse_worker, "run", _recording_run):
+                muse_worker.render_clip(
+                    src, clip,
+                    _settings(layout="center_crop", captions_enabled=False,
+                              duration_mode="exact", duration_seconds=5,
+                              quality="high", colour_grade="none"),
+                    [], out, info, tmp)
+            self.assertTrue(out.exists())
+            joined = " ".join(" ".join(c) for c in seen)
+            self.assertIn("hqdn3d=1.5:1.5:4:3", joined)
+            self.assertIn("unsharp=5:5:0.7:5:5:0.0", joined)
+            self.assertIn("flags=lanczos+accurate_rnd+full_chroma_int", joined)
+            self.assertIn("-preset slow", joined)
+            self.assertIn("-crf 16", joined)
+
+class Batch13LayoutRatioTests(unittest.TestCase):
+    """Batch 13 addition 11 (2026-11-25): the Layout section no longer
+    vanishes off 9:16. Every layout chain is parameterised by the
+    target canvas (tw/th) instead of hardcoding the 9:16 frame, the
+    wizard shows only the layouts that genuinely render on the chosen
+    ratio, and anything else falls back to centre crop — never faked.
+    9:16 outputs are byte-identical to before (split 864+1056,
+    framed 1020x1813, closeup 16:9 crop)."""
+
+    BOX = (0.20, 0.30, 0.05, 0.08)  # small inset face, left of centre
+    DEMO = (Path(__file__).resolve().parents[3]
+            / "demo" / "demo-source-3min.mp4")
+
+    def _chains(self, layout, ratio, tw, th, face_box=BOX, sw=1280, sh=720):
+        return muse_worker.build_layout_chains(
+            Path("no-such-file.mp4"), sw, sh, tw, th, ratio, layout,
+            10.0, 5.0, face_box=face_box)
+
+    def _joined(self, *args, **kwargs):
+        return ";".join(self._chains(*args, **kwargs))
+
+    def test_allowed_layouts_per_ratio(self):
+        self.assertEqual(len(muse_worker.allowed_layouts_for_ratio("9:16")), 10)
+        self.assertEqual(len(muse_worker.allowed_layouts_for_ratio("4:5")), 10)
+        self.assertEqual(set(muse_worker.allowed_layouts_for_ratio("9:16")),
+                         set(muse_worker.allowed_layouts_for_ratio("4:5")))
+        agnostic = {"center_crop", "blur_fill", "gradient_fill",
+                    "letterbox", "face_closeup", "framed"}
+        self.assertEqual(set(muse_worker.allowed_layouts_for_ratio("16:9")), agnostic)
+        self.assertEqual(set(muse_worker.allowed_layouts_for_ratio("1:1")), agnostic)
+        self.assertEqual(set(muse_worker.allowed_layouts_for_ratio("bogus")), agnostic)
+
+    def test_resolve_layout_falls_back_only_when_it_must(self):
+        self.assertEqual(muse_worker.resolve_layout("split", "4:5"), "split")
+        self.assertEqual(muse_worker.resolve_layout("pip_facecam", "4:5"), "pip_facecam")
+        self.assertEqual(muse_worker.resolve_layout("streamer_full", "9:16"), "streamer_full")
+        self.assertEqual(muse_worker.resolve_layout("stacked", "4:5"), "stacked")
+        self.assertEqual(muse_worker.resolve_layout("split", "16:9"), "center_crop")
+        self.assertEqual(muse_worker.resolve_layout("pip_facecam", "1:1"), "center_crop")
+        self.assertEqual(muse_worker.resolve_layout("streamer_full", "16:9"), "center_crop")
+        self.assertEqual(muse_worker.resolve_layout("stacked", "1:1"), "center_crop")
+        self.assertEqual(muse_worker.resolve_layout("blur_fill", "16:9"), "blur_fill")
+        self.assertEqual(muse_worker.resolve_layout("framed", "1:1"), "framed")
+        self.assertEqual(muse_worker.resolve_layout("face_closeup", "16:9"), "face_closeup")
+        self.assertEqual(muse_worker.resolve_layout("nope", "9:16"), "center_crop")
+        self.assertEqual(muse_worker.resolve_layout(None, "16:9"), "center_crop")
+
+    def test_closeup_size_follows_target_ratio(self):
+        # 9:16: unchanged from the Batch 9 formula (320 wide, 16:9 tall).
+        cw, ch = muse_worker._closeup_size(self.BOX, 1280, 720)
+        self.assertEqual((cw, ch), (320, 568))
+        # 16:9: the crop itself is 16:9, so scaling to the frame cannot stretch.
+        cw, ch = muse_worker._closeup_size(self.BOX, 1280, 720, 1920, 1080)
+        self.assertEqual((cw, ch), (320, 180))
+        # 1:1: square crop.
+        cw, ch = muse_worker._closeup_size(self.BOX, 1280, 720, 1080, 1080)
+        self.assertEqual((cw, ch), (320, 320))
+
+    def test_split_panels_scale_with_frame_height(self):
+        # 9:16 unchanged: 864 + 1056.
+        joined = self._joined("split", "9:16", 1080, 1920)
+        self.assertIn("scale=1080:864", joined)
+        self.assertIn("scale=1080:1056", joined)
+        self.assertIn("vstack", joined)
+        # 4:5: 45% / 55% of 1350 -> 607 + 743.
+        joined = self._joined("split", "4:5", 1080, 1350)
+        self.assertIn("scale=1080:607", joined)
+        self.assertIn("scale=1080:743", joined)
+        self.assertIn("vstack", joined)
+
+    def test_split_off_portrait_falls_back_to_centre_crop(self):
+        joined = self._joined("split", "16:9", 1920, 1080)
+        self.assertNotIn("vstack", joined)
+        self.assertIn("scale=1920:1080", joined)
+
+    def test_agnostic_layouts_use_target_size(self):
+        joined = self._joined("blur_fill", "16:9", 1920, 1080)
+        self.assertIn("scale=1920:1080:flags=lanczos+accurate_rnd+full_chroma_int:"
+                      "force_original_aspect_ratio=increase", joined)
+        self.assertIn("gblur=sigma=40", joined)
+        joined = self._joined("gradient_fill", "1:1", 1080, 1080)
+        self.assertIn("gradients=size=1080x1080", joined)
+        joined = self._joined("letterbox", "16:9", 1920, 1080)
+        self.assertIn("pad=1920:1080", joined)
+        # framed: 30px side / ~53px top-bottom margins on any canvas.
+        joined = self._joined("framed", "1:1", 1080, 1080)
+        self.assertIn("scale=1020:973", joined)
+        self.assertIn("pad=1080:1080:30:53", joined)
+        # framed at 9:16 is unchanged (1020x1813).
+        joined = self._joined("framed", "9:16", 1080, 1920)
+        self.assertIn("scale=1020:1813", joined)
+        # face_closeup at 16:9 crops 16:9 (320x180 for this box), no stretch.
+        joined = self._joined("face_closeup", "16:9", 1920, 1080)
+        self.assertIn("crop=320:180:", joined)
+        self.assertIn("scale=1920:1080", joined)
+
+    def _render(self, layout, ratio, tmp):
+        info = muse_worker.probe_summary(self.DEMO)
+        out = tmp / f"{layout}-{ratio.replace(':', 'x')}.mp4"
+        settings = _settings(layout=layout, aspect_ratio=ratio,
+                             captions_enabled=False)
+        muse_worker.render_clip(self.DEMO, {"start": 10.0, "end": 15.0},
+                                settings, [], out, info, tmp)
+        self.assertTrue(out.exists(), f"{layout}@{ratio}: no output file")
+        rendered = muse_worker.probe_summary(out)
+        self.assertEqual((rendered["width"], rendered["height"]),
+                         muse_worker.RATIO_TARGETS[ratio],
+                         f"{layout}@{ratio}: wrong output size")
+        self.assertAlmostEqual(rendered["duration"], 5.0, delta=0.5,
+                               msg=f"{layout}@{ratio}: wrong duration")
+        return out
+
+    def test_layouts_render_on_every_ratio(self):
+        if not self.DEMO.exists():
+            self.skipTest(f"demo source missing: {self.DEMO}")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            self._render("blur_fill", "16:9", tmp)
+            self._render("framed", "1:1", tmp)
+            self._render("split", "4:5", tmp)
 
 
 if __name__ == "__main__":

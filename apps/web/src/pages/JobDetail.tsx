@@ -1395,6 +1395,31 @@ export function JobDetailPage() {
                       ) : null}
                       <ScoreBreakdown breakdown={clip.score_breakdown} />
                       <ViralChecklist clip={clip} job={job} />
+                      {/* Batch 13: the grade this clip actually
+                          rendered with. Auto carries the picker's
+                          reason; a manual look is the "chosen look";
+                          'none' shows Off. Old clips (pre-Batch 13)
+                          fall back to the job's setting. */}
+                      {clip.colour_grade_applied ? (
+                        <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+                          Colour grade: {COLOUR_GRADE_LABELS[clip.colour_grade_applied as ColourGrade] ?? clip.colour_grade_applied}
+                          {clip.colour_grade_reason ? ` — ${clip.colour_grade_reason}` : ' (chosen look)'}
+                        </p>
+                      ) : job.settings?.colour_grade && job.settings.colour_grade !== 'none' ? (
+                        job.settings.colour_grade === 'auto' ? (
+                          <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+                            Colour grade: Auto — grade not recorded for this clip
+                          </p>
+                        ) : (
+                          <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+                            Colour grade: {COLOUR_GRADE_LABELS[job.settings.colour_grade as ColourGrade] ?? job.settings.colour_grade} (chosen look)
+                          </p>
+                        )
+                      ) : (
+                        <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+                          Colour grade: Off
+                        </p>
+                      )}
                     </div>
                     {/* Batch 10: re-render (single + variant) is hidden
                         with an honest note when clip re-render is off. */}

@@ -7,6 +7,7 @@ import {
   AudioLines,
   Check,
   CheckCircle2,
+  ChevronDown,
   Clock,
   CloudUpload,
   Eye,
@@ -21,8 +22,14 @@ import {
   X,
 } from 'lucide-react'
 import { PageHeader } from '../components/PageHeader'
-import { LayoutPicker } from '../components/LayoutPicker'
-import { CaptionStylePicker, HeadlineStylePicker } from '../components/StylePicker'
+import { LayoutMiniPreview, LayoutPicker } from '../components/LayoutPicker'
+import {
+  CaptionStylePicker,
+  HeadlineStylePicker,
+  HeadlineStyleStill,
+} from '../components/StylePicker'
+import { CaptionStylePreview } from '../components/CaptionStylePreview'
+import { Dropdown } from '../components/Dropdown'
 import { API_URL, ENGINE_URL, extractAudio, fetchMyPlan, probeVideo, type ProbeResult } from '../lib/api'
 import { formatBytes, formatDuration } from '../lib/format'
 import {
@@ -32,14 +39,15 @@ import {
   COLOUR_GRADE_LABELS,
   createJob,
   defaultOstPosition,
-  EXPORT_RATIO_OPTIONS,
   getJob,
+  HEADLINE_STYLE_LABELS,
   LAYOUT_LABELS,
+  LAYOUTS_BY_ASPECT,
+  layoutAllowedForAspect,
   OST_LANGUAGE_LABELS,
   OST_POSITION_LABELS,
   SELECTION_MODE_DESCRIPTIONS,
   SELECTION_MODE_LABELS,
-  SFX_LABELS,
   type CaptionPosition,
   type CaptionTranslation,
   type ColourGrade,
@@ -307,8 +315,8 @@ function CampaignField({
  * transcription in Phase 3.
  *
  * Step 2 (Style) is a REAL form bound to the project's ClipSpec.
- * The caption preset and keywords-to-avoid have no field on ClipSpec,
- * so they live in wizard-local state only.
+ * The caption preset has no field on ClipSpec, so it lives in
+ * wizard-local state only.
  *
  * Steps 3–5 are honest placeholders: the pipeline stages are listed as
  * pending, Start Processing / export controls stay disabled, and no
@@ -320,6 +328,60 @@ function CampaignField({
  * endpoints return "not implemented yet (Phase 3)". Internal engine
  * paths (source_path / audio_path) are never rendered.
  */
+/**
+ * Batch 13: collapsible picker dropdown — the three big card grids
+ * (Layout, Caption style, Headline style) were making Step 2 very
+ * long and confusing on phones, so each picker now lives behind a
+ * header row that shows the CURRENT selection (name + small preview)
+ * and a chevron. All three start COLLAPSED. Tapping the header
+ * expands the full card grid (unchanged cards, same selection
+ * behaviour); picking a card updates the header and leaves the
+ * dropdown OPEN so styles can be compared — closing is only via
+ * the header. Selection state and defaults are unchanged.
+ */
+function PickerDropdown({
+  label,
+  open,
+  onToggle,
+  header,
+  children,
+}: {
+  label: string
+  open: boolean
+  onToggle: () => void
+  header: ReactNode
+  children: ReactNode
+}) {
+  return (
+    <div className="rounded-2xl border border-ink-border bg-ink-panel2">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-label={`${label} — ${open ? 'hide' : 'show'} options`}
+        onClick={onToggle}
+        className="flex w-full items-center gap-3 px-3 py-2.5 text-left"
+      >
+        {header}
+        <ChevronDown
+          aria-hidden="true"
+          className={`ml-auto h-4 w-4 shrink-0 text-[var(--color-text-muted)] transition-transform ${open ? 'rotate-180' : ''}`}
+        />
+      </button>
+      {open ? (
+        <div className="border-t border-ink-border/60 px-2.5 pb-3 pt-3">{children}</div>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * Batch 13: export ratios are gone from the wizard UI — the Aspect
+ * ratio selector IS the export ratio. One ratio in, same ratio out.
+ * The API allows all four ratios (incl. 4:5), so every aspect
+ * submits itself and the job renders exactly that one ratio.
+ */
+const exportRatiosForAspect = (aspect: ClipSpec['aspect']): string[] => [aspect]
+
 export function ClipperPage() {
   const { addProject, updateProject, getProject } = useProjects()
   const { t } = usePreferences()
@@ -366,6 +428,20 @@ export function ClipperPage() {
 
   // Step 2 — style form (bound to the project's ClipSpec)
   const [spec, setSpec] = useState<ClipSpec>(() => defaultClipSpec())
+  // Batch 13: a ref mirror of the spec, so async callbacks always
+  // merge onto the LATEST spec. updateSpec used to close over a stale
+  // render's spec: if the /settings fetch (saved caption style)
+  // resolved after the user picked a layout, the pick was silently
+  // reverted to the old value — the Batch 13 proof run stored centre
+  // crop after picking blur fill. The ref makes that impossible.
+  const specRef = useRef(spec)
+  specRef.current = spec
+  // Batch 13: the three big card pickers (Layout / Caption style /
+  // Headline style) are collapsible dropdowns — all start closed
+  // so Step 2 stays short on phones.
+  const [layoutOpen, setLayoutOpen] = useState(false)
+  const [captionStyleOpen, setCaptionStyleOpen] = useState(false)
+  const [headlineStyleOpen, setHeadlineStyleOpen] = useState(false)
   const [clipCountText, setClipCountText] = useState(() => String(spec.clipCount))
   const [clipCountError, setClipCountError] = useState<string | null>(null)
   const [durationText, setDurationText] = useState(() => String(spec.durationSeconds))
@@ -378,12 +454,6 @@ export function ClipperPage() {
   const [durationRangeError, setDurationRangeError] = useState<string | null>(null)
   // The caption style lives on ClipSpec now (a REAL style id) — the
   // old wizard-local legacy preset state is gone (Batch 9 unification).
-  const [keywordsAvoid, setKeywordsAvoid] = useState('')
-  // Batch 9: the music bed file lives in wizard-local state only
-  // (a File cannot live in the stored ClipSpec); it is uploaded
-  // with the job at submit. No file = no music bed.
-  const [musicBed, setMusicBed] = useState<File | null>(null)
-  const [musicBedError, setMusicBedError] = useState<string | null>(null)
   // Batch 11: the user's export cap (720 Free / 1080 paid), from
   // GET /me/plan. Null while loading — the 1080p option stays
   // enabled until the cap is known, and the SERVER is the
@@ -399,7 +469,6 @@ export function ClipperPage() {
       cancelled = true
     }
   }, [])
-  const musicBedInputRef = useRef<HTMLInputElement>(null)
   // Batch 9: whether the user picked an OST position explicitly.
   // Until then, changing the headline style moves the position to
   // that style's default.
@@ -410,21 +479,6 @@ export function ClipperPage() {
     } else {
       updateSpec({ headlineStyle: s })
     }
-  }
-  const handleMusicBed = (f: File | undefined) => {
-    if (!f) return
-    const ext = f.name.split('.').pop()?.toLowerCase() ?? ''
-    if (!['mp3', 'wav', 'm4a'].includes(ext)) {
-      setMusicBedError(`"${f.name}" is not an audio file. Choose an MP3, WAV or M4A file.`)
-      return
-    }
-    if (f.size > 50 * 1024 * 1024) {
-      setMusicBedError(`"${f.name}" is over the 50 MB music-bed limit.`)
-      return
-    }
-    setMusicBedError(null)
-    setMusicBed(f)
-    if (musicBedInputRef.current) musicBedInputRef.current.value = ''
   }
 
   // Job presets (GET /api/v1/presets) — load a saved settings snapshot
@@ -590,7 +644,6 @@ export function ClipperPage() {
     ? 'source'
     : (spec.ostLanguage ?? 'source')
   const gatedLogoOverlay = logoOff ? false : (spec.logoOverlay ?? false)
-  const gatedMusicBed = musicOff ? null : musicBed
   const gatedSfx: Sfx = musicOff ? 'none' : (spec.sfx ?? 'none')
   const gatedClipCount = Math.min(spec.clipCount, effectiveMaxClips)
   // Stepper: step 1 is always reachable; later steps need a probed project
@@ -604,13 +657,27 @@ export function ClipperPage() {
     setMaxStep((m) => Math.max(m, n))
   }
 
-  /** Keep local spec state and the stored project spec in sync. */
+  /** Keep local spec state and the stored project spec in sync.
+   * Reads the ref (not the render's spec) so a patch applied from an
+   * async callback never reverts a pick the user made meanwhile. */
   const updateSpec = (patch: Partial<ClipSpec>) => {
-    const next = { ...spec, ...patch }
+    const next = { ...specRef.current, ...patch }
+    specRef.current = next
     setSpec(next)
     if (projectId) {
       updateProject(projectId, { spec: next })
     }
+  }
+
+  /** Batch 13: changing the aspect ratio keeps the layout only when
+   * it renders on the new canvas — a portrait-only layout falls back
+   * to centre crop instead of silently rendering something else. */
+  const applyAspect = (aspect: ClipSpec['aspect']) => {
+    const next: Partial<ClipSpec> = { aspect }
+    if (!layoutAllowedForAspect(specRef.current.layout, aspect)) {
+      next.layout = 'center_crop'
+    }
+    updateSpec(next)
   }
 
   /**
@@ -709,12 +776,11 @@ export function ClipperPage() {
     ) {
       patch.captionTranslation = s.caption_translation as CaptionTranslation
     }
-    if (Array.isArray(s.export_ratios)) {
-      const ratios = s.export_ratios.filter((r) => r === '9:16' || r === '1:1' || r === '16:9')
-      if (ratios.length > 0) {
-        patch.exportRatios = ratios.includes('9:16') ? ratios : ['9:16', ...ratios]
-      }
-    }
+    // Batch 13: export_ratios is no longer a wizard control —
+    // the submitted list is derived from the aspect ratio at
+    // submit (exportRatiosForAspect). A stored preset's old
+    // export_ratios list is ignored; its aspect_ratio still
+    // restores the aspect selector above.
     // Batch 4 (2026-11-25): logo overlay.
     if (typeof s.logo_overlay === 'boolean') patch.logoOverlay = s.logo_overlay
     // Batch 6 (2026-11-25): caption safe zone (default ON).
@@ -744,10 +810,11 @@ export function ClipperPage() {
     ) {
       patch.ostLanguage = s.ost_language as OstLanguage
     }
-    // Batch 9 (2026-11-25): colour grade. An old preset without
-    // it keeps 'none' (no filter).
-    if (s.colour_grade === 'none' || s.colour_grade === 'vibrant' || s.colour_grade === 'warm' || s.colour_grade === 'cool' || s.colour_grade === 'cinematic') {
-      patch.colourGrade = s.colour_grade
+    // Batch 9 (2026-11-25): colour grade. Batch 13: 'auto' is the
+    // new default; an old preset without it keeps 'auto' too (the
+    // spec default), and any value outside the label map is skipped.
+    if (typeof s.colour_grade === 'string' && s.colour_grade in COLOUR_GRADE_LABELS) {
+      patch.colourGrade = s.colour_grade as ColourGrade
     }
     if (typeof s.end_card_text === 'string') patch.endCardText = s.end_card_text
     if (typeof s.keyword_popups === 'boolean') patch.keywordPopups = s.keyword_popups
@@ -837,6 +904,12 @@ export function ClipperPage() {
         )
       }
     }
+    // Batch 13: a preset/clone may pair a portrait-only layout with
+    // a landscape/square ratio — fall back to centre crop instead of
+    // showing a layout the canvas cannot render.
+    if (patch.layout && !layoutAllowedForAspect(patch.layout, patch.aspect ?? spec.aspect)) {
+      patch.layout = 'center_crop'
+    }
     settingsAppliedRef.current = true
     updateSpec(patch)
     return skipped
@@ -903,10 +976,10 @@ export function ClipperPage() {
     ost_position: spec.ostPosition ?? defaultOstPosition(spec.headlineStyle ?? 'bold_bar'),
     ost_language: spec.ostLanguage ?? 'source',
     sfx: spec.sfx ?? 'none',
-    colour_grade: spec.colourGrade ?? 'none',
+    colour_grade: spec.colourGrade ?? 'auto',
     beat_sync: spec.beatSync ?? true,
     caption_translation: spec.captionTranslation ?? 'none',
-    export_ratios: spec.exportRatios ?? ['9:16'],
+    export_ratios: exportRatiosForAspect(spec.aspect),
     // Batch 11: export tier (the server caps it from the plan —
     // a Free user asking for 1080p gets a 422 + upgrade hint).
     export_quality: spec.exportQuality ?? '720p',
@@ -935,7 +1008,7 @@ export function ClipperPage() {
     campaign_ost: spec.campaignOst.trim() ? spec.campaignOst.trim() : null,
     campaign_ost_required: spec.campaignOstRequired,
     ost_hint: spec.ostHint.trim() ? spec.ostHint.trim() : null,
-    notes: keywordsAvoid.trim() ? `Keywords to avoid: ${keywordsAvoid.trim()}` : null,
+    notes: null,
     layout: spec.layout,
     content_type: spec.contentType,
     quality: spec.quality,
@@ -980,12 +1053,6 @@ export function ClipperPage() {
     // the daily limit is used up (the button is disabled too — this
     // is the defence in depth, the backend rejects it as well).
     if (maintenanceOn || dailyExhausted) return
-    // A music bed rides with an uploaded video file; a link job has
-    // no file upload to carry it (same rule as New Job had).
-    if (linkSource && gatedMusicBed) {
-      setProcessingError('Music bed needs an uploaded video file — switch to Upload to use one, or remove the music bed.')
-      return
-    }
     setProcessing(true)
     setProcessingError(null)
     // The API requires duration_seconds in every mode: for exact it
@@ -1023,11 +1090,11 @@ export function ClipperPage() {
       ostPosition: spec.ostPosition ?? defaultOstPosition(spec.headlineStyle ?? 'bold_bar'),
       ostLanguage: gatedOstLanguage,
       sfx: gatedSfx,
-      colourGrade: spec.colourGrade ?? 'none',
-      musicBed: gatedMusicBed,
+      colourGrade: spec.colourGrade ?? 'auto',
+      musicBed: null,
       beatSync: gatedBeatSync,
       captionTranslation: gatedCaptionTranslation,
-      exportRatios: spec.exportRatios ?? ['9:16'],
+      exportRatios: exportRatiosForAspect(spec.aspect),
       logoOverlay: gatedLogoOverlay,
       captionSafeZone: spec.captionSafeZone ?? true,
       ostPersistent: spec.ostPersistent ?? false,
@@ -1047,12 +1114,10 @@ export function ClipperPage() {
       campaignOst: spec.campaignOst.trim(),
       campaignOstRequired: spec.campaignOstRequired,
       ostHint: spec.ostHint.trim(),
-      notes: keywordsAvoid.trim()
-        ? `Keywords to avoid: ${keywordsAvoid.trim()}`
-        : undefined,
-      // Split layout is 9:16 only — any other ratio falls back to
-      // centre crop (same rule as New Job had).
-      layout: spec.aspect === '9:16' ? spec.layout : 'center_crop',
+      // Batch 13: the chosen layout is stored for every ratio —
+      // the worker renders it per ratio (only layouts that apply to
+      // the ratio are offered, so nothing is silently discarded).
+      layout: spec.layout,
       contentType: spec.contentType,
       quality: spec.quality,
     })
@@ -1229,7 +1294,6 @@ export function ClipperPage() {
     setDurationMinText(String(fresh.durationMinSeconds))
     setDurationMaxText(String(fresh.durationMaxSeconds))
     setDurationRangeError(null)
-    setKeywordsAvoid('')
     setProbe(null)
     setProbeError(null)
     setProbeUnreachable(false)
@@ -1256,7 +1320,6 @@ export function ClipperPage() {
     setDurationMinText(String(fresh.durationMinSeconds))
     setDurationMaxText(String(fresh.durationMaxSeconds))
     setDurationRangeError(null)
-    setKeywordsAvoid('')
     setFile(null)
     setPreviewUrl(null)
     setBrowserMeta(null)
@@ -1786,43 +1849,42 @@ export function ClipperPage() {
             <aside className="space-y-4">
               <div className="rounded-2xl border border-ink-border bg-ink-panel p-6">
                 <h2 className="text-lg font-semibold text-white">Clipping Options</h2>
-                <label className="mt-4 block">
+                <div className="mt-4 block">
                   <span className="text-sm font-medium text-white">Number of Clips</span>
-                  <select
-                    value={gatedClipCount}
-                    onChange={(e) => applyClipCount(Number(e.target.value))}
-                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none"
-                  >
-                    {[1, 3, 5, 10].filter((n) => n <= effectiveMaxClips).map((n) => (
-                      <option key={n} value={n}>
-                        {n} clip{n === 1 ? '' : 's'}
-                      </option>
-                    ))}
-                    {![1, 3, 5, 10].includes(gatedClipCount) ? (
-                      <option value={gatedClipCount}>{gatedClipCount} clips (custom)</option>
-                    ) : null}
-                  </select>
+                  <Dropdown
+                    value={String(gatedClipCount)}
+                    ariaLabel="Number of clips"
+                    options={[
+                      ...[1, 3, 5, 10]
+                        .filter((n) => n <= effectiveMaxClips)
+                        .map((n) => ({ value: String(n), label: `${n} clip${n === 1 ? '' : 's'}` })),
+                      ...(![1, 3, 5, 10].includes(gatedClipCount)
+                        ? [{ value: String(gatedClipCount), label: `${gatedClipCount} clips (custom)` }]
+                        : []),
+                    ]}
+                    onChange={(v) => applyClipCount(Number(v))}
+                  />
                   <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
                     Max {effectiveMaxClips} clips per job.
                   </span>
-                </label>
+                </div>
                 <label className="mt-4 block">
                   <span className="text-sm font-medium text-white">Clip Duration</span>
                   {spec.durationMode === 'exact' ? (
-                    <select
-                      value={spec.durationSeconds}
-                      onChange={(e) => applyDuration(Number(e.target.value))}
-                      className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none"
-                    >
-                      {[15, 20, 30, 45, 60].map((n) => (
-                        <option key={n} value={n}>
-                          {n} seconds
-                        </option>
-                      ))}
-                      {![15, 20, 30, 45, 60].includes(spec.durationSeconds) ? (
-                        <option value={spec.durationSeconds}>{spec.durationSeconds} seconds (custom)</option>
-                      ) : null}
-                    </select>
+                    <Dropdown
+                      value={String(spec.durationSeconds)}
+                      ariaLabel="Clip duration in seconds"
+                      options={[
+                        ...[15, 20, 30, 45, 60].map((n) => ({
+                          value: String(n),
+                          label: `${n} seconds`,
+                        })),
+                        ...(![15, 20, 30, 45, 60].includes(spec.durationSeconds)
+                          ? [{ value: String(spec.durationSeconds), label: `${spec.durationSeconds} seconds (custom)` }]
+                          : []),
+                      ]}
+                      onChange={(v) => applyDuration(Number(v))}
+                    />
                   ) : (
                     <p className="mt-2 text-sm text-white">
                       {spec.durationMinSeconds}–{spec.durationMaxSeconds}s ({spec.durationMode})
@@ -1832,32 +1894,27 @@ export function ClipperPage() {
                     </p>
                   )}
                 </label>
-                <label className="mt-4 block">
+                <div className="mt-4 block">
                   <span className="text-sm font-medium text-white">Clip selection</span>
-                  <select
+                  <Dropdown
                     value={spec.selectionMode ?? 'interesting_only'}
-                    onChange={(e) =>
-                      updateSpec({ selectionMode: e.target.value as SelectionMode })
-                    }
-                    aria-label="Clip selection"
-                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none"
-                  >
-                    {(Object.keys(SELECTION_MODE_LABELS) as SelectionMode[]).map((id) => (
-                      <option key={id} value={id}>
-                        {SELECTION_MODE_LABELS[id]}
-                      </option>
-                    ))}
-                  </select>
+                    ariaLabel="Clip selection"
+                    options={(Object.keys(SELECTION_MODE_LABELS) as SelectionMode[]).map((id) => ({
+                      value: id,
+                      label: SELECTION_MODE_LABELS[id],
+                    }))}
+                    onChange={(v) => updateSpec({ selectionMode: v as SelectionMode })}
+                  />
                   <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
                     {SELECTION_MODE_DESCRIPTIONS[spec.selectionMode ?? 'interesting_only']}
                   </span>
-                </label>
+                </div>
                 <div className="mt-5 space-y-3">
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-sm text-white">Vertical (9:16)</span>
                     <Toggle
                       checked={spec.aspect === '9:16'}
-                      onChange={(v) => updateSpec({ aspect: v ? '9:16' : '16:9' })}
+                      onChange={(v) => applyAspect(v ? '9:16' : '16:9')}
                       label="Vertical 9:16 on or off"
                     />
                   </div>
@@ -1949,26 +2006,22 @@ export function ClipperPage() {
                 save control lives here too (the wizard is the only
                 creation flow now). */}
             <div className="mt-5 rounded-xl border border-ink-border bg-ink-panel2 p-4">
-              <label className="block">
+              <div className="block">
                 <span className="text-sm font-medium text-white">Load preset</span>
-                <select
+                <Dropdown
                   value={selectedPresetId}
-                  onChange={(e) => {
-                    setSelectedPresetId(e.target.value)
-                    const id = Number(e.target.value)
+                  ariaLabel="Load a saved job preset into the style form"
+                  options={[
+                    { value: '', label: 'Choose a preset…' },
+                    ...presets.map((p) => ({ value: String(p.id), label: p.name })),
+                  ]}
+                  onChange={(v) => {
+                    setSelectedPresetId(v)
+                    const id = Number(v)
                     if (id > 0) handleLoadPreset(id)
                   }}
-                  aria-label="Load a saved job preset into the style form"
-                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none"
-                >
-                  <option value="">Choose a preset…</option>
-                  {presets.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                />
+              </div>
               {presetMessage ? (
                 <p role="status" className="mt-2 text-xs text-[var(--color-text-muted)]">
                   {presetMessage}
@@ -2031,7 +2084,7 @@ export function ClipperPage() {
                     <ChoiceButton
                       key={a}
                       selected={spec.aspect === a}
-                      onClick={() => updateSpec({ aspect: a })}
+                      onClick={() => applyAspect(a)}
                     >
                       {a === '9:16'
                         ? 'Vertical (9:16)'
@@ -2165,44 +2218,66 @@ export function ClipperPage() {
 
               <fieldset>
                 <legend className="text-sm font-medium text-white">Clip selection</legend>
-                <select
+                <Dropdown
                   value={spec.selectionMode ?? 'interesting_only'}
-                  onChange={(e) =>
-                    updateSpec({ selectionMode: e.target.value as SelectionMode })
-                  }
-                  aria-label="Clip selection"
-                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white focus:border-brand focus:outline-none"
-                >
-                  {(Object.keys(SELECTION_MODE_LABELS) as SelectionMode[]).map((id) => (
-                    <option key={id} value={id}>
-                      {SELECTION_MODE_LABELS[id]}
-                    </option>
-                  ))}
-                </select>
+                  ariaLabel="Clip selection"
+                  options={(Object.keys(SELECTION_MODE_LABELS) as SelectionMode[]).map((id) => ({
+                    value: id,
+                    label: SELECTION_MODE_LABELS[id],
+                  }))}
+                  onChange={(v) => updateSpec({ selectionMode: v as SelectionMode })}
+                />
                 <p className="mt-2 text-xs text-[var(--color-text-muted)]">
                   {SELECTION_MODE_DESCRIPTIONS[spec.selectionMode ?? 'interesting_only']}
                 </p>
               </fieldset>
 
-              {/* Batch 9: layout picker — 9:16 only, like New Job.
-                  Card grid on the same system as the caption picker
-                  (gradient backdrop diagrams, 2 per row, gradient
-                  border + checkmark on the selected card). Other
-                  ratios fall back to centre crop at submit. */}
-              {spec.aspect === '9:16' ? (
-                <div className="md:col-span-2">
-                  <span className="text-sm font-medium text-white">Layout (9:16 only)</span>
+              {/* Batch 13: layout picker — visible for EVERY ratio.
+                  Only the layouts that genuinely render on the chosen
+                  canvas are offered (all ten on portrait frames, six
+                  on 16:9/1:1); the worker renders the stored layout
+                  for the chosen ratio. Card grid on the same system
+                  as the caption picker (gradient backdrop diagrams,
+                  2 per row, gradient border + checkmark). */}
+              <div className="md:col-span-2">
+                <span className="text-sm font-medium text-white">Layout</span>
                   <div className="mt-2">
-                    <LayoutPicker
-                      value={spec.layout}
-                      onChange={(layout) => updateSpec({ layout })}
-                    />
+                    <PickerDropdown
+                      label="Layout"
+                      open={layoutOpen}
+                      onToggle={() => setLayoutOpen((v) => !v)}
+                      header={
+                        <>
+                          <span aria-hidden="true" className="block h-14 w-8 shrink-0 overflow-hidden rounded">
+                            <span className="block origin-top-left scale-[0.44]">
+                              <LayoutMiniPreview layout={spec.layout} />
+                            </span>
+                          </span>
+                          <span className="min-w-0">
+                            <span className="block truncate text-sm font-semibold text-white">
+                              {LAYOUT_LABELS[spec.layout].split(' — ')[0]}
+                            </span>
+                            <span className="block text-xs text-[var(--color-text-muted)]">
+                              Tap to change layout
+                            </span>
+                          </span>
+                        </>
+                      }
+                    >
+                      <LayoutPicker
+                        value={spec.layout}
+                        onChange={(layout) => updateSpec({ layout })}
+                        allowed={LAYOUTS_BY_ASPECT[spec.aspect]}
+                      />
+                    </PickerDropdown>
                   </div>
                   <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
-                    How the video fills the 9:16 frame. Other ratios use centre crop.
+                    How the video fills the {spec.aspect} frame.
+                    {spec.aspect === '9:16' || spec.aspect === '4:5'
+                      ? ' All ten layouts are available on portrait frames.'
+                      : ' Only layouts that work on this ratio are shown.'}
                   </span>
                 </div>
-              ) : null}
 
               {/* Batch 10: when captions are off, the whole block
                   (toggle, style picker, language + translation
@@ -2233,53 +2308,42 @@ export function ClipperPage() {
                     is "middle" (the existing caption_position value);
                     only the label changed. Disabled while captions
                     are off, like the style picker. */}
-                <label className="mt-3 block">
+                <div className="mt-3 block">
                   <span className="text-sm font-medium text-white">Caption position</span>
-                  <select
+                  <Dropdown
                     value={spec.captionPosition ?? 'bottom'}
                     disabled={!spec.captions}
-                    onChange={(e) =>
-                      updateSpec({ captionPosition: e.target.value as CaptionPosition })
-                    }
-                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {(['bottom', 'top', 'middle'] as CaptionPosition[]).map((p) => (
-                      <option key={p} value={p}>
-                        {CAPTION_POSITION_LABELS[p]}
-                      </option>
-                    ))}
-                  </select>
+                    ariaLabel="Caption position"
+                    options={(['bottom', 'top', 'middle'] as CaptionPosition[]).map((p) => ({
+                      value: p,
+                      label: CAPTION_POSITION_LABELS[p],
+                    }))}
+                    onChange={(v) => updateSpec({ captionPosition: v as CaptionPosition })}
+                  />
                   <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
                     Where the burn-in captions sit — never over the headline.
                   </span>
-                </label>
+                </div>
                 {/* Caption language — directly below the Caption
                     position dropdown (user placement spec, Batch 9):
                     which language the SPEECH is in. This is the
                     transcription language, not the output language. */}
-                <label className="mt-3 block">
+                <div className="mt-3 block">
                   <span className="text-sm font-medium text-white">Caption language</span>
-                  <select
+                  <Dropdown
                     value={spec.captionsLanguage}
                     disabled={!spec.captions}
-                    onChange={(e) =>
-                      updateSpec({
-                        captionsLanguage: e.target.value as ClipSpec['captionsLanguage'],
-                      })
+                    ariaLabel="Caption language"
+                    options={CAPTION_LANGUAGES.map((l) => ({ value: l.id, label: l.label }))}
+                    onChange={(v) =>
+                      updateSpec({ captionsLanguage: v as ClipSpec['captionsLanguage'] })
                     }
-                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {CAPTION_LANGUAGES.map((l) => (
-                      <option key={l.id} value={l.id}>
-                        {l.label}
-                      </option>
-                    ))}
-                  </select>
+                  />
                   <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
                     The language of the speech in the video. Auto-detect lets
                     the transcriber decide.
                   </span>
-                </label>
+                </div>
                 {/* Translate captions — directly below the Caption
                     language dropdown. Translates the captions AFTER
                     transcription (Batch 9: 32 languages). If the free
@@ -2293,37 +2357,59 @@ export function ClipperPage() {
                     Caption translation is disabled by the admin.
                   </p>
                 ) : (
-                <label className="mt-3 block">
+                <div className="mt-3 block">
                   <span className="text-sm font-medium text-white">Translate captions</span>
-                  <select
+                  <Dropdown
                     value={spec.captionTranslation ?? 'none'}
                     disabled={!spec.captions}
-                    onChange={(e) =>
-                      updateSpec({ captionTranslation: e.target.value as CaptionTranslation })
-                    }
-                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {(Object.keys(CAPTION_TRANSLATION_LABELS) as CaptionTranslation[]).map((t) => (
-                      <option key={t} value={t}>
-                        {CAPTION_TRANSLATION_LABELS[t]}
-                      </option>
-                    ))}
-                  </select>
+                    ariaLabel="Translate captions"
+                    options={(Object.keys(CAPTION_TRANSLATION_LABELS) as CaptionTranslation[]).map((t) => ({
+                      value: t,
+                      label: CAPTION_TRANSLATION_LABELS[t],
+                    }))}
+                    onChange={(v) => updateSpec({ captionTranslation: v as CaptionTranslation })}
+                  />
                   <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
                     Translates the captions after transcription. If the free
                     translation service is unavailable, captions stay in the
                     original language and the job says so.
                   </span>
-                </label>
+                </div>
                 )}
                 <div className="mt-3">
                   <span className="text-sm font-medium text-white">Caption style</span>
                   <div className="mt-2">
-                    <CaptionStylePicker
-                      value={spec.captionStyle}
-                      onChange={(realId) => updateSpec({ captionStyle: realId })}
-                      disabled={!spec.captions}
-                    />
+                    <PickerDropdown
+                      label="Caption style"
+                      open={captionStyleOpen}
+                      onToggle={() => setCaptionStyleOpen((v) => !v)}
+                      header={
+                        <>
+                          {/* Batch 13: header miniature — the same
+                              smaller card preview (52x93) scaled to
+                              half again, 26x46. */}
+                          <span aria-hidden="true" className="block h-[46px] w-[26px] shrink-0 overflow-hidden rounded">
+                            <span className="block w-[104px] origin-top-left scale-[0.25]">
+                              <CaptionStylePreview style={getCaptionStyle(spec.captionStyle)} />
+                            </span>
+                          </span>
+                          <span className="min-w-0">
+                            <span className="block truncate text-sm font-semibold text-white">
+                              {captionLabel}
+                            </span>
+                            <span className="block text-xs text-[var(--color-text-muted)]">
+                              Tap to change caption style
+                            </span>
+                          </span>
+                        </>
+                      }
+                    >
+                      <CaptionStylePicker
+                        value={spec.captionStyle}
+                        onChange={(realId) => updateSpec({ captionStyle: realId })}
+                        disabled={!spec.captions}
+                      />
+                    </PickerDropdown>
                   </div>
                 </div>
                 <p className="mt-2 text-xs text-[var(--color-text-muted)]">
@@ -2362,27 +2448,25 @@ export function ClipperPage() {
                     Always visible; disabled while on-screen text is
                     off. Picking a headline style moves it to that
                     style's default until a position is picked here. */}
-                <label className="mt-3 block">
+                <div className="mt-3 block">
                   <span className="text-sm font-medium text-white">On-screen text position</span>
-                  <select
+                  <Dropdown
                     value={spec.ostPosition ?? defaultOstPosition(spec.headlineStyle ?? 'bold_bar')}
                     disabled={!spec.onScreenText}
-                    onChange={(e) => {
+                    ariaLabel="On-screen text position"
+                    options={(['bottom', 'top', 'centre'] as OstPosition[]).map((p) => ({
+                      value: p,
+                      label: OST_POSITION_LABELS[p],
+                    }))}
+                    onChange={(v) => {
                       ostPositionTouchedRef.current = true
-                      updateSpec({ ostPosition: e.target.value as OstPosition })
+                      updateSpec({ ostPosition: v as OstPosition })
                     }}
-                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {(['bottom', 'top', 'centre'] as OstPosition[]).map((p) => (
-                      <option key={p} value={p}>
-                        {OST_POSITION_LABELS[p]}
-                      </option>
-                    ))}
-                  </select>
+                  />
                   <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
                     Where the headline sits on the frame. Default follows the style.
                   </span>
-                </label>
+                </div>
                 {/* On-screen text language — directly below the
                     On-screen text position dropdown (user placement
                     spec, Batch 9): the headline's OUTPUT language.
@@ -2396,28 +2480,24 @@ export function ClipperPage() {
                     On-screen text translation is disabled by the admin.
                   </p>
                 ) : (
-                <label className="mt-3 block">
+                <div className="mt-3 block">
                   <span className="text-sm font-medium text-white">On-screen text language</span>
-                  <select
+                  <Dropdown
                     value={spec.ostLanguage ?? 'source'}
                     disabled={!spec.onScreenText}
-                    onChange={(e) =>
-                      updateSpec({ ostLanguage: e.target.value as OstLanguage })
-                    }
-                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {(Object.keys(OST_LANGUAGE_LABELS) as OstLanguage[]).map((l) => (
-                      <option key={l} value={l}>
-                        {OST_LANGUAGE_LABELS[l]}
-                      </option>
-                    ))}
-                  </select>
+                    ariaLabel="On-screen text language"
+                    options={(Object.keys(OST_LANGUAGE_LABELS) as OstLanguage[]).map((l) => ({
+                      value: l,
+                      label: OST_LANGUAGE_LABELS[l],
+                    }))}
+                    onChange={(v) => updateSpec({ ostLanguage: v as OstLanguage })}
+                  />
                   <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
                     Translates the headline into this language. If the free
                     translation service is unavailable, the headline stays
                     in the source language and the job says so.
                   </span>
-                </label>
+                </div>
                 )}
               </div>
               )}
@@ -2429,210 +2509,47 @@ export function ClipperPage() {
               <div className="block md:col-span-2">
                 <span className="text-sm font-medium text-white">Headline style</span>
                 <div className="mt-2">
-                  <HeadlineStylePicker
-                    value={spec.headlineStyle ?? 'bold_bar'}
-                    onChange={pickHeadlineStyle}
-                  />
-                </div>
-              </div>
-
-              {/* Batch 7 whole-clip on-screen text (2026-11-25). The
-                  persistent headline and its animation need on-screen
-                  text on; the end card, keyword pop-ups, lower-third
-                  tag and progress bar work on their own. Batch 10:
-                  hidden entirely when on-screen text is off (the
-                  note above already says why). */}
-              {ostOff ? null : (
-              <div>
-                <span className="text-sm font-medium text-white">Persistent headline</span>
-                <div className="mt-2 flex items-center gap-3">
-                  <Toggle
-                    checked={spec.ostPersistent ?? false}
-                    onChange={(v) => updateSpec({ ostPersistent: v })}
-                    label="Persistent headline on or off"
-                    disabled={!spec.onScreenText}
-                  />
-                  <span className="text-sm text-[var(--color-text-muted)]">
-                    {spec.ostPersistent ? 'Persistent headline on' : 'Persistent headline off'} — keep
-                    the headline up for the whole clip instead of the first 4 seconds
-                  </span>
-                </div>
-                {!spec.onScreenText ? (
-                  <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
-                    Turn on-screen text on to use the persistent headline.
-                  </span>
-                ) : null}
-              </div>
-              )}
-
-              {/* Batch 9: the headline animation control was removed —
-                  OST is always static now. */}
-
-              <div>
-                <span className="text-sm font-medium text-white">Follow end card</span>
-                <div className="mt-2 flex items-center gap-3">
-                  <Toggle
-                    checked={spec.endCard ?? false}
-                    onChange={(v) => updateSpec({ endCard: v })}
-                    label="Follow end card on or off"
-                  />
-                  <span className="text-sm text-[var(--color-text-muted)]">
-                    {spec.endCard ? 'End card on' : 'End card off'} — show a card
-                    in the last 2 seconds of every clip
-                  </span>
-                </div>
-                {spec.endCard ? (
-                  <label className="mt-3 block">
-                    <span className="text-sm font-medium text-white">End card text</span>
-                    <input
-                      type="text"
-                      value={spec.endCardText ?? ''}
-                      maxLength={40}
-                      placeholder="Follow for more"
-                      onChange={(e) => updateSpec({ endCardText: e.target.value })}
-                      className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)]"
+                  <PickerDropdown
+                    label="Headline style"
+                    open={headlineStyleOpen}
+                    onToggle={() => setHeadlineStyleOpen((v) => !v)}
+                    header={
+                      <>
+                        {/* Batch 13: header miniature, 26x46 — see
+                            the caption header above. */}
+                        <span aria-hidden="true" className="block h-[46px] w-[26px] shrink-0 overflow-hidden rounded">
+                          <span className="block w-[104px] origin-top-left scale-[0.25]">
+                            <HeadlineStyleStill
+                              style={spec.headlineStyle ?? 'bold_bar'}
+                              className="relative block aspect-[9/16] w-full overflow-hidden rounded border border-white/10 caption-preview"
+                            />
+                          </span>
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block truncate text-sm font-semibold text-white">
+                            {HEADLINE_STYLE_LABELS[spec.headlineStyle ?? 'bold_bar']}
+                          </span>
+                          <span className="block text-xs text-[var(--color-text-muted)]">
+                            Tap to change headline style
+                          </span>
+                        </span>
+                      </>
+                    }
+                  >
+                    <HeadlineStylePicker
+                      value={spec.headlineStyle ?? 'bold_bar'}
+                      onChange={pickHeadlineStyle}
                     />
-                    <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
-                      Leave empty for “Follow for more”. Max 40 characters.
-                    </span>
-                  </label>
-                ) : null}
-              </div>
-
-              <div>
-                <span className="text-sm font-medium text-white">Keyword pop-ups</span>
-                <div className="mt-2 flex items-center gap-3">
-                  <Toggle
-                    checked={spec.keywordPopups ?? false}
-                    onChange={(v) => updateSpec({ keywordPopups: v })}
-                    label="Keyword pop-ups on or off"
-                  />
-                  <span className="text-sm text-[var(--color-text-muted)]">
-                    {spec.keywordPopups ? 'Keyword pop-ups on' : 'Keyword pop-ups off'} — pop up to 4
-                    important spoken words as large text at the moment they are said
-                  </span>
+                  </PickerDropdown>
                 </div>
               </div>
 
-              <label className="block">
-                <span className="text-sm font-medium text-white">Lower-third tag</span>
-                <input
-                  type="text"
-                  value={spec.lowerThirdText ?? ''}
-                  maxLength={40}
-                  placeholder="@yourchannel"
-                  onChange={(e) => updateSpec({ lowerThirdText: e.target.value })}
-                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)]"
-                />
-                <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
-                  Your name or channel, shown at the bottom of the whole
-                  clip. Empty = off. Never translated. Max 40 characters.
-                </span>
-              </label>
 
-              <div>
-                <span className="text-sm font-medium text-white">Progress bar</span>
-                <div className="mt-2 flex items-center gap-3">
-                  <Toggle
-                    checked={spec.progressBar ?? false}
-                    onChange={(v) => updateSpec({ progressBar: v })}
-                    label="Progress bar on or off"
-                  />
-                  <span className="text-sm text-[var(--color-text-muted)]">
-                    {spec.progressBar ? 'Progress bar on' : 'Progress bar off'} — a thin violet bar
-                    along the bottom edge, growing across the full clip
-                  </span>
-                </div>
-              </div>
 
-              {/* Batch 9 music bed + SFX. No file = no music bed —
-                  the section says so instead of faking a preview.
-                  Batch 10: both are replaced by an honest note when
-                  the music bed / SFX feature is off. */}
-              {musicOff ? (
-                <div>
-                  <span className="text-sm font-medium text-white">Music bed</span>
-                  <p className="mt-2 text-xs text-[var(--color-text-muted)]">
-                    Music bed and sound effects are disabled by the admin.
-                  </p>
-                </div>
-              ) : (
-              <>
-              <div>
-                <span className="text-sm font-medium text-white">Music bed</span>
-                <div className="mt-2">
-                  <input
-                    ref={musicBedInputRef}
-                    type="file"
-                    accept=".mp3,.wav,.m4a,audio/mpeg,audio/wav,audio/mp4"
-                    aria-label="Music bed audio file (MP3, WAV or M4A, max 50 MB)"
-                    onChange={(e) => handleMusicBed(e.target.files?.[0])}
-                    className="block w-full text-sm text-[var(--color-text-muted)] file:mr-3 file:rounded-xl file:border file:border-ink-border file:bg-ink-panel2 file:px-3 file:py-2 file:text-sm file:font-medium file:text-white hover:file:border-brand/60"
-                  />
-                </div>
-                {musicBed ? (
-                  <p className="mt-1 text-xs text-white">
-                    {musicBed.name} · {formatBytes(musicBed.size)}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setMusicBed(null)
-                        if (musicBedInputRef.current) musicBedInputRef.current.value = ''
-                      }}
-                      className="ml-2 text-xs font-medium text-red-300 hover:underline"
-                    >
-                      Remove
-                    </button>
-                  </p>
-                ) : (
-                  <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
-                    No music bed — the clips keep their original audio. MP3, WAV or M4A, max 50 MB.
-                  </span>
-                )}
-                {musicBedError ? (
-                  <p role="alert" className="mt-1 text-xs text-red-300">
-                    {musicBedError}
-                  </p>
-                ) : null}
-              </div>
 
-              <label className="block">
-                <span className="text-sm font-medium text-white">Sound effect (SFX)</span>
-                <select
-                  value={spec.sfx ?? 'none'}
-                  onChange={(e) => updateSpec({ sfx: e.target.value as Sfx })}
-                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
-                >
-                  {(Object.keys(SFX_LABELS) as Sfx[]).map((id) => (
-                    <option key={id} value={id}>
-                      {SFX_LABELS[id]}
-                    </option>
-                  ))}
-                </select>
-                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
-                  A short sting over clip cuts. The worker mixes it in; None means no added sound.
-                </span>
-              </label>
-              </>
-              )}
 
-              <label className="block">
-                <span className="text-sm font-medium text-white">Colour grade</span>
-                <select
-                  value={spec.colourGrade ?? 'none'}
-                  onChange={(e) => updateSpec({ colourGrade: e.target.value as ColourGrade })}
-                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
-                >
-                  {(Object.keys(COLOUR_GRADE_LABELS) as ColourGrade[]).map((id) => (
-                    <option key={id} value={id}>
-                      {COLOUR_GRADE_LABELS[id]}
-                    </option>
-                  ))}
-                </select>
-                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
-                  Colours the footage on the final render. None (default) leaves the render untouched.
-                </span>
-              </label>
+
+
 
               {/* Batch 3 beat sync + export ratios. The Translate
                   captions control lives with the caption controls
@@ -2662,70 +2579,7 @@ export function ClipperPage() {
               </div>
               )}
 
-              <div>
-                <span className="text-sm font-medium text-white">Export ratios</span>
-                <div className="mt-2 flex flex-wrap items-center gap-4">
-                  {EXPORT_RATIO_OPTIONS.map((ratio) => {
-                    const ratios = spec.exportRatios ?? ['9:16']
-                    const checked = ratios.includes(ratio)
-                    const locked = ratio === '9:16'
-                    return (
-                      <label key={ratio} className="flex items-center gap-2 text-sm text-white">
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          disabled={locked}
-                          onChange={() => {
-                            const next = checked
-                              ? ratios.filter((r) => r !== ratio)
-                              : [...ratios, ratio]
-                            updateSpec({ exportRatios: next })
-                          }}
-                          className="h-4 w-4 accent-fuchsia-500 disabled:opacity-60"
-                        />
-                        {ratio}
-                        {locked ? ' (always on)' : ''}
-                      </label>
-                    )
-                  })}
-                </div>
-                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
-                  The same clips render in each ratio — each gets its own
-                  download. 1:1 and 16:9 use a centre crop.
-                </span>
-              </div>
 
-              {/* Batch 4 logo overlay — default OFF. When ON and a logo
-                  is uploaded in Brand Kit, the worker overlays it
-                  bottom-right on every clip of this job. Batch 10:
-                  hidden with an honest note when logo overlay is off. */}
-              {logoOff ? (
-                <div>
-                  <span className="text-sm font-medium text-white">Logo overlay</span>
-                  <p className="mt-2 text-xs text-[var(--color-text-muted)]">
-                    Logo overlay is disabled by the admin.
-                  </p>
-                </div>
-              ) : (
-              <div>
-                <span className="text-sm font-medium text-white">Logo overlay</span>
-                <div className="mt-2 flex items-center gap-3">
-                  <Toggle
-                    checked={spec.logoOverlay ?? false}
-                    onChange={(v) => updateSpec({ logoOverlay: v })}
-                    label="Logo overlay on or off"
-                  />
-                  <span className="text-sm text-[var(--color-text-muted)]">
-                    Logo overlay — watermark your Brand Kit logo on every
-                    clip (bottom-right)
-                  </span>
-                </div>
-                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
-                  Upload the logo in Brand Kit first. If no logo is
-                  uploaded, the job renders without one and says so.
-                </span>
-              </div>
-              )}
 
               {/* Batch 6 caption safe zone — default ON. When ON,
                   captions keep clear of TikTok's right action rail
@@ -2795,94 +2649,65 @@ export function ClipperPage() {
                 </div>
               </div>
 
-              <label className="mt-3 block">
+              <div className="mt-3 block">
                 <span className="text-sm font-medium text-white">Content type</span>
-                  <select
+                  <Dropdown
                     value={spec.contentType}
-                    onChange={(e) =>
-                      updateSpec({ contentType: e.target.value as ClipSpec['contentType'] })
-                    }
-                    className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
-                  >
-                    {CONTENT_TYPES.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                    ariaLabel="Content type"
+                    options={CONTENT_TYPES.map((c) => ({ value: c.id, label: c.label }))}
+                    onChange={(v) => updateSpec({ contentType: v as ClipSpec['contentType'] })}
+                  />
+                </div>
                 <p className="mt-2 text-xs text-[var(--color-text-muted)]">
                   Content type: <span className="font-medium text-white">{contentLabel}</span>
                 </p>
 
-              <label className="block">
-                <span className="text-sm font-medium text-white">Keywords to prioritise</span>
-                <input
-                  type="text"
-                  value={spec.keywords}
-                  onChange={(e) => updateSpec({ keywords: e.target.value })}
-                  placeholder="e.g. funny moment, tutorial, reaction"
-                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)]"
-                />
-                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
-                  Comma-separated — stored in the project spec.
-                </span>
-              </label>
 
-              <label className="block">
-                <span className="text-sm font-medium text-white">Keywords to avoid</span>
-                <input
-                  type="text"
-                  value={keywordsAvoid}
-                  onChange={(e) => setKeywordsAvoid(e.target.value)}
-                  placeholder="e.g. sponsor read, silence"
-                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white placeholder:text-[var(--color-text-muted)]"
-                />
-                <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
-                  Comma-separated — kept with this wizard session; excluded when
-                  matching runs in Phase 3.
-                </span>
-              </label>
 
               {/* Batch 9: quality — the direct control (same field
                   New Job sets). It moves with the processing mode
                   below: picking a quality sets the matching mode and
                   vice versa, so the two can never disagree. */}
-              <label className="block">
+              <div className="block">
                 <span className="text-sm font-medium text-white">Quality</span>
-                <select
+                <Dropdown
                   value={spec.quality}
-                  onChange={(e) => updateQuality(e.target.value as ClipSpec['quality'])}
-                  aria-label="Render quality"
-                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
-                >
-                  <option value="draft">Draft preview</option>
-                  <option value="standard">Standard</option>
-                  <option value="high">High quality</option>
-                </select>
+                  ariaLabel="Render quality"
+                  options={[
+                    { value: 'draft', label: 'Draft preview' },
+                    { value: 'standard', label: 'Standard' },
+                    { value: 'high', label: 'High quality' },
+                  ]}
+                  onChange={(v) => updateQuality(v as ClipSpec['quality'])}
+                />
                 <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
                   Render quality for this job. High quality takes longer.
                 </span>
-              </label>
+                <span className="mt-1 block text-xs text-[var(--color-text-muted)]">
+                  The source is the ceiling — a 360p source can never become true 1080p. The boost squeezes the maximum out of it.
+                </span>
+              </div>
 
               {/* Batch 11: export tier — 720p (Free) or 1080p (paid
                   plan). The tier caps resolution + bitrate only; the
                   render quality above is separate. 1080p is locked
                   while the plan cap is 720p; the server enforces the
                   same rule at submit. */}
-              <label className="block">
+              <div className="block">
                 <span className="text-sm font-medium text-white">Export quality</span>
-                <select
+                <Dropdown
                   value={spec.exportQuality ?? '720p'}
-                  onChange={(e) => updateSpec({ exportQuality: e.target.value as ClipSpec['exportQuality'] })}
-                  aria-label="Export quality"
-                  className="mt-2 w-full rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2.5 text-sm text-white"
-                >
-                  <option value="720p">720p (Free)</option>
-                  <option value="1080p" disabled={maxExportHeight !== null && maxExportHeight < 1080}>
-                    1080p{maxExportHeight !== null && maxExportHeight < 1080 ? ' — locked' : ''}
-                  </option>
-                </select>
+                  ariaLabel="Export quality"
+                  options={[
+                    { value: '720p', label: '720p (Free)' },
+                    {
+                      value: '1080p',
+                      label: `1080p${maxExportHeight !== null && maxExportHeight < 1080 ? ' — locked' : ''}`,
+                      disabled: maxExportHeight !== null && maxExportHeight < 1080,
+                    },
+                  ]}
+                  onChange={(v) => updateSpec({ exportQuality: v as ClipSpec['exportQuality'] })}
+                />
                 <span className="mt-2 block text-xs text-[var(--color-text-muted)]">
                   {maxExportHeight !== null && maxExportHeight < 1080 ? (
                     <>
@@ -2899,7 +2724,7 @@ export function ClipperPage() {
                     'Free exports are capped at 720p; paid plans go to 1080p.'
                   )}
                 </span>
-              </label>
+              </div>
 
               <fieldset className="md:col-span-2">
                 <legend className="text-sm font-medium text-white">Processing mode</legend>
@@ -3042,9 +2867,8 @@ export function ClipperPage() {
                   : spec.quality === 'high'
                     ? 'High quality'
                     : 'Standard'}{' '}
-                · {spec.aspect === '9:16' ? LAYOUT_LABELS[spec.layout] : 'Centre crop'} ·{' '}
+                · {LAYOUT_LABELS[spec.layout]} ·{' '}
                 {spec.jobType === 'campaign' ? 'For a campaign' : 'For myself'}
-                {keywordsAvoid.trim() ? ` · Avoid: ${keywordsAvoid.trim()}` : ''}
               </p>
             </div>
 

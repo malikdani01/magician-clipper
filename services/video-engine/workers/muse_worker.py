@@ -143,9 +143,48 @@ RATIO_TARGETS = {
     "4:5": (1080, 1350),
 }
 
-# Batch 3 multi-ratio export: the ratios a job renders in. The UI
-# offers 9:16 (always on) + 1:1 + 16:9; the job's own aspect_ratio is
-# always rendered even if a stale client omitted it from the list.
+# Batch 13 (2026-11-25): which layouts render on which canvas.
+# The six canvas-agnostic layouts adapt to any target size — their
+# chains are written in terms of tw/th, never a hardcoded 9:16 frame.
+# The four vertical compositions are portrait-frame designs: a
+# top/bottom split, a facecam inset, a full-frame streamer crop and a
+# video-over-panel stack only make sense on a portrait canvas, so
+# they apply to 9:16 AND 4:5 and are excluded from 16:9 and 1:1.
+# A layout that cannot apply to the ratio is never faked in the
+# worker: resolve_layout() falls back to centre crop (logged) instead
+# of rendering the wrong composition.
+AGNOSTIC_LAYOUTS = (
+    "center_crop", "blur_fill", "gradient_fill",
+    "letterbox", "face_closeup", "framed",
+)
+PORTRAIT_LAYOUTS = ("split", "pip_facecam", "streamer_full", "stacked")
+LAYOUTS_BY_RATIO = {
+    "9:16": (*AGNOSTIC_LAYOUTS, *PORTRAIT_LAYOUTS),
+    "4:5": (*AGNOSTIC_LAYOUTS, *PORTRAIT_LAYOUTS),
+    "16:9": AGNOSTIC_LAYOUTS,
+    "1:1": AGNOSTIC_LAYOUTS,
+}
+
+
+def allowed_layouts_for_ratio(ratio: str) -> tuple[str, ...]:
+    """Layouts that genuinely render on this canvas (unknown ratio -> agnostic only)."""
+    return LAYOUTS_BY_RATIO.get(ratio or "9:16", AGNOSTIC_LAYOUTS)
+
+
+def resolve_layout(layout, ratio: str) -> str:
+    """The layout to render: the requested one when it applies to the
+    ratio, else centre crop. Never invents a composition the canvas
+    cannot render."""
+    layout = (layout or "center_crop").lower()
+    if layout in allowed_layouts_for_ratio(ratio):
+        return layout
+    return "center_crop"
+
+# Batch 3 multi-ratio export: the ratios a job renders in. Batch 13:
+# one ratio in, same ratio out — the aspect ratio IS the export
+# ratio; 9:16 is no longer force-included. The job's own
+# aspect_ratio is always rendered even if a stale client omitted it
+# from the list.
 #: Hard cap on TOTAL clip rows a job may produce (all ratios together).
 MAX_TOTAL_CLIPS = 50
 
@@ -154,16 +193,15 @@ def export_ratios(settings: dict) -> list[str]:
     """The ratios this job renders, in render order.
 
     The job's aspect_ratio comes first, then the requested export
-    ratios in the order given; 9:16 is always included (it is the
-    default and the UI keeps it checked). Unknown values are dropped,
-    so a bad client cannot ask for a ratio with no target.
+    ratios in the order given. Unknown values are dropped, so a bad
+    client cannot ask for a ratio with no target.
     """
     primary = (settings.get("aspect_ratio") or "9:16")
     wanted = settings.get("export_ratios") or [primary]
     if isinstance(wanted, str):
         wanted = [wanted]
     ratios: list[str] = []
-    for r in [primary, "9:16", *wanted]:
+    for r in [primary, *wanted]:
         if isinstance(r, str) and r in RATIO_TARGETS and r not in ratios:
             ratios.append(r)
     return ratios or ["9:16"]
@@ -217,6 +255,50 @@ def export_maxrate(max_export_height) -> tuple[str, str]:
     except (TypeError, ValueError):
         cap = FULL_MAX_EXPORT_HEIGHT
     return ("16000k", "32000k") if cap >= 1080 else ("8000k", "16000k")
+
+
+# Batch 13: quality modes — the Draft/Standard/High selector the UI
+# has offered since Batch 9 FINALLY drives the encoder. Before this
+# batch the worker ignored the setting entirely and always rendered
+# veryfast/CRF 18, so Draft/Standard/High were labels only. Now:
+# Draft is a fast preview, Standard is the established Batch 2
+# behaviour (medium/CRF 18), High is the slow, high-fidelity encode.
+# Loudnorm and AAC 192k are unchanged in every mode; the Batch 11
+# tier bitrate caps (8/16 Mbps at 720p, 16/32 at 1080p) are unchanged
+# too — CRF is a quality target, the cap is a ceiling, they coexist.
+# Honest limit: the SOURCE is the ceiling — a 360p source can never
+# become true 1080p; upscaling cannot invent detail. The boost
+# squeezes the maximum out of the source.
+QUALITY_MODES = {
+    "draft": ("fast", "20"),
+    "standard": ("medium", "18"),
+    "high": ("slow", "16"),
+}
+
+
+def quality_encode_params(settings: dict) -> tuple[str, str]:
+    """(x264 preset, CRF) for a job's quality mode. Unknown or
+    missing values fall back to Standard — never fail a render over
+    a quality label."""
+    mode = (settings.get("quality") or "standard").lower()
+    return QUALITY_MODES.get(mode, QUALITY_MODES["standard"])
+
+
+# Batch 13: high-quality scaling for every render-path scale —
+# lanczos + accurate rounding + full chroma interpolation. Verified
+# in this ffmpeg 8.1.2 build (the flag names are
+# lanczos+accurate_rnd+full_chroma_int; "full_chr_int" and the
+# separate accurate_rnd=/full_chroma_int= options do NOT exist here).
+SCALE_FLAGS = "flags=lanczos+accurate_rnd+full_chroma_int"
+
+
+def scale_expr(w, h, extra: str = "") -> str:
+    """A scale filter expression with the Batch 13 quality flags.
+    ``extra`` is an additional option (e.g. a
+    force_original_aspect_ratio rule), appended after the flags.
+    """
+    expr = f"scale={w}:{h}:{SCALE_FLAGS}"
+    return f"{expr}:{extra}" if extra else expr
 
 LANGUAGE_MAP = {"english": "en", "roman_urdu": "ur", "hindi": "hi", "auto": None}
 
@@ -281,24 +363,163 @@ PROGRESS_BAR_COLOUR = "0x8b5cf6"
 # captions/headline burn, so the grade colours the footage while the
 # burned text stays its own colour. "none" adds no filter at all —
 # the pipeline is byte-identical to before. Filters use only eq /
-# vibrance / colorbalance, all present in this ffmpeg build.
-COLOUR_GRADES = ("none", "vibrant", "warm", "cool", "cinematic")
+# vibrance / colorbalance / hue, all present in this ffmpeg build.
+# Batch 13 (2026-11-25): three more looks (clean / mono / vintage)
+# and an "auto" mode — the worker analyses each clip and picks the
+# look that suits THAT clip (see pick_auto_grade). "auto" is the
+# default from Batch 13. The named looks are our own recipes; the
+# names are generic words, nothing copied from any competitor.
+COLOUR_GRADES = ("auto", "none", "clean", "vibrant", "warm", "cool",
+                 "cinematic", "mono", "vintage")
 COLOUR_GRADE_FILTERS = {
+    # Gentle lift: the safe "enhance" — a touch brighter, a touch
+    # more contrast and colour. Also the auto pick for dark clips
+    # (brightens) and for already-balanced clips (mild lift only).
+    "clean": "eq=brightness=0.06:contrast=1.08:saturation=1.10",
     "vibrant": "eq=saturation=1.3:contrast=1.08,vibrance=intensity=0.2",
     "warm": "colorbalance=rs=0.08:gs=0.02:bs=-0.08,eq=saturation=1.05",
     "cool": "colorbalance=rs=-0.06:gs=0.0:bs=0.08,eq=saturation=1.02",
     "cinematic": ("eq=contrast=1.12:brightness=-0.02:saturation=0.85,"
                   "colorbalance=rs=0.03:bs=0.05"),
+    # Black & white: full desaturation + a little contrast.
+    "mono": "hue=s=0,eq=contrast=1.08",
+    # Faded + warm: lower contrast/saturation, slight lift, warm cast.
+    "vintage": ("eq=saturation=0.80:contrast=0.92:brightness=0.03,"
+                "colorbalance=rs=0.06:gs=0.01:bs=-0.06"),
 }
 
 
 def colour_grade_filter(grade: str) -> str:
     """FFmpeg video filter for a colour grade, or "" for none/unknown.
 
-    Unknown values fall back to "" (no grade) — an old or mistyped
-    grade never breaks a render.
+    "auto" also returns "" here — it is resolved to a real look by
+    resolve_colour_grade BEFORE this is called. Unknown values fall
+    back to "" (no grade) — an old or mistyped grade never breaks
+    a render.
     """
     return COLOUR_GRADE_FILTERS.get((grade or "none").lower(), "")
+
+
+# Batch 13: auto-grade analysis thresholds. All measured on 0-255
+# luma (Rec.601) and 0-1 HSV saturation, averaged over 3 frames
+# (25/50/75% of the clip). The numbers are deliberately loose —
+# grading is a look, not a diagnosis; a borderline clip just gets
+# the gentle Clean lift. Priority order in pick_auto_grade is:
+# dark -> colour cast -> washed out -> flat colour -> balanced.
+AUTO_GRADE_DARK_LUMA = 75.0        # mean luma below this: dark
+AUTO_GRADE_COOL_CAST = -12.0       # mean R minus mean B below this: cool
+AUTO_GRADE_WARM_CAST = 12.0        # mean R minus mean B above this: warm
+AUTO_GRADE_LOW_CONTRAST = 28.0     # luma std-dev below this: flat
+AUTO_GRADE_LOW_SATURATION = 0.25   # mean saturation below this: washed out
+AUTO_GRADE_LOW_SAT_ONLY = 0.28     # saturation below this alone: flat colour
+
+
+def measure_frame_stats(image) -> dict:
+    """Measure one PIL frame: mean luma + luma std-dev (contrast),
+    mean saturation, and the red-minus-blue balance (colour cast).
+
+    PIL only — no numpy needed. The frame is downscaled to <=160px
+    wide first, so this is cheap even on big frames.
+    """
+    from PIL import ImageStat
+
+    img = image.convert("RGB")
+    if img.width > 160:
+        img = img.resize((160, max(1, int(img.height * 160 / img.width))))
+    grey = img.convert("L")
+    grey_stat = ImageStat.Stat(grey)
+    hsv_stat = ImageStat.Stat(img.convert("HSV"))
+    rgb_stat = ImageStat.Stat(img)
+    return {
+        "luma": round(float(grey_stat.mean[0]), 1),
+        "contrast": round(float(grey_stat.stddev[0]), 1),
+        "saturation": round(float(hsv_stat.mean[1]) / 255.0, 3),
+        "r_minus_b": round(float(rgb_stat.mean[0] - rgb_stat.mean[2]), 1),
+    }
+
+
+def pick_auto_grade(stats: dict) -> tuple[str, str]:
+    """Pick the grade for one clip from its measured frame stats.
+
+    Returns (grade, reason). Mono and Vintage are NEVER auto-picked —
+    they are stylistic choices, not corrections; only the user picks
+    them. Every branch is unit-tested with synthetic stats.
+    """
+    luma = float(stats.get("luma", 128.0))
+    contrast = float(stats.get("contrast", 50.0))
+    saturation = float(stats.get("saturation", 0.4))
+    cast = float(stats.get("r_minus_b", 0.0))
+    if luma < AUTO_GRADE_DARK_LUMA:
+        return ("clean", "dark — brightened and lifted")
+    if cast < AUTO_GRADE_COOL_CAST:
+        return ("warm", "cool cast — warmed up")
+    if cast > AUTO_GRADE_WARM_CAST:
+        return ("cool", "warm cast — cooled down")
+    if contrast < AUTO_GRADE_LOW_CONTRAST and saturation < AUTO_GRADE_LOW_SATURATION:
+        return ("vibrant", "washed out — contrast and colour boosted")
+    if saturation < AUTO_GRADE_LOW_SAT_ONLY:
+        return ("vibrant", "flat colour — saturation boosted")
+    return ("clean", "already balanced — gentle lift only")
+
+
+def analyse_clip_frames(source: Path, start: float, end: float,
+                        job_dir: Path) -> tuple[str, str, dict]:
+    """Sample 3 frames from a clip window and pick its auto grade.
+
+    Returns (grade, reason, averaged_stats). On ANY failure (missing
+    source, ffmpeg error, unreadable frame) it falls back to Clean
+    with a reason that says so — grading never fails a render.
+    """
+    from PIL import Image
+
+    duration = max(0.0, end - start)
+    frames: list[dict] = []
+    for frac in (0.25, 0.5, 0.75):
+        at = start + duration * frac
+        out = job_dir / f"grade-{uuid.uuid4().hex[:8]}.png"
+        try:
+            proc = run([FFMPEG, "-y", "-v", "error",
+                        "-ss", f"{at:.3f}", "-i", str(source),
+                        "-vframes", "1", "-vf", "scale=160:-1",
+                        str(out)], timeout=120)
+            if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
+                continue
+            with Image.open(out) as im:
+                frames.append(measure_frame_stats(im))
+        except Exception as exc:  # noqa: BLE001 — grading is best-effort
+            log.warning("Auto-grade frame sampling failed at %.1fs: %s", at, exc)
+        finally:
+            try:
+                out.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
+    if not frames:
+        return ("clean", "frame analysis failed — gentle lift applied", {})
+    avg = {k: round(sum(f[k] for f in frames) / len(frames), 3)
+           for k in ("luma", "contrast", "saturation", "r_minus_b")}
+    grade, reason = pick_auto_grade(avg)
+    log.info("Auto grade: luma=%.1f contrast=%.1f sat=%.3f r-b=%.1f -> %s (%s)",
+             avg["luma"], avg["contrast"], avg["saturation"], avg["r_minus_b"],
+             grade, reason)
+    return (grade, reason, avg)
+
+
+def resolve_colour_grade(settings: dict, source: Path, start: float,
+                         end: float, job_dir: Path) -> tuple[str, str | None, dict]:
+    """Resolve the per-clip grade to actually render.
+
+    Returns (grade, reason, measured_stats). "none" -> no grade and
+    no reason; a named look -> that look, reason None (the UI calls
+    it the "chosen look"); "auto" (the default) -> the analysed pick
+    with its reason and stats. Unknown values behave like "none".
+    """
+    mode = (settings.get("colour_grade") or "none").lower()
+    if mode == "auto":
+        grade, reason, stats = analyse_clip_frames(source, start, end, job_dir)
+        return (grade, reason, stats)
+    if mode in COLOUR_GRADE_FILTERS:
+        return (mode, None, {})
+    return ("none", None, {})
 
 
 # Batch 9 (2026-11-25): SFX (per-job setting `sfx`: none / whoosh /
@@ -4578,12 +4799,15 @@ def _cleaning_keeps_duration(cleaned_dur: float, settings: dict) -> bool:
 
 
 def clean_clip_segment(source: Path, start: float, end: float,
-                       cuts: list[tuple[float, float]], out_path: Path) -> Path:
+                       cuts: list[tuple[float, float]], out_path: Path,
+                       quality: str = "standard") -> Path:
     """Re-encode [start, end] with the cut spans removed (trim + concat,
     video + audio together so A/V stay in sync). CRF 18 for the
     intermediate, to limit the double-encode loss before the final
     render. Returns out_path. Raises on ffmpeg failure — the caller
-    falls back to the uncleaned clip and says so in the note."""
+    falls back to the uncleaned clip and says so in the note.
+    Batch 13: the intermediate follows the job's quality mode, so a
+    High job is not silently capped at CRF 18 before the final render."""
     kept: list[tuple[float, float]] = []
     cursor = start
     for cs, ce in cuts:
@@ -4600,9 +4824,10 @@ def clean_clip_segment(source: Path, start: float, end: float,
         a_parts.append(f"[0:a]atrim={ks:.3f}:{ke:.3f},asetpts=PTS-STARTPTS[a{j}]")
     join = "".join(f"[v{j}][a{j}]" for j in range(len(kept)))
     fc = ";".join(v_parts + a_parts) + f";{join}concat=n={len(kept)}:v=1:a=1[cv][ca]"
+    preset, crf = quality_encode_params({"quality": quality})
     proc = run([FFMPEG, "-y", "-v", "error", "-i", str(source),
                 "-filter_complex", fc, "-map", "[cv]", "-map", "[ca]",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                "-c:v", "libx264", "-preset", preset, "-crf", crf,
                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
                 str(out_path)], timeout=1800)
     if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
@@ -4966,10 +5191,10 @@ def _tracked_crop(sw: int, sh: int, tw: int, th: int,
         # The x expression holds commas (nested if()/min()/max()) so it
         # MUST be single-quoted: unquoted, ffmpeg's filtergraph parser
         # splits it into separate filters ("No such filter: '0.000)'").
-        return f"crop={cw}:ih:'{x}':0,scale={tw}:{th}"
+        return f"crop={cw}:ih:'{x}':0,{scale_expr(tw, th)}"
     ch = f"iw/{target_ar:.6f}"
     y = f"min(max({_pan_expr(face_track, 1)}*ih-({ch})/2,0),ih-({ch}))"
-    return f"crop=iw:{ch}:0:'{y}',scale={tw}:{th}"
+    return f"crop=iw:{ch}:0:'{y}',{scale_expr(tw, th)}"
 
 
 def _tracked_inset_crop(box, sw: int, sh: int, face_track: list[tuple]) -> str | None:
@@ -4988,14 +5213,15 @@ def _tracked_inset_crop(box, sw: int, sh: int, face_track: list[tuple]) -> str |
     return f"crop={top_w}:{top_h_src}:'{x}':'{y}'"
 
 
-def _tracked_closeup_crop(box, sw: int, sh: int, face_track: list[tuple]) -> str | None:
+def _tracked_closeup_crop(box, sw: int, sh: int, face_track: list[tuple],
+                          tw: int = 1080, th: int = 1920) -> str | None:
     """Face-closeup crop following the trajectory (Batch 9): same tight
-    9:16 size as _face_closeup_crop (from the median face), but the
-    window moves with the face instead of sitting on the median
-    position. None when no box (the caller falls back to centre crop)."""
+    size as _face_closeup_crop (from the median face), but the window
+    moves with the face instead of sitting on the median position.
+    None when no box (the caller falls back to centre crop)."""
     if box is None:
         return None
-    cw, ch = _closeup_size(box, sw, sh)
+    cw, ch = _closeup_size(box, sw, sh, tw, th)
     x = f"min(max({_pan_expr(face_track, 0)}*iw-{cw}/2,0),iw-{cw})"
     y = f"min(max({_pan_expr(face_track, 1)}*ih-{ch}/2,0),ih-{ch})"
     # Same quoting rule as _tracked_crop: the if()/min()/max()
@@ -5027,8 +5253,8 @@ def _center_crop_filter(sw: int, sh: int, tw: int, th: int) -> str:
     src_ar = sw / sh if sh else 16 / 9
     target_ar = tw / th
     if src_ar > target_ar:
-        return f"crop=ih*{target_ar:.6f}:ih,scale={tw}:{th}"
-    return f"crop=iw:iw/{target_ar:.6f},scale={tw}:{th}"
+        return f"crop=ih*{target_ar:.6f}:ih,{scale_expr(tw, th)}"
+    return f"crop=iw:iw/{target_ar:.6f},{scale_expr(tw, th)}"
 
 
 def _facecam_inset_crop(box, sw: int, sh: int) -> str | None:
@@ -5045,29 +5271,32 @@ def _facecam_inset_crop(box, sw: int, sh: int) -> str | None:
     return f"crop={top_w}:{top_h_src}:{top_x}:{top_y}"
 
 
-def _closeup_size(box, sw: int, sh: int) -> tuple[int, int]:
-    """Tight 9:16 crop size around a detected face box (Batch 9
-    face_closeup): ~2.2x the face width, clamped to 25–60% of the frame
-    width so a huge face does not collapse the crop and a tiny face
-    still fills the frame. Height follows the 9:16 ratio, clamped to
-    the frame height (width re-derived so the ratio stays exact)."""
+def _closeup_size(box, sw: int, sh: int, tw: int = 1080, th: int = 1920) -> tuple[int, int]:
+    """Tight crop size around a detected face box (Batch 9
+    face_closeup; Batch 13: parameterised by the TARGET canvas):
+    ~2.2x the face width, clamped to 25–60% of the frame width so a
+    huge face does not collapse the crop and a tiny face still fills
+    the frame. Height follows the TARGET ratio — it was hardcoded
+    9:16, and a 9:16 crop scaled to a 16:9/1:1 frame would stretch —
+    clamped to the frame height (width re-derived so the ratio stays
+    exact). At 9:16 the numbers are unchanged."""
     _fx, _fy, fw, _fh = box
     cw = int(min(max(fw * sw * 2.2, sw * 0.25), sw * 0.6))
-    ch = int(cw * 16 / 9)
+    ch = int(cw * th / tw)
     if ch > sh:
         ch = sh
-        cw = int(ch * 9 / 16)
+        cw = int(ch * tw / th)
     return cw, ch
 
 
-def _face_closeup_crop(box, sw: int, sh: int) -> str | None:
+def _face_closeup_crop(box, sw: int, sh: int, tw: int = 1080, th: int = 1920) -> str | None:
     """Static tight crop centred on a detected face box (fx, fy, fw, fh
     as fractions of the frame) — the face fills roughly half the frame
     width. None when no box (the caller falls back to centre crop)."""
     if box is None:
         return None
     fx, fy, _fw, _fh = box
-    cw, ch = _closeup_size(box, sw, sh)
+    cw, ch = _closeup_size(box, sw, sh, tw, th)
     cx = int(min(max(fx * sw - cw / 2, 0), max(0, sw - cw)))
     cy = int(min(max(fy * sh - ch / 2, 0), max(0, sh - ch)))
     return f"crop={cw}:{ch}:{cx}:{cy}"
@@ -5079,8 +5308,11 @@ def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
                         face_tracking=False) -> list[str]:
     """FFmpeg filter chains turning [0:v] into [v0] for the job's layout.
 
-    Layouts (all 9:16-only, like split — any other ratio, or an unknown
-    layout, falls back to centre crop):
+    Layouts (Batch 13: per-ratio — see LAYOUTS_BY_RATIO. The six
+    canvas-agnostic layouts render on every ratio; the four vertical
+    compositions render on portrait frames (9:16 and 4:5) only. An
+    unknown layout, or one that does not apply to the ratio, falls
+    back to centre crop):
       * split — streamer top / gameplay bottom, true split (864 + 1056).
       * pip_facecam — gameplay full-frame, facecam inset overlaid top-right.
       * blur_fill — blurred cover background + sharp contain-fit video.
@@ -5092,11 +5324,12 @@ def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
         frame, dark slate panel below for the headline/captions area.
       * letterbox (Batch 9) — video full width, cinematic black bars
         top + bottom (centred vertically, no stretch).
-      * face_closeup (Batch 9) — tight 9:16 crop around the speaker's
-        face (~2.2x the face width), following the face trajectory when
+      * face_closeup (Batch 9) — tight crop around the speaker's
+        face (~2.2x the face width, in the target ratio), following the face trajectory when
         face tracking is on; no face -> honest centre-crop fallback.
-      * framed (Batch 9) — video cover-cropped to 9:16, inset with a
-        30px margin on a dark slate frame + a thin light border around it.
+      * framed (Batch 9) — video cover-cropped to the target ratio,
+        inset with a 30px margin on a dark slate frame + a thin light
+        border around it.
     ``face_box`` is a detected (fx, fy, fw, fh) box, None for "no face"
     (the face layouts fall back honestly), or the default sentinel to
     detect it here from 5 samples across the clip window. Callers and
@@ -5111,9 +5344,17 @@ def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
     unchanged and the caller reports the fallback.
     """
     layout = (layout or "center_crop").lower()
+    # Batch 13: never render a composition the canvas cannot do —
+    # a layout that does not apply to this ratio becomes centre crop
+    # (logged, so the job note can say so honestly).
+    resolved = resolve_layout(layout, ratio)
+    if resolved != layout:
+        log.warning("layout %s does not apply to %s; falling back to centre crop.",
+                    layout, ratio)
+    layout = resolved
     box = None
     tracked = bool(face_tracking) and bool(face_track)
-    if layout in ("split", "pip_facecam", "streamer_full", "face_closeup") and ratio == "9:16":
+    if layout in ("split", "pip_facecam", "streamer_full", "face_closeup"):
         if tracked:
             # Median face from the trajectory — the static decisions
             # (inset size, the split bottom-shift rule) use it; the
@@ -5124,12 +5365,15 @@ def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
                 source, [start + duration * f for f in (0.15, 0.3, 0.5, 0.7, 0.85)], sw, sh)
                 if face_box is _DETECT_FACE else face_box)
 
-    if layout == "split" and ratio == "9:16":
+    if layout == "split":
         # Streamer-top / gameplay-bottom, TRUE split (reference style):
         # top = the facecam inset, full-fit; bottom = gameplay, full-fit,
         # aspect-matched (no squeeze/stretch) and shifted away from the
-        # facecam inset when it would overlap. Top panel 864, bottom 1056.
-        top_h, bot_h = 864, 1056
+        # facecam inset when it would overlap. Top panel 45% / bottom
+        # 55% of the frame height (864 + 1056 at 9:16 1080p) —
+        # parameterised by th so the same composition renders on 4:5
+        # (607 + 743) instead of hardcoding the 9:16 frame.
+        top_h, bot_h = int(th * 0.45), th - int(th * 0.45)
         bot_h_src = int(sh * 0.55)
         bot_w_src = int(bot_h_src * tw / bot_h)
         bot_w_src = min(bot_w_src, sw)
@@ -5162,11 +5406,11 @@ def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
             top_crop = "crop=iw:ih*0.45:0:0"
             bot_crop = f"crop={bot_w_src}:{bot_h_src}:{(sw - bot_w_src) // 2}:{bot_y}"
         return [f"[0:v]split=2[ts][bs];"
-                f"[ts]{top_crop},scale=1080:{top_h}[top];"
-                f"[bs]{bot_crop},scale=1080:{bot_h}[bot];"
+                f"[ts]{top_crop},{scale_expr(tw, top_h)}[top];"
+                f"[bs]{bot_crop},{scale_expr(tw, bot_h)}[bot];"
                 f"[top][bot]vstack[v0]"]
 
-    if layout == "pip_facecam" and ratio == "9:16":
+    if layout == "pip_facecam":
         # Gameplay fills the whole frame; the facecam inset sits top-right
         # with a thin border. No face found -> honest centre-crop fallback.
         ow = tw // 3
@@ -5182,20 +5426,20 @@ def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
                      if tracked else _center_crop_filter(sw, sh, tw, th))
         return [f"[0:v]split=2[base][face];"
                 f"[base]{base_crop}[bg];"
-                f"[face]{face_crop},scale={ow}:{oh},"
+                f"[face]{face_crop},{scale_expr(ow, oh)},"
                 f"drawbox=x=0:y=0:w=iw:h=ih:color=white@0.85:t=4[fg];"
                 f"[bg][fg]overlay={ox}:{oy}[v0]"]
 
-    if layout == "blur_fill" and ratio == "9:16":
+    if layout == "blur_fill":
         # Landscape source in a vertical frame: blurred cover background
         # with the sharp video contain-fit on top. No detection needed.
         return [f"[0:v]split=2[bg][fg];"
-                f"[bg]scale={tw}:{th}:force_original_aspect_ratio=increase,"
+                f"[bg]{scale_expr(tw, th, 'force_original_aspect_ratio=increase')},"
                 f"crop={tw}:{th},gblur=sigma=40[bg2];"
-                f"[fg]scale={tw}:{th}:force_original_aspect_ratio=decrease[fg2];"
+                f"[fg]{scale_expr(tw, th, 'force_original_aspect_ratio=decrease')}[fg2];"
                 f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2[v0]"]
 
-    if layout == "streamer_full" and ratio == "9:16":
+    if layout == "streamer_full":
         # The streamer region fills the whole frame (cover-scaled, no
         # stretch). No face found -> the top 45% of the frame instead.
         top_crop = (_tracked_inset_crop(box, sw, sh, face_track)
@@ -5204,10 +5448,10 @@ def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
             log.info("streamer_full: no face detected in this clip window; "
                      "using the top 45% of the frame.")
             top_crop = "crop=iw:ih*0.45:0:0"
-        return [f"[0:v]{top_crop},scale={tw}:{th}:"
-                f"force_original_aspect_ratio=increase,crop={tw}:{th}[v0]"]
+        return [f"[0:v]{top_crop},{scale_expr(tw, th, 'force_original_aspect_ratio=increase')},"
+                f"crop={tw}:{th}[v0]"]
 
-    if layout == "gradient_fill" and ratio == "9:16":
+    if layout == "gradient_fill":
         # Aurora gradient background (the picker's own palette: deep
         # navy -> violet -> fuchsia) with the sharp video contain-fit
         # on top — a smooth gradient, never blurred video. The
@@ -5215,41 +5459,45 @@ def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
         # command's -t caps the output duration.
         return [f"gradients=size={tw}x{th}:nb_colors=3:c0=1e1b4b:c1=7c3aed:"
                 f"c2=db2777:x0={tw // 2}:y0=0:x1={tw // 2}:y1={th}[bg];"
-                f"[0:v]scale={tw}:{th}:force_original_aspect_ratio=decrease[fg];"
+                f"[0:v]{scale_expr(tw, th, 'force_original_aspect_ratio=decrease')}[fg];"
                 f"[bg][fg]overlay=(W-w)/2:(H-h)/2[v0]"]
 
-    if layout == "stacked" and ratio == "9:16":
+    if layout == "stacked":
         # Podcast stack: video cover-cropped to the top ~65% of the
         # frame (1248px), dark slate panel below for the
         # headline/captions area. Captions at the bottom sit on the
         # panel by design.
         top_h = int(th * 0.65)
-        return [f"[0:v]scale={tw}:{top_h}:force_original_aspect_ratio=increase,"
+        return [f"[0:v]{scale_expr(tw, top_h, 'force_original_aspect_ratio=increase')},"
                 f"crop={tw}:{top_h},pad={tw}:{th}:0:0:color=0x0f172a[v0]"]
 
-    if layout == "letterbox" and ratio == "9:16":
+    if layout == "letterbox":
         # Cinematic black bars: video full width, centred vertically
         # (no stretch, no crop of the width). scale=1080:-2 keeps the
         # source aspect; pad centres it with black top + bottom.
-        return [f"[0:v]scale={tw}:-2,"
+        return [f"[0:v]{scale_expr(tw, '-2')},"
                 f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:color=black[v0]"]
 
-    if layout == "face_closeup" and ratio == "9:16":
+    if layout == "face_closeup":
         # Tight 9:16 crop around the speaker's face, following the
         # trajectory when face tracking is on. No face found -> honest
         # centre-crop fallback (same as pip_facecam).
-        closeup = (_tracked_closeup_crop(box, sw, sh, face_track)
-                   if tracked else _face_closeup_crop(box, sw, sh))
+        closeup = (_tracked_closeup_crop(box, sw, sh, face_track, tw, th)
+                   if tracked else _face_closeup_crop(box, sw, sh, tw, th))
         if closeup is None:
             log.warning("face_closeup: no face detected in this clip window; "
                         "falling back to centre crop.")
             return [f"[0:v]{_center_crop_filter(sw, sh, tw, th)}[v0]"]
-        return [f"[0:v]{closeup},scale={tw}:{th}[v0]"]
+        return [f"[0:v]{closeup},{scale_expr(tw, th)}[v0]"]
 
-    if layout == "framed" and ratio == "9:16":
-        # Video cover-cropped to 9:16, inset with a 30px margin on a
-        # dark slate frame, thin light border around the video rect.
-        inner_w, inner_h = 1020, 1813
+    if layout == "framed":
+        # Video cover-cropped to the target ratio, inset with a 30px
+        # side / ~53px top-bottom margin on a dark slate frame, thin
+        # light border around the video rect. (Batch 13: the inset was
+        # hardcoded 1020x1813 for 9:16 1080p — the same margins now
+        # derive from the target size, so the frame fits 16:9/1:1/4:5
+        # too; at 9:16 the numbers are unchanged.)
+        inner_w, inner_h = tw - 60, th - 107
         frame_x, frame_y = (tw - inner_w) // 2, (th - inner_h) // 2
         return [f"[0:v]{_center_crop_filter(sw, sh, inner_w, inner_h)},"
                 f"pad={tw}:{th}:{frame_x}:{frame_y}:color=0x0f172a,"
@@ -5307,8 +5555,16 @@ def render_clip(source: Path, clip: dict, settings: dict,
             "export_size": f"{tw}x{th}",
             "export_capped": capped_target_size(ratio, settings.get("max_export_height")) != RATIO_TARGETS.get(ratio, (1080, 1920)),
             # Batch 9: colour grade applied ("none" when ungraded);
-             # the job note reads this, never the settings.
+             # the job note reads this, never the settings. Batch 13:
+             # the reason the auto picker gave (None for a manual
+             # look) and the measured frame stats it decided on.
              "colour_grade": "none",
+             "colour_grade_reason": None,
+             "colour_grade_stats": {},
+            # Batch 13: quality mode actually rendered (the job note
+            # reads these, never the settings).
+            "quality_mode": (settings.get("quality") or "standard").lower(),
+            "quality_encode": None,
              # Batch 9: music bed + SFX applied to this clip (the job
              # note reads these, never the settings).
              "music_bed": None,
@@ -5346,7 +5602,8 @@ def render_clip(source: Path, clip: dict, settings: dict,
             else:
                 try:
                     cleaned_path = job_dir / f"clip_{uuid.uuid4().hex}_cleaned.mp4"
-                    clean_clip_segment(source, start, end, cuts, cleaned_path)
+                    clean_clip_segment(source, start, end, cuts, cleaned_path,
+                                       quality=settings.get("quality"))
                     render_source = cleaned_path
                     render_start, render_end = 0.0, cleaned_dur
                     render_duration = cleaned_dur
@@ -5427,7 +5684,9 @@ def render_clip(source: Path, clip: dict, settings: dict,
                 captions_path = candidate
         else:
             candidate = job_dir / f"clip_{uuid.uuid4().hex}.ass"
-            divider = 864 if (layout == "split" and ratio == "9:16") else None
+            # Batch 13: the divider is the split top-panel height
+            # (45% of the frame — 864 at 9:16 1080p, 607 at 4:5).
+            divider = int(th * 0.45) if layout == "split" else None
             if write_clip_ass(render_segments, render_start, render_end, style_id, candidate,
                               divider, tw, th, layout, caption_position, headline_style,
                               caption_safe_zone, ost_position=ost_position):
@@ -5518,7 +5777,7 @@ def render_clip(source: Path, clip: dict, settings: dict,
     do_track = _feature_on(settings, "face_tracking")
     if do_track:
         if layout in ("blur_fill", "gradient_fill", "stacked",
-                      "letterbox", "framed") and ratio == "9:16":
+                      "letterbox", "framed"):
             # These layouts have no crop to track — honest no-op, not
             # faked. blur_fill keeps its original message; the Batch 9
             # layouts name themselves.
@@ -5568,19 +5827,32 @@ def render_clip(source: Path, clip: dict, settings: dict,
                      start, end, len(render_moments))
     # Batch 2: mild sharpening after layout/zoom, before captions —
     # the text stays crisp because it is burned in after this.
-    chains.append(f"{video_label}unsharp=5:5:0.5:5:5:0.0[vu]")
+    # Batch 13: a MILD denoise first (hqdn3d, well below its defaults
+    # — phone/360p sources are noisy, and the denoise stops the
+    # encoder wasting bits on that noise), then the unsharp (0.7 luma,
+    # up from 0.5, to put back the crispness the denoise softens).
+    # Verified by frame inspection: no plastic/over-smoothed look.
+    chains.append(f"{video_label}hqdn3d=1.5:1.5:4:3,unsharp=5:5:0.7:5:5:0.0[vu]")
     video_label = "[vu]"
     # Batch 9: colour grade — after layout/zoom/sharpen, before the
     # captions burn, so the grade colours the footage and the burned
     # text stays its own colour. "none" (default) adds nothing, so
-    # the pipeline is unchanged for ungraded jobs.
-    grade_filter = colour_grade_filter(settings.get("colour_grade"))
+    # the pipeline is unchanged for ungraded jobs. Batch 13: "auto"
+    # (the default) analyses THIS clip's frames first and resolves
+    # to the look that suits it; the resolved grade + reason + the
+    # measured stats are stashed for the job note and the clip row.
+    grade, grade_reason, grade_stats = resolve_colour_grade(
+        settings, render_source, render_start, render_end, job_dir)
+    grade_filter = colour_grade_filter(grade)
     if grade_filter:
         chains.append(f"{video_label}{grade_filter}[vg]")
         video_label = "[vg]"
-        stats["colour_grade"] = (settings.get("colour_grade") or "none").lower()
-        log.info("Clip %.1f-%.1fs: colour grade %s applied.",
-                 start, end, stats["colour_grade"])
+        stats["colour_grade"] = grade
+        stats["colour_grade_reason"] = grade_reason
+        stats["colour_grade_stats"] = grade_stats
+        log.info("Clip %.1f-%.1fs: colour grade %s applied%s.",
+                 start, end, grade,
+                 f" ({grade_reason})" if grade_reason else " (manual)")
     if captions_path is not None:
         if captions_is_ass:
             chains.append(
@@ -5593,7 +5865,7 @@ def render_clip(source: Path, clip: dict, settings: dict,
             # (The divider is only defined on the ASS path, so it is
             # recomputed here — middle does not use it, but the helper
             # takes it for the shared signature.)
-            srt_divider = 864 if (layout == "split" and ratio == "9:16") else None
+            srt_divider = int(th * 0.45) if layout == "split" else None
             if caption_position == "top":
                 srt_align, srt_mv = 8, 300
             elif caption_position == "middle":
@@ -5806,9 +6078,14 @@ def render_clip(source: Path, clip: dict, settings: dict,
     # Batch 2: CRF 18 (was 20) with a bitrate ceiling — visibly
     # cleaner on busy gameplay, same preset so render time barely
     # moves. Batch 11: the ceiling follows the export tier (16 Mbps
-    # at 1080p, 8 Mbps at 720p); CRF 18 itself never changes.
+    # at 1080p, 8 Mbps at 720p). Batch 13: the preset + CRF now
+    # follow the job's quality mode (Draft fast/20, Standard
+    # medium/18 — the old behaviour — High slow/16); the tier cap
+    # is unchanged, and loudnorm/AAC 192k above are untouched.
+    preset, crf = quality_encode_params(settings)
+    stats["quality_encode"] = f"{preset}/CRF {crf}"
     maxrate, bufsize = export_maxrate(settings.get("max_export_height"))
-    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+    cmd += ["-c:v", "libx264", "-preset", preset, "-crf", crf,
             "-maxrate", maxrate, "-bufsize", bufsize,
             "-movflags", "+faststart", "-t", str(render_duration), str(out_path)]
     proc = run(cmd, timeout=1800)
@@ -6162,7 +6439,8 @@ def _download_music_bed(api: "JobApi", job: dict, job_dir: Path
 
 def apply_brand_assets(clip_path: Path, intro_path: Path | None = None,
                        outro_path: Path | None = None,
-                       out_path: Path | None = None) -> tuple[Path, bool, bool]:
+                       out_path: Path | None = None,
+                       quality: str = "standard") -> tuple[Path, bool, bool]:
     """Concatenate [intro?] + clip + [outro?] into one branded clip.
 
     Every segment is normalised to the rendered clip's canvas (probe the
@@ -6171,7 +6449,7 @@ def apply_brand_assets(clip_path: Path, intro_path: Path | None = None,
     audio stream gets a silent anullsrc track of its own duration, so a
     missing audio stream can never fail the concat. The segments are
     joined with the concat filter (n=2 or 3) and re-encoded libx264 +
-    aac with the same preset/crf render_clip uses (veryfast / 18, Batch 2).
+    aac with the job's quality mode (Batch 13; was veryfast / 18).
 
     Returns (final_path, intro_applied, outro_applied). With no usable
     brand segment the original clip_path is returned untouched — no
@@ -6215,7 +6493,7 @@ def apply_brand_assets(clip_path: Path, intro_path: Path | None = None,
     concat_inputs: list[str] = []
     for i, (_kind, _path, info) in enumerate(ordered):
         chains.append(
-            f"[{i}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"[{i}:v]{scale_expr(width, height, 'force_original_aspect_ratio=decrease')},"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,"
             f"fps={fps:.2f},format=yuv420p,setpts=PTS-STARTPTS[v{i}]"
         )
@@ -6244,9 +6522,10 @@ def apply_brand_assets(clip_path: Path, intro_path: Path | None = None,
     cmd = [FFMPEG, "-y", "-v", "error"]
     for _kind, path, _info in ordered:
         cmd += ["-i", str(path)]
+    preset, crf = quality_encode_params({"quality": quality})
     cmd += ["-filter_complex", ";".join(chains),
             "-map", "[vout]", "-map", "[aout]",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-c:v", "libx264", "-preset", preset, "-crf", crf,
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart", str(out_path)]
     try:
@@ -6300,14 +6579,16 @@ def _probe_image_info(path: Path) -> dict | None:
 
 
 def apply_logo_overlay(clip_path: Path, logo_path: Path,
-                       out_path: Path | None = None) -> tuple[Path, bool]:
+                       out_path: Path | None = None,
+                       quality: str = "standard") -> tuple[Path, bool]:
     """Overlay the Brand Kit logo on a rendered clip (Batch 4).
 
     The logo sits bottom-right, scaled to ~12% of the clip width with
     a small margin, at 85% opacity — applied to the FINAL clip (after
     any brand intro/outro concat), so it covers the whole clip. The
-    video is re-encoded libx264 veryfast / CRF 18 (the render
-    settings); the audio stream is copied untouched.
+    video is re-encoded libx264 with the job's quality mode
+    (Batch 13; was veryfast / CRF 18); the audio stream is copied
+    untouched.
 
     Returns (final_path, applied). On ANY failure the original clip
     is returned untouched with applied=False — a bad logo never fails
@@ -6331,14 +6612,15 @@ def apply_logo_overlay(clip_path: Path, logo_path: Path,
         out_path = Path(out_path)
     # scale the logo to 12% of the clip width (height follows the
     # aspect ratio), fade it to 85% opacity, and pin it bottom-right.
-    filt = (f"[1:v]scale={logo_w}:-1,format=rgba,"
+    filt = (f"[1:v]{scale_expr(logo_w, '-1')},format=rgba,"
             f"colorchannelmixer=aa=0.85[logo];"
             f"[0:v][logo]overlay=W-w-{margin}:H-h-{margin}:format=yuv420[vout]")
+    preset, crf = quality_encode_params({"quality": quality})
     cmd = [FFMPEG, "-y", "-v", "error",
            "-i", str(clip_path), "-i", str(logo_path),
            "-filter_complex", filt,
            "-map", "[vout]", "-map", "0:a?",
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+           "-c:v", "libx264", "-preset", preset, "-crf", crf,
            "-c:a", "copy", "-movflags", "+faststart", str(out_path)]
     try:
         proc = run(cmd, timeout=1800)
@@ -6476,6 +6758,38 @@ def _ready_note(clips: list[dict], requested: int, failed: list[str],
             notes.append("Lower-third tag shown for the full clip.")
         if any(_stats(c).get("progress_bar") for c in rendered):
             notes.append("Progress bar shown.")
+        # Batch 13: colour grade + quality — claimed only from what
+        # the renders actually did (the stats), never the settings.
+        # Auto grades carry their reason ("dark — brightened and
+        # lifted"); a manual look has no reason, so identical manual
+        # grades collapse to one line. The note is capped at 5 clips
+        # (the payload truncates it at 1000 chars anyway).
+        _grade_labels = {"clean": "Clean", "vibrant": "Vibrant",
+                         "warm": "Warm", "cool": "Cool",
+                         "cinematic": "Cinematic", "mono": "Mono",
+                         "vintage": "Vintage"}
+        _graded = [(i + 1, _stats(c).get("colour_grade"),
+                    _stats(c).get("colour_grade_reason"))
+                   for i, c in enumerate(rendered)]
+        _graded = [(n, g, r) for n, g, r in _graded if g and g != "none"]
+        if _graded:
+            if (len({_g for _, _g, _ in _graded}) == 1
+                    and all(_r is None for _, _, _r in _graded)):
+                notes.append(
+                    f"Colour grade: {_grade_labels.get(_graded[0][1], _graded[0][1])} "
+                    f"applied to all {len(rendered)} clip(s).")
+            else:
+                _bits = []
+                for _n, _g, _r in _graded[:5]:
+                    _bits.append(f"Clip {_n}: {_grade_labels.get(_g, _g)}"
+                                 + (f" ({_r})" if _r else ""))
+                if len(_graded) > 5:
+                    _bits.append(f"+{len(_graded) - 5} more")
+                notes.append("Colour grade: " + "; ".join(_bits) + ".")
+        _qmode = _stats(rendered[0]).get("quality_mode") or "standard"
+        if _qmode != "standard":
+            _qenc = _stats(rendered[0]).get("quality_encode") or ""
+            notes.append(f"Quality: {_qmode.title()} ({_qenc}).")
     if extra:
         notes.extend(extra)
     return " ".join(notes) if notes else None
@@ -6573,7 +6887,7 @@ def process_rerender(api: JobApi, rerender: dict) -> None:
             # re-rendered clip is uploaded instead — never a failure.
             final_path, _intro_ok, _outro_ok = apply_brand_assets(
                 out_path, brand.get("intro"), brand.get("outro"),
-                job_dir / "clip_branded.mp4")
+                job_dir / "clip_branded.mp4", quality=settings.get("quality"))
             if final_path != out_path:
                 info = probe_summary(final_path)
                 out_path = final_path
@@ -6584,7 +6898,8 @@ def process_rerender(api: JobApi, rerender: dict) -> None:
         # it, and a failure keeps the plain re-render).
         if settings.get("logo_overlay") and brand.get("logo"):
             final_path, _logo_ok = apply_logo_overlay(
-                out_path, brand["logo"], job_dir / "clip_logo.mp4")
+                out_path, brand["logo"], job_dir / "clip_logo.mp4",
+                quality=settings.get("quality"))
             if final_path != out_path:
                 info = probe_summary(final_path)
                 out_path = final_path
@@ -6877,7 +7192,7 @@ def process_job(api: JobApi, job: dict) -> None:
                             branded_path = job_dir / f"clip_{i:02d}_{slug}_branded.mp4"
                             final_path, intro_ok, outro_ok = apply_brand_assets(
                                 out_path, brand.get("intro"), brand.get("outro"),
-                                branded_path)
+                                branded_path, quality=settings.get("quality"))
                             if final_path != out_path:
                                 info = probe_summary(final_path)
                                 intro_applied = intro_applied or intro_ok
@@ -6897,7 +7212,8 @@ def process_job(api: JobApi, job: dict) -> None:
                         try:
                             logo_out = job_dir / f"clip_{i:02d}_{slug}_logo.mp4"
                             final_path, logo_ok = apply_logo_overlay(
-                                out_path, brand["logo"], logo_out)
+                                out_path, brand["logo"], logo_out,
+                                quality=settings.get("quality"))
                             if logo_ok:
                                 info = probe_summary(final_path)
                                 out_path = final_path
@@ -7011,6 +7327,14 @@ def process_job(api: JobApi, job: dict) -> None:
                 clip_fields["ost_burned_text"] = burned
             if applied:
                 clip_fields["required_items_applied"] = json.dumps(applied)
+            # Batch 13: the grade this clip actually rendered with +
+            # the auto picker's reason (absent for a manual look or
+            # when grading was off). The backend stores both on the
+            # clip row for the per-clip card.
+            if clip_stats.get("colour_grade") and clip_stats["colour_grade"] != "none":
+                clip_fields["colour_grade_applied"] = clip_stats["colour_grade"]
+            if clip_stats.get("colour_grade_reason"):
+                clip_fields["colour_grade_reason"] = clip_stats["colour_grade_reason"]
             log.info("Job %s clip %d campaign: title=%r caption_source=%s "
                      "hashtags=%s ost_burned=%r applied=%s",
                      job_id, i, clip_title, campaign["caption_source"],

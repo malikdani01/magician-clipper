@@ -93,11 +93,14 @@ class JobSettingsRules
             // Batch 9 (2026-11-25): per-job colour grade (default
             // 'none'). The worker applies it as a video filter on
             // the final render only; 'none' adds no filter at all.
-            'colour_grade' => ['sometimes', 'nullable', 'string', Rule::in(['none', 'vibrant', 'warm', 'cool', 'cinematic'])],
+            // Batch 13 (2026-11-25): 'auto' (the new default — the
+            // worker analyses each clip and picks the look that
+            // suits it) + three more looks: clean / mono / vintage.
+            'colour_grade' => ['sometimes', 'nullable', 'string', Rule::in(['auto', 'none', 'clean', 'vibrant', 'warm', 'cool', 'cinematic', 'mono', 'vintage'])],
             // Batch 3 (2026-11-25): beat-synced cuts/zoom (default ON),
             // captions auto-translate (default "none" = original
-            // language), multi-ratio export (9:16 always on; the worker
-            // also forces the job's own aspect_ratio into the list).
+            // language), export ratios (Batch 13: one ratio in, same
+            // ratio out — the aspect ratio IS the export ratio).
             'beat_sync' => ['sometimes', 'boolean'],
             // Batch 9 (2026-11-25): caption translation targets
             // broadened from ur/hi/en to the full MyMemory list
@@ -105,7 +108,7 @@ class JobSettingsRules
             // handling — 'none' keeps the original language).
             'caption_translation' => ['sometimes', 'string', Rule::in(array_merge(['none'], self::translationLanguages()))],
             'export_ratios' => ['sometimes', 'array', 'max:3'],
-            'export_ratios.*' => ['string', Rule::in(['9:16', '1:1', '16:9'])],
+            'export_ratios.*' => ['string', Rule::in(['9:16', '1:1', '16:9', '4:5'])],
             // Batch 11 (2026-11-25): export tier — '720p' (Free) or
             // '1080p' (paid plan). The tier caps resolution + bitrate
             // only. The API rejects an above-tier request in
@@ -167,9 +170,13 @@ class JobSettingsRules
             'campaign_ost_required' => ['sometimes', 'boolean'],
             'ost_hint' => ['sometimes', 'nullable', 'string', 'max:200'],
             'notes' => ['sometimes', 'nullable', 'string', 'max:5000'],
-            // Batch 9 (2026-11-25): five more 9:16 layouts — gradient_fill,
-            // stacked, letterbox, face_closeup, framed. The worker falls
-            // back to centre crop for any layout at a non-9:16 ratio.
+            // Batch 9 (2026-11-25): five more layouts — gradient_fill,
+            // stacked, letterbox, face_closeup, framed. Batch 13: the
+            // six canvas-agnostic layouts render on every ratio; the
+            // four portrait compositions (split, pip_facecam,
+            // streamer_full, stacked) apply to 9:16 and 4:5 only — the
+            // worker falls back to centre crop for those off-portrait,
+            // and the wizard only offers layouts that apply.
             'layout' => ['sometimes', 'string', Rule::in(['center_crop', 'split', 'pip_facecam', 'blur_fill', 'streamer_full', 'gradient_fill', 'stacked', 'letterbox', 'face_closeup', 'framed'])],
             'content_type' => ['sometimes', 'string', Rule::in(Project::CONTENT_TYPES)],
             'quality' => ['sometimes', 'string', Rule::in(['draft', 'standard', 'high'])],

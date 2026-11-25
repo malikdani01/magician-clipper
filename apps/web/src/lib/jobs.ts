@@ -22,7 +22,9 @@ import { API_URL, getToken } from './api'
 
 export type JobStatus = 'queued' | 'processing' | 'ready' | 'failed' | 'cancelled'
 
-/** Clip layout (9:16 only — other ratios fall back to centre crop).
+/** Clip layout (Batch 13: per-ratio — the six canvas-agnostic
+ * layouts render on every ratio; the four vertical compositions
+ * render on portrait frames, 9:16 and 4:5, only).
  * Batch 9 (2026-11-25): five more layouts — gradient_fill, stacked,
  * letterbox, face_closeup, framed. Single source of truth: the wizard
  * picker, JobDetail "Settings used", and the backend validation all
@@ -38,6 +40,26 @@ export type ClipLayout =
   | 'letterbox'
   | 'face_closeup'
   | 'framed'
+
+/** Which layouts genuinely render on each canvas (Batch 13).
+ * The wizard shows only these per ratio; the worker falls back to
+ * centre crop for anything else instead of faking it. */
+export const LAYOUTS_BY_ASPECT: Record<string, ClipLayout[]> = {
+  '9:16': [
+    'center_crop', 'blur_fill', 'gradient_fill', 'letterbox',
+    'face_closeup', 'framed', 'split', 'pip_facecam', 'streamer_full', 'stacked',
+  ],
+  '4:5': [
+    'center_crop', 'blur_fill', 'gradient_fill', 'letterbox',
+    'face_closeup', 'framed', 'split', 'pip_facecam', 'streamer_full', 'stacked',
+  ],
+  '16:9': ['center_crop', 'blur_fill', 'gradient_fill', 'letterbox', 'face_closeup', 'framed'],
+  '1:1': ['center_crop', 'blur_fill', 'gradient_fill', 'letterbox', 'face_closeup', 'framed'],
+}
+
+export function layoutAllowedForAspect(layout: ClipLayout, aspect: string): boolean {
+  return (LAYOUTS_BY_ASPECT[aspect] ?? LAYOUTS_BY_ASPECT['16:9']).includes(layout)
+}
 
 export const LAYOUT_LABELS: Record<ClipLayout, string> = {
   center_crop: 'Centre crop (full frame)',
@@ -129,18 +151,48 @@ export const SFX_LABELS: Record<Sfx, string> = {
   whoosh_pop: 'Whoosh + Pop',
 }
 
-/** Per-job colour grade (Batch 9, 2026-11-25). The worker applies
+/** Per-job colour grade (Batch 9, 2026-11-25; Batch 13 added 'auto'
+ * as the default plus clean / mono / vintage). The worker applies
  * the grade as a video filter on the final render only; 'none'
- * adds no filter — the render pipeline is untouched. No preview
- * is shown in the UI; the dropdown only selects the grade. */
-export type ColourGrade = 'none' | 'vibrant' | 'warm' | 'cool' | 'cinematic'
+ * adds no filter — the render pipeline is untouched. 'auto' means
+ * the worker analyses each clip and picks the look that suits it.
+ * No preview is shown in the UI; the dropdown only selects the
+ * grade. Grading improves the LOOK — it does not add resolution or
+ * fix blur; the source is the ceiling. */
+export type ColourGrade =
+  | 'auto'
+  | 'none'
+  | 'clean'
+  | 'vibrant'
+  | 'warm'
+  | 'cool'
+  | 'cinematic'
+  | 'mono'
+  | 'vintage'
 
 export const COLOUR_GRADE_LABELS: Record<ColourGrade, string> = {
-  none: 'None (default)',
+  auto: 'Auto (per clip)',
+  clean: 'Clean',
   vibrant: 'Vibrant',
   warm: 'Warm',
   cool: 'Cool',
   cinematic: 'Cinematic',
+  mono: 'Mono',
+  vintage: 'Vintage',
+  none: 'Off',
+}
+
+/** One-line description per grade, shown under the wizard selector. */
+export const COLOUR_GRADE_DESCRIPTIONS: Record<ColourGrade, string> = {
+  auto: 'Analyses each clip and picks the grade that suits it — dark clips get brightened, washed-out clips get punch, colour casts get corrected.',
+  clean: 'Gentle lift: a touch brighter, a touch more contrast and colour. The safe enhance.',
+  vibrant: 'Stronger saturation and contrast — makes flat, washed-out footage pop.',
+  warm: 'Warms the picture up — good for cool, blue-ish footage.',
+  cool: 'Cools the picture down — good for overly warm, yellow-ish footage.',
+  cinematic: 'Teal-orange style: deeper contrast, muted colour, slightly darker.',
+  mono: 'Black & white, with a little extra contrast.',
+  vintage: 'Faded and warm — an old-film feel.',
+  none: 'No colour grade — the render is left exactly as shot.',
 }
 
 /** Headline entrance animation (Batch 7, 2026-11-25). Applies to the
@@ -374,6 +426,11 @@ export interface JobClip {
   caption_source?: 'required' | 'auto' | null
   ost_burned_text?: string | null
   required_items_applied?: string[] | null
+  /** Batch 13: the grade this clip actually rendered with + the
+   * auto picker's reason (null for a manual look or an ungraded
+   * clip; null on clips rendered before this batch). */
+  colour_grade_applied?: string | null
+  colour_grade_reason?: string | null
   created_at: string
 }
 

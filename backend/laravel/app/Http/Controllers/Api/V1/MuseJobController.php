@@ -591,6 +591,11 @@ class MuseJobController extends Controller
             'caption_source' => ['sometimes', 'nullable', 'string', Rule::in(['required', 'auto'])],
             'ost_burned_text' => ['sometimes', 'nullable', 'string', 'max:60'],
             'required_items_applied' => ['sometimes', 'nullable', 'string'],
+            // Batch 13: the grade this clip actually rendered with
+            // (resolved look id; 'none' is never sent — an absent
+            // field means ungraded) + the auto picker's reason.
+            'colour_grade_applied' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'colour_grade_reason' => ['sometimes', 'nullable', 'string', 'max:255'],
         ]);
 
         $variantOf = null;
@@ -767,6 +772,10 @@ class MuseJobController extends Controller
             'caption_source' => $validated['caption_source'] ?? null,
             'ost_burned_text' => $validated['ost_burned_text'] ?? null,
             'required_items_applied' => $appliedItems,
+            // Batch 13: per-clip colour grade as reported by the
+            // worker (null = ungraded or pre-Batch 13 clip).
+            'colour_grade_applied' => $validated['colour_grade_applied'] ?? null,
+            'colour_grade_reason' => $validated['colour_grade_reason'] ?? null,
         ]);
 
         // Batch 11: one rendered clip against the job owner's
@@ -1171,6 +1180,10 @@ class MuseJobController extends Controller
             'caption_source' => $clip->caption_source,
             'ost_burned_text' => $clip->ost_burned_text,
             'required_items_applied' => $clip->required_items_applied,
+            // Batch 13: same window + same job settings, so the
+            // grade carries over exactly.
+            'colour_grade_applied' => $clip->colour_grade_applied,
+            'colour_grade_reason' => $clip->colour_grade_reason,
             'caption_style' => $rerender->caption_style,
             'face_tracked' => (bool) ($validated['face_tracked'] ?? false),
             'variant_of_clip_id' => $clip->id,

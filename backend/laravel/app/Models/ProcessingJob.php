@@ -295,6 +295,11 @@ class ProcessingJob extends Model
                 'caption_source' => $clip->caption_source,
                 'ost_burned_text' => $clip->ost_burned_text,
                 'required_items_applied' => $clip->required_items_applied,
+                // Batch 13: the grade this clip actually rendered
+                // with + the auto picker's reason. Null on clips
+                // rendered before this batch.
+                'colour_grade_applied' => $clip->colour_grade_applied,
+                'colour_grade_reason' => $clip->colour_grade_reason,
                 'created_at' => $clip->created_at,
             ];
         })->all();

@@ -123,8 +123,15 @@ export function CaptionStylePicker({
                     <MotionBadge animated={animated} />
                   </span>
                 </span>
-                <span className="mx-auto mt-2 block w-full max-w-[104px] sm:max-w-[132px]">
-                  <CaptionStylePreview style={style} />
+                {/* Batch 13: the 9:16 preview is half its old size
+                    (52x93 on a phone, 66x118 on sm+) — the preview
+                    itself is unchanged, rendered at its old 104px
+                    width and scaled to 50%, so the sample text scales
+                    with it and nothing overflows or clips. */}
+                <span className="mx-auto mt-2 block h-[93px] w-[52px] overflow-hidden sm:h-[118px] sm:w-[66px]">
+                  <span className="block w-[104px] origin-top-left scale-50 sm:w-[132px]">
+                    <CaptionStylePreview style={style} />
+                  </span>
                 </span>
                 <span className="mt-2 block text-[11px] leading-snug text-[var(--color-text-muted)] sm:text-xs sm:leading-relaxed">
                   {style.description}
@@ -145,6 +152,75 @@ export function CaptionStylePicker({
 const HEADLINE_SAMPLE = "LET'S TRY TO MAKE IT COUNT."
 
 const HEADLINE_STYLES: HeadlineStyle[] = ['bold_bar', 'lower_third', 'big_centre']
+
+/**
+ * The STATIC still sample for one headline style (Batch 8) — the
+ * same still the headline card shows. Exported for the wizard's
+ * collapsible headline dropdown header (Batch 13). `className`
+ * overrides the card size; the default is the card's own size.
+ */
+export function HeadlineStyleStill({
+  style,
+  className,
+}: {
+  style: HeadlineStyle
+  className?: string
+}) {
+  // Batch 9 FONT MAP: each headline sample renders in its own
+  // typeface — the same font the worker burns in.
+  const hFont = fontForHeadlineStyle(style)
+  const hFontCss = {
+    fontFamily: hFont.family,
+    fontWeight: hFont.weight,
+    fontStyle: hFont.style,
+  } as const
+  const inner = (
+    <span
+      className={
+        className ??
+        'relative block aspect-[9/16] w-full overflow-hidden rounded-lg border border-white/10 caption-preview'
+      }
+    >
+      <PreviewBackdrop />
+      {style === 'bold_bar' ? (
+        <span
+          className="absolute inset-x-2 top-2 rounded bg-black/70 px-2 py-1 text-center text-[11px] font-black uppercase leading-tight text-white"
+          style={hFontCss}
+        >
+          {HEADLINE_SAMPLE}
+        </span>
+      ) : null}
+      {style === 'lower_third' ? (
+        <span
+          className="absolute inset-x-0 bottom-0 bg-black/70 px-2 py-1.5 text-center text-[10px] font-bold uppercase leading-tight text-white"
+          style={hFontCss}
+        >
+          {HEADLINE_SAMPLE}
+        </span>
+      ) : null}
+      {style === 'big_centre' ? (
+        <span
+          className="absolute inset-x-2 top-1/2 -translate-y-1/2 text-center text-[15px] font-black uppercase leading-tight text-white"
+          style={{ ...hFontCss, textShadow: OUTLINE_SHADOW }}
+        >
+          {HEADLINE_SAMPLE}
+        </span>
+      ) : null}
+    </span>
+  )
+  // A caller-supplied className owns the size (the wizard header's
+  // 26x46 miniature) — render the still exactly as asked.
+  if (className) return inner
+  // Batch 13: the card preview is half its old size (52x93 on a
+  // phone, 66x118 on sm+) — the still renders at its old 104px width
+  // and scales to 50%, so the sample text scales with it and nothing
+  // overflows or clips.
+  return (
+    <span className="mx-auto mt-2 block h-[93px] w-[52px] overflow-hidden sm:h-[118px] sm:w-[66px]">
+      <span className="block w-[104px] origin-top-left scale-50 sm:w-[132px]">{inner}</span>
+    </span>
+  )
+}
 
 /**
  * Headline style card picker — the SAME card treatment as captions,
@@ -171,14 +247,6 @@ export function HeadlineStylePicker({
     >
       {HEADLINE_STYLES.map((style) => {
         const selected = value === style
-        // Batch 9 FONT MAP: each headline sample renders in its own
-        // typeface — the same font the worker burns in.
-        const hFont = fontForHeadlineStyle(style)
-        const hFontCss = {
-          fontFamily: hFont.family,
-          fontWeight: hFont.weight,
-          fontStyle: hFont.style,
-        } as const
         return (
           <div key={style} className={selected ? SELECTED_WRAP : undefined}>
             <button
@@ -202,33 +270,7 @@ export function HeadlineStylePicker({
                 </span>
                 <MotionBadge animated={false} />
               </span>
-              <span className="relative mx-auto mt-2 block aspect-[9/16] w-full max-w-[104px] overflow-hidden rounded-lg border border-white/10 caption-preview sm:max-w-[132px]">
-                <PreviewBackdrop />
-                {style === 'bold_bar' ? (
-                  <span
-                    className="absolute inset-x-2 top-2 rounded bg-black/70 px-2 py-1 text-center text-[11px] font-black uppercase leading-tight text-white"
-                    style={hFontCss}
-                  >
-                    {HEADLINE_SAMPLE}
-                  </span>
-                ) : null}
-                {style === 'lower_third' ? (
-                  <span
-                    className="absolute inset-x-0 bottom-0 bg-black/70 px-2 py-1.5 text-center text-[10px] font-bold uppercase leading-tight text-white"
-                    style={hFontCss}
-                  >
-                    {HEADLINE_SAMPLE}
-                  </span>
-                ) : null}
-                {style === 'big_centre' ? (
-                  <span
-                    className="absolute inset-x-2 top-1/2 -translate-y-1/2 text-center text-[15px] font-black uppercase leading-tight text-white"
-                    style={{ ...hFontCss, textShadow: OUTLINE_SHADOW }}
-                  >
-                    {HEADLINE_SAMPLE}
-                  </span>
-                ) : null}
-              </span>
+              <HeadlineStyleStill style={style} />
               <span className="mt-2 block text-[11px] leading-snug text-[var(--color-text-muted)] sm:text-xs sm:leading-relaxed">
                 {HEADLINE_STYLE_DESCRIPTIONS[style]}
               </span>

@@ -54,9 +54,10 @@ export interface ClipSpec {
   ostPosition: 'top' | 'centre' | 'bottom'
   /** Batch 9 SFX sting (2026-11-25); default 'none'. */
   sfx: 'none' | 'whoosh' | 'pop' | 'whoosh_pop'
-  /** Batch 9 colour grade (2026-11-25); default 'none' — no
-   * filter, the render pipeline is untouched. */
-  colourGrade: 'none' | 'vibrant' | 'warm' | 'cool' | 'cinematic'
+  /** Batch 9 colour grade (2026-11-25); Batch 13 default 'auto'
+   * (the worker picks the look per clip) — 'none' means no filter,
+   * the render pipeline is untouched. */
+  colourGrade: 'auto' | 'none' | 'clean' | 'vibrant' | 'warm' | 'cool' | 'cinematic' | 'mono' | 'vintage'
   /** Batch 3 beat sync (2026-11-25); default ON. */
   beatSync: boolean
   /** Batch 3 caption translation (2026-11-25; broadened Batch 9
@@ -147,7 +148,7 @@ export function defaultClipSpec(): ClipSpec {
     captionPosition: 'bottom',
     ostPosition: 'top',
     sfx: 'none',
-    colourGrade: 'none',
+    colourGrade: 'auto',
     beatSync: true,
     captionTranslation: 'none',
     exportRatios: ['9:16'],

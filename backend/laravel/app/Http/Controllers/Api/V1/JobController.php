@@ -549,12 +549,15 @@ class JobController extends Controller
             'sfx' => $validated['sfx'] ?? 'none',
             // Batch 9: colour grade — 'none' unless asked for; 'none'
             // leaves the render pipeline untouched (the worker adds
-            // no filter for it).
-            'colour_grade' => $validated['colour_grade'] ?? 'none',
+            // no filter for it). Batch 13: the default is now 'auto'
+            // — the worker analyses each clip and picks the look
+            // that suits it.
+            'colour_grade' => $validated['colour_grade'] ?? 'auto',
             // Batch 3: beat sync ON unless explicitly off (the worker
             // treats a missing key as ON too); caption translation off
-            // ("none") unless asked for; multi-ratio export defaults
-            // to the job's own ratio only, with 9:16 always included.
+            // ("none") unless asked for; Batch 13: the export ratio
+            // is the job's own ratio only — 9:16 is no longer
+            // force-included.
             'beat_sync' => $validated['beat_sync'] ?? true,
             'caption_translation' => $validated['caption_translation'] ?? 'none',
             'export_ratios' => self::normaliseExportRatios(
@@ -845,27 +848,28 @@ class JobController extends Controller
      * asked to fetch an arbitrary URL.
      */
     /**
-     * Batch 3: normalise the export_ratios list for storage. The job's
-     * own aspect_ratio always renders first, 9:16 is always included
-     * (it is the default and the UI keeps it checked), duplicates are
-     * dropped, and anything outside the validated set is ignored —
-     * validation already rejected those, so this is defence in depth
-     * for callers that build settings without the rules (presets are
-     * validated too, but a stored preset predates this field).
+     * Batch 3: normalise the export_ratios list for storage. Batch 13:
+     * one ratio in, same ratio out — the job's own aspect_ratio
+     * renders first and 9:16 is NO LONGER force-included (the user
+     * removed the multi-ratio option). Duplicates are dropped, and
+     * anything outside the validated set is ignored — validation
+     * already rejected those, so this is defence in depth for callers
+     * that build settings without the rules (presets are validated
+     * too, but a stored preset predates this field).
      */
     private static function normaliseExportRatios(mixed $ratios, string $primary): array
     {
-        $allowed = ['9:16', '1:1', '16:9'];
+        $allowed = ['9:16', '1:1', '16:9', '4:5'];
         $out = [];
-        foreach ([$primary, '9:16', ...(is_array($ratios) ? $ratios : [])] as $ratio) {
+        foreach ([$primary, ...(is_array($ratios) ? $ratios : [])] as $ratio) {
             if (is_string($ratio) && in_array($ratio, $allowed, true) && ! in_array($ratio, $out, true)) {
                 $out[] = $ratio;
             }
         }
-        // A 4:5 job's primary ratio is not in the exportable set — the
-        // worker still renders it (it forces the primary ratio in), so
-        // store the plain default instead of an empty list.
-        return $out !== [] ? $out : ['9:16'];
+        // The primary ratio is always in the allowed set, so $out is
+        // never empty in practice — the fallback only guards a caller
+        // that passed a primary outside the set.
+        return $out !== [] ? $out : [$primary];
     }
 
     private function isAllowedSourceUrl(string $url): bool

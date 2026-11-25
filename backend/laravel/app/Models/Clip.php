@@ -64,6 +64,10 @@ class Clip extends Model
         'caption_source',
         'ost_burned_text',
         'required_items_applied',
+        // Batch 13: the grade this clip actually rendered with +
+        // the auto picker's reason (null for a manual look).
+        'colour_grade_applied',
+        'colour_grade_reason',
     ];
 
     protected function casts(): array
