@@ -18,7 +18,7 @@
  * <a href> (a plain link would send no Authorization header and 401).
  */
 
-import { API_URL, getToken } from './api'
+import { API_URL, getToken, unreachableMessage } from './api'
 
 export type JobStatus = 'queued' | 'processing' | 'ready' | 'failed' | 'cancelled'
 
@@ -650,14 +650,63 @@ function isUnreachable(err: unknown): boolean {
   )
 }
 
+/**
+ * POST a multipart FormData with real upload progress.
+ *
+ * Always-On round (2026-11-26): `fetch` reports no upload progress,
+ * so a big video on a slow connection looked like a stuck spinner
+ * until the client timeout killed it (the 2026-11-26 user failure).
+ * XMLHttpRequest's `upload.onprogress` gives honest 0–100% progress.
+ * Returns a real Response so the caller handles it exactly like the
+ * fetch path. A timeout rejects with an AbortError-named error, the
+ * same signal the fetch path produces when its timeout fires.
+ */
+function postFormWithProgress(
+  url: string,
+  form: FormData,
+  headers: Record<string, string>,
+  timeoutMs: number,
+  onUploadProgress?: (fraction: number) => void,
+): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', url)
+    xhr.timeout = timeoutMs
+    for (const [key, value] of Object.entries(headers)) {
+      xhr.setRequestHeader(key, value)
+    }
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0 && onUploadProgress) {
+        onUploadProgress(event.loaded / event.total)
+      }
+    }
+    xhr.onload = () => {
+      if (xhr.status === 0) {
+        reject(new TypeError('Failed to fetch'))
+        return
+      }
+      resolve(new Response(xhr.responseText || null, { status: xhr.status }))
+    }
+    xhr.onerror = () => reject(new TypeError('Failed to fetch'))
+    xhr.ontimeout = () => {
+      const err = new Error('The request timed out')
+      err.name = 'AbortError'
+      reject(err)
+    }
+    xhr.send(form)
+  })
+}
+
+/** Options for createJob. `onUploadProgress` fires (0–1) only on the
+ *  file-upload path — the link path has nothing to upload. */
+export interface CreateJobOptions {
+  onUploadProgress?: (fraction: number) => void
+}
+
 /* ------------------------------------------------------------------ */
 /* Create                                                              */
 /* ------------------------------------------------------------------ */
 
-/**
- * POST /api/v1/jobs. File source → multipart; link source → JSON.
- * 120s timeout: a 2 GiB upload can take a while on a slow link.
- */
 /**
  * Append the shared settings fields to a job-creation FormData.
  * Used by createJob (single file) and createBulkJobs (up to 5 files)
@@ -725,23 +774,33 @@ function appendSettingsForm(form: FormData, input: CreateJobInput): void {
   form.append('quality', input.quality)
 }
 
-export async function createJob(input: CreateJobInput): Promise<JobResult> {
+/**
+ * POST /api/v1/jobs. File source → multipart (via XMLHttpRequest so
+ * the upload shows real progress); link source → JSON (fetch).
+ * 600s timeout: a big upload can take minutes on a slow connection —
+ * the old 120s cap killed real uploads (user failure 2026-11-26).
+ */
+export async function createJob(
+  input: CreateJobInput,
+  opts?: CreateJobOptions,
+): Promise<JobResult> {
   if (!getToken()) {
     return { ok: false, error: 'Sign in to create a job.' }
   }
-  const { signal, cancel } = timeoutSignal(120000)
+  const { signal, cancel } = timeoutSignal(600000)
   try {
     let res: Response
     if (input.file) {
       const form = new FormData()
       form.append('file', input.file)
       appendSettingsForm(form, input)
-      res = await fetch(`${API_URL}/jobs`, {
-        method: 'POST',
-        headers: authHeaders(),
-        body: form,
-        signal,
-      })
+      res = await postFormWithProgress(
+        `${API_URL}/jobs`,
+        form,
+        authHeaders(),
+        600000,
+        opts?.onUploadProgress,
+      )
     } else {
       res = await fetch(`${API_URL}/jobs`, {
         method: 'POST',
@@ -816,7 +875,7 @@ export async function createJob(input: CreateJobInput): Promise<JobResult> {
     return {
       ok: false,
       error: isUnreachable(err)
-        ? 'Backend is not reachable — start it with php artisan serve (http://127.0.0.1:8000).'
+        ? unreachableMessage(err instanceof Error && err.name === 'AbortError')
         : err instanceof Error
           ? err.message
           : 'Could not create the job.',
@@ -850,7 +909,7 @@ export async function createBulkJobs(
   if (files.length < 1 || files.length > 5) {
     return { ok: false, error: 'Pick between 1 and 5 video files.' }
   }
-  const { signal, cancel } = timeoutSignal(300000)
+  const { signal, cancel } = timeoutSignal(600000)
   try {
     const form = new FormData()
     for (const file of files) {
@@ -880,7 +939,7 @@ export async function createBulkJobs(
     return {
       ok: false,
       error: isUnreachable(err)
-        ? 'Backend is not reachable — start it with php artisan serve (http://127.0.0.1:8000).'
+        ? unreachableMessage(err instanceof Error && err.name === 'AbortError')
         : err instanceof Error
           ? err.message
           : 'Could not create the jobs.',
@@ -1062,7 +1121,7 @@ export async function getJob(id: number): Promise<JobResult> {
     return {
       ok: false,
       error: isUnreachable(err)
-        ? 'Backend is not reachable — start it with php artisan serve (http://127.0.0.1:8000).'
+        ? unreachableMessage()
         : err instanceof Error
           ? err.message
           : 'Could not load the job.',

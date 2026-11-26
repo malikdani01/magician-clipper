@@ -34,6 +34,30 @@ export const IS_LOCAL_SITE =
 export const ENGINE_CONFIGURED =
   (import.meta.env.VITE_ENGINE_URL || '').trim().length > 0
 
+/**
+ * Always-On round (2026-11-26): the old "Backend is not reachable —
+ * start it with php artisan serve" error was shown on the LIVE site
+ * too, where no local server can be started — users read it as "the
+ * backend is down" when the real cause was a slow upload or a dropped
+ * connection. The artisan hint only makes sense when the app is
+ * actually talking to a local backend, so it is kept for localhost
+ * API URLs only; everywhere else the message says what to do.
+ */
+export function isLocalApi(): boolean {
+  return /(^https?:\/\/)?(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(API_URL)
+}
+
+/** Honest, actionable error for a failed request. `timedOut` = the
+ *  request ran past its client timeout (usually a slow upload). */
+export function unreachableMessage(timedOut = false): string {
+  if (isLocalApi()) {
+    return 'Backend is not reachable — start it with php artisan serve (http://127.0.0.1:8000).'
+  }
+  return timedOut
+    ? 'The upload is taking too long — check your connection and try again. Large videos upload best on WiFi.'
+    : 'Could not reach the server — check your connection and try again. Large videos upload best on WiFi.'
+}
+
 const TOKEN_KEY = 'magician-clipper.token'
 const USER_KEY = 'magician-clipper.user'
 
@@ -432,7 +456,7 @@ export async function laravelLogin(
   } catch {
     return {
       ok: false,
-      error: 'Backend is not reachable — start it with php artisan serve',
+      error: unreachableMessage(),
     }
   } finally {
     cancel()
@@ -472,7 +496,7 @@ export async function laravelRegister(
   } catch {
     return {
       ok: false,
-      error: 'Backend is not reachable — start it with php artisan serve',
+      error: unreachableMessage(),
     }
   } finally {
     cancel()

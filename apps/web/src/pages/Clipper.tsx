@@ -347,6 +347,11 @@ export function ClipperPage() {
   // to the job page, where the worker renders the clips.
   const [processing, setProcessing] = useState(false)
   const [processingError, setProcessingError] = useState<string | null>(null)
+  // Always-On round (2026-11-26): 0–1 while the source file is
+  // uploading to the backend, null otherwise. fetch reports no upload
+  // progress, so the file path uses XHR (see createJob) and the button
+  // shows a real percentage instead of a stuck spinner.
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null)
 
   // Step 1 — audio extraction (Phase 2 groundwork for transcription)
   const [audioStatus, setAudioStatus] = useState<'idle' | 'extracting' | 'done' | 'error'>('idle')
@@ -959,6 +964,7 @@ export function ClipperPage() {
     if (maintenanceOn || dailyExhausted) return
     setProcessing(true)
     setProcessingError(null)
+    setUploadProgress(null)
     // The API requires duration_seconds in every mode: for exact it
     // is the exact length; for minimum/maximum it is the bound that
     // mode enforces (min / max). The min/max pair is sent as well.
@@ -1017,8 +1023,12 @@ export function ClipperPage() {
       layout: spec.layout,
       contentType: spec.contentType,
       quality: spec.quality,
+    },
+    {
+      onUploadProgress: (fraction) => setUploadProgress(fraction),
     })
     setProcessing(false)
+    setUploadProgress(null)
     if (!result.ok) {
       setProcessingError(result.error)
       return
@@ -2812,7 +2822,10 @@ export function ClipperPage() {
               >
                 {processing ? (
                   <>
-                    <Loader2 className="h-4 w-4 animate-spin" /> Creating job…
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    {uploadProgress !== null && uploadProgress < 1
+                      ? `Uploading… ${Math.round(uploadProgress * 100)}%`
+                      : 'Creating job…'}
                   </>
                 ) : (
                   <>
@@ -2821,6 +2834,11 @@ export function ClipperPage() {
                 )}
               </button>
             </div>
+            {processing && uploadProgress !== null ? (
+              <p className="mt-3 text-right text-xs text-[var(--color-text-muted)]">
+                Uploading your video — large videos can take a few minutes on a slow connection. Please keep this page open.
+              </p>
+            ) : null}
             {/* Batch 10: daily usage (admins have no limit, so no line)
                 and the honest reason the button is disabled. */}
             {daily !== null && daily.limit !== null ? (

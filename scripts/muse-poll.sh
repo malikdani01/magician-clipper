@@ -34,6 +34,43 @@ if [ ! -x "$VENV_PY" ]; then
   exit 1
 fi
 
+# Always-On round (2026-11-26): yt-dlp lives in /usr/local/bin, which is
+# ephemeral — every VM replacement wipes it and link jobs then fail with
+# "[Errno 2] No such file or directory: '/usr/local/bin/yt-dlp'". Keep a
+# persistent copy in <workspace>/bin (survives replacements) and use it
+# as the fallback: the system copy wins when present, the persistent
+# copy is used only when it is missing, and it is downloaded here when
+# missing from both places. A failed download only warns — it never
+# blocks the poll, because upload jobs do not need yt-dlp at all.
+PERSIST_BIN="$(dirname "$REPO_ROOT")/bin"
+mkdir -p "$PERSIST_BIN"
+if ! command -v yt-dlp >/dev/null 2>&1; then
+  if [ -x "$PERSIST_BIN/yt-dlp" ]; then
+    export PATH="$PERSIST_BIN:$PATH"
+  else
+    echo "yt-dlp not found — downloading a persistent copy to $PERSIST_BIN/yt-dlp ..." | tee -a "$LOG_FILE"
+    if curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o "$PERSIST_BIN/yt-dlp" \
+        && chmod +x "$PERSIST_BIN/yt-dlp" \
+        && "$PERSIST_BIN/yt-dlp" --version >/dev/null 2>&1; then
+      echo "yt-dlp installed to $PERSIST_BIN/yt-dlp" | tee -a "$LOG_FILE"
+      export PATH="$PERSIST_BIN:$PATH"
+    else
+      echo "WARNING: could not install yt-dlp to $PERSIST_BIN — link jobs will fail until it is installed." | tee -a "$LOG_FILE" >&2
+      rm -f "$PERSIST_BIN/yt-dlp"
+    fi
+  fi
+fi
+
+# The worker also needs ffmpeg + ffprobe (system packages). They cannot
+# be self-healed here (no apt installs on the poll path), so fail fast
+# with a clear message instead of polling forever with broken jobs.
+for _bin in ffmpeg ffprobe; do
+  if ! command -v "$_bin" >/dev/null 2>&1; then
+    echo "ERROR: required tool '$_bin' is missing — reinstall it (e.g. sudo apt-get install -y ffmpeg) before the worker can render clips." | tee -a "$LOG_FILE" >&2
+    exit 1
+  fi
+done
+
 # The Laravel backend must be running locally for the worker to do anything.
 if ! curl -fsS -m 5 http://127.0.0.1:8000/up >/dev/null 2>&1; then
   echo "WARNING: Laravel backend not reachable at http://127.0.0.1:8000/up — is 'php artisan serve' running?" | tee -a "$LOG_FILE" >&2
