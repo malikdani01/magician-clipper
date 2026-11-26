@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Bell, Cloud, CreditCard, HardDrive, ShieldCheck, SlidersHorizontal, User } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { Bell, Cloud, CreditCard, HardDrive, LogOut, ShieldCheck, SlidersHorizontal, User } from 'lucide-react'
 import { API_URL } from '../lib/api'
 import { CAPTION_STYLES, getCaptionStyle, isCaptionStyleId } from '../lib/captionStyles'
 import { formatBytes } from '../lib/format'
@@ -77,7 +78,8 @@ const inputClass =
  * disabled. Billing does not exist.
  */
 export function SettingsPage() {
-  const { user, token, refreshUser } = useAuth()
+  const { user, token, refreshUser, logout } = useAuth()
+  const navigate = useNavigate()
   const { theme, language, setTheme, setLanguage, t } = usePreferences()
   const { projects } = useProjects()
   const [tab, setTab] = useState<SettingsTab>('profile')
@@ -325,6 +327,24 @@ export function SettingsPage() {
             >
               {savingProfile ? 'Saving…' : 'Save Changes'}
             </button>
+            {/* Log out (2026-11-26): a signed-in user had NO way to
+                sign out anywhere in the panel — the backend
+                POST /auth/logout and the auth-context logout()
+                existed, but no button called them. The sidebar
+                account area has the same button. */}
+            {user ? (
+              <button
+                type="button"
+                onClick={() => {
+                  logout()
+                  navigate('/login')
+                }}
+                className="mt-3 flex items-center gap-2 rounded-xl border border-ink-border bg-ink-panel2 px-5 py-2.5 text-sm font-semibold text-white hover:bg-ink-border"
+              >
+                <LogOut className="h-4 w-4" />
+                {t('logOut')}
+              </button>
+            ) : null}
             {profileMessage ? (
               <p className="mt-3 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2.5 text-sm text-emerald-300">
                 {profileMessage}

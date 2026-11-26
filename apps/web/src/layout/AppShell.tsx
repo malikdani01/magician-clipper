@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
+import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import {
   CreditCard,
   Crown,
@@ -7,6 +7,7 @@ import {
   History,
   LayoutDashboard,
   ListVideo,
+  LogOut,
   Menu,
   Moon,
   Palette,
@@ -49,7 +50,8 @@ const NAV_ITEMS: { to: string; labelKey: TranslationKey; icon: typeof LayoutDash
 const ADMIN_NAV_ITEM = { to: '/admin', labelKey: 'navAdminPanel', icon: ShieldCheck } as const
 
 function Sidebar({ mobileOpen, onClose }: { mobileOpen: boolean; onClose: () => void }) {
-  const { user, loading } = useAuth()
+  const { user, loading, logout } = useAuth()
+  const navigate = useNavigate()
   const { t } = usePreferences()
   const { platform, loading: platformLoading } = usePlatform()
   // Admin-only sidebar entry (last in the list). The /admin route
@@ -145,12 +147,30 @@ function Sidebar({ mobileOpen, onClose }: { mobileOpen: boolean; onClose: () => 
               </span>
             </div>
             {user ? (
-              <Link
-                to="/settings"
-                className="mt-3 block rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2 text-center text-xs font-medium text-white hover:bg-ink-border"
-              >
-                {t('accountSettings')}
-              </Link>
+              <>
+                <Link
+                  to="/settings"
+                  className="mt-3 block rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2 text-center text-xs font-medium text-white hover:bg-ink-border"
+                >
+                  {t('accountSettings')}
+                </Link>
+                {/* Log out (2026-11-26): a signed-in user had NO way
+                    to sign out anywhere in the panel — the backend
+                    POST /auth/logout and the auth-context logout()
+                    existed, but no button called them. This button
+                    (and the one on Settings → Profile) fixes that. */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    logout()
+                    navigate('/login')
+                  }}
+                  className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl border border-ink-border bg-ink-panel2 px-3 py-2 text-xs font-medium text-white hover:bg-ink-border"
+                >
+                  <LogOut className="h-4 w-4" />
+                  {t('logOut')}
+                </button>
+              </>
             ) : (
               <div className="mt-3 flex gap-2">
                 <Link

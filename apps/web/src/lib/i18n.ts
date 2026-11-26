@@ -35,6 +35,7 @@ export type TranslationKey =
   | 'upgradePlan'
   | 'accountSettings'
   | 'signIn'
+  | 'logOut'
   | 'register'
   | 'guestUser'
   | 'themeToggleLight'
@@ -183,6 +184,7 @@ const EN: Record<TranslationKey, string> = {
   upgradePlan: 'Upgrade Plan',
   accountSettings: 'Account settings',
   signIn: 'Sign in',
+  logOut: 'Log out',
   register: 'Register',
   guestUser: 'Guest User',
   themeToggleLight: 'Switch to light theme',
@@ -334,6 +336,7 @@ const UR: Partial<Record<TranslationKey, string>> = {
   upgradePlan: 'Plan Upgrade karein',
   accountSettings: 'Account settings',
   signIn: 'Sign in karein',
+  logOut: 'Log out karein',
   register: 'Register karein',
   guestUser: 'Mehman',
   themeToggleLight: 'Light theme karein',
