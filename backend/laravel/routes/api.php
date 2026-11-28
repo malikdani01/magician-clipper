@@ -130,10 +130,15 @@ Route::prefix('v1')->group(function () {
         Route::patch('/clips/{clip}/favourite', [ClipController::class, 'toggleFavourite']);
         Route::patch('/clips/{clip}/thumbnail', [ClipController::class, 'setThumbnail']);
         Route::get('/clips/{clip}/candidates/{index}', [ClipController::class, 'candidate']);
+        // Batch 15: user-entered posted results for one clip.
+        Route::post('/clips/{clip}/performance', [ClipController::class, 'storePerformance']);
 
         // Batch 4: "What works best" — real aggregation of the user's
         // own Ready jobs (never fabricated; <3 jobs → omitted).
         Route::get('/insights/settings', [InsightsController::class, 'settings']);
+        // Batch 15: "Real results" — real aggregation of the user's
+        // own posted results (never fabricated; <3 clips → omitted).
+        Route::get('/insights/performance', [InsightsController::class, 'performance']);
 
         // --- Exports ---
         Route::post('/projects/{project}/export', [ExportController::class, 'store'])

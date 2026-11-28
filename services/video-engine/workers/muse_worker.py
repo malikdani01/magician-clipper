@@ -522,6 +522,121 @@ def resolve_colour_grade(settings: dict, source: Path, start: float,
     return ("none", None, {})
 
 
+# ---------------------------------------------------------------------------
+# Batch 15 — Viral Intelligence: loop-perfect clips
+# ---------------------------------------------------------------------------
+# When the job asks for loop-perfect, the clip's end moves (within
+# ±1.0s) to the frame whose mean luma best matches the start frame,
+# and a 0.3s audio fade is baked at each end, so the clip loops
+# smoothly on TikTok. The move is clamped to the job's duration-mode
+# bounds first — a loop match never breaks the duration promise.
+
+#: How far the end may move to find its luma match (seconds).
+LOOP_MATCH_WINDOW_S = 1.0
+#: Step between candidate end times when searching for the match.
+LOOP_MATCH_STEP_S = 0.25
+#: Audio fade baked at each end of a loop-perfect clip (seconds).
+LOOP_FADE_S = 0.3
+
+
+def _frame_luma(source: Path, at: float, job_dir: Path) -> float | None:
+    """Mean luma of one frame at ``at`` seconds (160px, PIL).
+
+    None when the frame cannot be read — the caller treats that as
+    "no match possible", never as a zero.
+    """
+    from PIL import Image
+
+    out = job_dir / f"loop-{uuid.uuid4().hex[:8]}.png"
+    try:
+        proc = run([FFMPEG, "-y", "-v", "error",
+                    "-ss", f"{at:.3f}", "-i", str(source),
+                    "-vframes", "1", "-vf", "scale=160:-1",
+                    str(out)], timeout=120)
+        if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
+            return None
+        with Image.open(out) as im:
+            return float(measure_frame_stats(im)["luma"])
+    except Exception:  # noqa: BLE001 — frame sampling never fails a job
+        return None
+    finally:
+        try:
+            out.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            pass
+
+
+def match_loop_end(source: Path, start: float, end: float, settings: dict,
+                   source_duration: float, job_dir: Path
+                   ) -> tuple[float, bool]:
+    """Move a clip's end to the frame whose mean luma best matches the
+    start frame's, so the clip loops smoothly.
+
+    Returns (new_end, matched). The search runs within ±1.0s of the
+    current end AND inside the duration-mode bounds (exact: target ±
+    0.6s; minimum: [target, max]; maximum: [min, target]) and the
+    source, so the adjusted window still passes validate_clip.
+    (end, False) when the start frame cannot be read, no candidate
+    frame can be read, or the current end is already the closest —
+    the end is left alone rather than moved blindly.
+    """
+    target = float(settings.get("duration_seconds", 30))
+    mode = (settings.get("duration_mode") or "exact").lower()
+    min_s = settings.get("duration_min_seconds")
+    min_s = float(min_s) if min_s not in (None, "") else None
+    max_s = settings.get("duration_max_seconds")
+    max_s = float(max_s) if max_s not in (None, "") else None
+    if mode == "exact":
+        lo = start + target - DURATION_TOLERANCE
+        hi = start + target + DURATION_TOLERANCE
+    elif mode == "minimum":
+        lo = start + target
+        hi = start + max_s if max_s else start + target + LOOP_MATCH_WINDOW_S
+    else:  # maximum
+        lo = start + min_s if min_s else start + 1.0
+        hi = start + target
+    lo = max(lo, end - LOOP_MATCH_WINDOW_S, start + 1.0)
+    hi = min(hi, end + LOOP_MATCH_WINDOW_S, source_duration)
+    if hi < lo:
+        return (end, False)
+    start_luma = _frame_luma(source, start, job_dir)
+    if start_luma is None:
+        return (end, False)
+    end_luma = _frame_luma(source, end, job_dir)
+    if end_luma is None:
+        return (end, False)
+    best_end, best_diff = end, abs(end_luma - start_luma)
+    sampled_hi = False
+    t = lo
+    while t <= hi + 1e-9:
+        if abs(t - hi) < 1e-9:
+            sampled_hi = True
+        if abs(t - end) > 1e-9:
+            luma = _frame_luma(source, t, job_dir)
+            if luma is not None and abs(luma - start_luma) < best_diff:
+                best_diff, best_end = abs(luma - start_luma), t
+        t += LOOP_MATCH_STEP_S
+    if not sampled_hi and abs(hi - end) > 1e-9:
+        # The 0.25s grid may skip the range edge — sample it too.
+        luma = _frame_luma(source, hi, job_dir)
+        if luma is not None and abs(luma - start_luma) < best_diff:
+            best_diff, best_end = abs(luma - start_luma), hi
+    if best_end == end:
+        return (end, False)
+    return (round(best_end, 3), True)
+
+
+def loop_fade_filters(duration: float) -> str:
+    """0.3s audio fade-in at the start + fade-out at the end, so a
+    loop-perfect clip has no click at the seam. Returns the filter
+    suffix (leading comma) to append after loudnorm, or "" when the
+    clip is too short for both fades."""
+    if duration < 2 * LOOP_FADE_S:
+        return ""
+    return (f",afade=t=in:st=0:d={LOOP_FADE_S:g},"
+            f"afade=t=out:st={duration - LOOP_FADE_S:.3f}:d={LOOP_FADE_S:g}")
+
+
 # Batch 9 (2026-11-25): SFX (per-job setting `sfx`: none / whoosh /
 # pop / whoosh_pop). Only sounds shipped in the repo are offered —
 # services/video-engine/assets/sfx/{whoosh,pop}.wav, synthesised by
@@ -1873,6 +1988,167 @@ def _snap_end_to_sentence(units: list[dict], window_end: float,
     return best, best != window_end
 
 
+# ---------------------------------------------------------------------------
+# Batch 15 — Viral Intelligence: hook score + retention curve
+# ---------------------------------------------------------------------------
+# Both are measured from the clip window's OWN signals — transcript
+# words, the per-second RMS profile and the face-area profile — never
+# guessed and never relative to other clips, so a score is stable no
+# matter what else the job selected. The same helpers feed the
+# per-clip score stored on the row AND the ranking term in
+# select_highlights below.
+
+#: Brisk conversational speech, words per second — the absolute
+#: reference the opening speech density is measured against.
+HOOK_REFERENCE_WPS = 2.5
+#: A face covering at least this fraction of the frame counts as a
+#: face on screen in the opening (an inset facecam reads ~0.01, a
+#: full-facecam face ~0.08).
+HOOK_FACE_MIN_FRAC = 0.005
+
+
+def _opening_words(segments: list[dict], start: float, end: float) -> list[dict]:
+    """Words spoken inside [start, end] (word timings where present)."""
+    words: list[dict] = []
+    for seg in segments:
+        for w in seg.get("words") or []:
+            if start <= w["start"] < end:
+                words.append(w)
+    return words
+
+
+def _face_in(face_profile: list[tuple[float, float]] | None,
+             start: float, end: float) -> bool:
+    """True when any face-area sample inside [start, end] shows a face."""
+    if not face_profile:
+        return False
+    return any(start <= t < end and frac > HOOK_FACE_MIN_FRAC
+               for (t, frac) in face_profile)
+
+
+def _mean_energy(energy_profile: list[float], start: float, end: float) -> float:
+    """Mean per-second RMS over [start, end); 0.0 when unmeasurable.
+
+    Same bin convention as the selector's energy_in: the per-second
+    bins whose starts fall inside the span.
+    """
+    if not energy_profile:
+        return 0.0
+    vals = [energy_profile[i]
+            for i in range(int(start), min(len(energy_profile), int(end) + 1))
+            if start <= i < end]
+    return (sum(vals) / len(vals)) if vals else 0.0
+
+
+def _hook_score(segments: list[dict], energy_profile: list[float],
+                face_profile: list[tuple[float, float]] | None,
+                start: float, end: float) -> tuple[int, str]:
+    """Opening-hook score (0–100) + reason for one clip window.
+
+    Measured from the window's FIRST 3 seconds only:
+    - opening speech density (words/sec vs HOOK_REFERENCE_WPS) — 0.35
+    - opening audio energy vs the clip's own mean RMS — 0.35
+    - a question or exclamation in the opening words — 0.15
+    - a face on screen in the opening — 0.15
+    A silent window scores low on speech/energy and says so in the
+    reason; nothing is ever inferred from the rest of the clip.
+    """
+    opening = _opening_words(segments, start, start + 3.0)
+    opening_text = " ".join(w.get("word", "") for w in opening).strip()
+    density_n = min(1.0, (len(opening) / 3.0) / HOOK_REFERENCE_WPS)
+    clip_mean = _mean_energy(energy_profile, start, end)
+    open_mean = _mean_energy(energy_profile, start, start + 3.0)
+    if clip_mean > 0:
+        # Opening at least as loud as the clip average scores 0.8;
+        # 25% louder scores full marks.
+        energy_n = min(1.0, (open_mean / clip_mean) / 1.25)
+    else:
+        energy_n = 0.0
+    question_n = 1.0 if ("?" in opening_text or "!" in opening_text) else 0.0
+    face_n = 1.0 if _face_in(face_profile, start, start + 3.0) else 0.0
+    score = int(round(100 * (0.35 * density_n + 0.35 * energy_n
+                             + 0.15 * question_n + 0.15 * face_n)))
+    # The reason states measured facts only — counts, comparisons,
+    # presence — never a judgement the signals do not support.
+    if opening:
+        bits = [f"{len(opening)} word(s) in first 3s"]
+    else:
+        bits = ["no speech in first 3s"]
+    if "?" in opening_text:
+        bits.append("opens with a question")
+    elif "!" in opening_text:
+        bits.append("opens with an exclamation")
+    if clip_mean > 0:
+        bits.append("opening louder than clip average"
+                    if open_mean >= clip_mean
+                    else "opening quieter than clip average")
+    else:
+        bits.append("no audio to measure")
+    if face_n:
+        bits.append("face on screen")
+    return score, "; ".join(bits) + "."
+
+
+def _face_frac_at(face_profile: list[tuple[float, float]] | None,
+                  t: float) -> float | None:
+    """Face-area fraction covering time ``t``: the latest sample at or
+    before ``t`` (samples are ~3s apart), else the first sample's
+    fraction when ``t`` precedes them all. None with no profile."""
+    if not face_profile:
+        return None
+    frac = face_profile[0][1]
+    for (sample_t, sample_frac) in face_profile:
+        if sample_t <= t:
+            frac = sample_frac
+        else:
+            break
+    return frac
+
+
+def _retention_curve(segments: list[dict], energy_profile: list[float],
+                     face_profile: list[tuple[float, float]] | None,
+                     start: float, end: float) -> list[int]:
+    """Per-second attention estimates (0–100) for one clip window.
+
+    One entry per second of the window (length == round(end - start)).
+    Each second scores from three measured signals:
+    - speech density in that second (words/sec vs 2.5) — 0.40
+    - audio RMS in that second vs the window's peak RMS — 0.30
+    - visual change vs the previous second (face-area swing, a full
+      swing of 0.08 = a scene change) — 0.30; 0.5 (neutral) for the
+      first second and when no face profile exists.
+    Every value is an estimate — the UI labels it so. A window with
+    no measurable signal scores low rather than inventing attention.
+    """
+    seconds = max(1, int(round(end - start)))
+    peak = 0.0
+    if energy_profile:
+        bins = [energy_profile[i]
+                for i in range(int(start), min(len(energy_profile), int(end) + 1))
+                if start <= i < end]
+        peak = max(bins) if bins else 0.0
+    curve: list[int] = []
+    prev_frac: float | None = None
+    for k in range(seconds):
+        sec_start = start + k
+        sec_end = min(end, sec_start + 1.0)
+        words = _opening_words(segments, sec_start, sec_end)
+        speech_n = min(1.0, len(words) / HOOK_REFERENCE_WPS)
+        idx = int(sec_start)
+        energy_n = (energy_profile[idx] / peak
+                    if peak > 0 and 0 <= idx < len(energy_profile) else 0.0)
+        frac = _face_frac_at(face_profile, sec_start)
+        if frac is None or prev_frac is None:
+            visual_n = 0.5
+        else:
+            visual_n = min(1.0, abs(frac - prev_frac) / 0.08)
+        if frac is not None:
+            prev_frac = frac
+        curve.append(int(round(100 * (0.40 * speech_n + 0.30 * energy_n
+                                     + 0.30 * visual_n))))
+    return curve
+
+
 def select_highlights(segments: list[dict], source_duration: float,
                       settings: dict, energy_profile: list[float],
                       face_profile: list[tuple[float, float]] | None = None) -> list[dict]:
@@ -1888,13 +2164,15 @@ def select_highlights(segments: list[dict], source_duration: float,
       source (labelled 'any_part'), so the job delivers the full count
       whenever the source is physically long enough.
     Scoring (documented weights): speech density 0.20, audio coverage
-    0.20, sentence completeness 0.20, silence boundaries 0.05, audio
+    0.20, sentence completeness 0.15, silence boundaries 0.05, audio
     energy 0.05 (supporting only), gameplay presence 0.15 (real gameplay
     on screen beats a full-facecam talking stretch), scene stability
     0.10 (a window staying in one scene beats one spanning a
     facecam->gameplay switch, which one static split crop cannot serve),
-    hook 0.05 (how strong the window OPENS — speech density + audio
-    energy in its first ~3s; a bonus, not a rule).
+    hook 0.05 (how strong the window OPENS — opening speech density
+    0.4 + opening audio energy 0.4 + question/exclamation 0.1 + face
+    in the first 3s 0.1; a bonus, not a rule), emotional peaks 0.05.
+    The nine weights sum to 1.00.
     Raises if zero valid windows exist; returns fewer than requested
     only when the source genuinely has too little usable content, with
     the reason recorded on each clip. ``face_profile`` is a list of
@@ -2107,6 +2385,14 @@ def select_highlights(segments: list[dict], source_duration: float,
                              if start <= w["start"] < start + 3.0]
             hook_density = len(opening_words) / 3.0
             hook_energy = energy_in(start, min(window_end, start + 3.0))
+            # Batch 15: the opening's punctuation + face presence feed
+            # the hook term too (same signals as _hook_score — a
+            # question or a face in the first 3s is a stronger open).
+            opening_text = " ".join(
+                w.get("word", "") for w in opening_words).strip()
+            hook_question = 1.0 if ("?" in opening_text
+                                    or "!" in opening_text) else 0.0
+            hook_face = 1.0 if _face_in(face_profile, start, start + 3.0) else 0.0
             # Batch 9: emotional peaks — per-second RMS energy peaks
             # inside the FINAL window (after snapping/extension). A
             # second is a peak when its energy is >= 70% of the
@@ -2134,6 +2420,8 @@ def select_highlights(segments: list[dict], source_duration: float,
                 "energy": energy_in(start, window_end),
                 "hook_density": hook_density,
                 "hook_energy": hook_energy,
+                "hook_question": hook_question,
+                "hook_face": hook_face,
                 "peaks": peak_seconds,
                 "snapped": moved and not snap_refused,
                 "snap_refused": snap_refused,
@@ -2152,10 +2440,15 @@ def select_highlights(segments: list[dict], source_duration: float,
             density_n = min(1.0, c["density"] / max_density)
             completeness = 1.0 if c["complete"] else 0.4
             silence_n = min(1.0, c["silence"])
-            # Hook: half opening speech density, half opening energy,
-            # each normalised against the best candidate's opening.
-            hook_n = round(0.5 * min(1.0, c["hook_density"] / max_hook_density)
-                           + 0.5 * min(1.0, c["hook_energy"] / max_hook_energy), 4)
+            # Hook: opening speech density (0.4) + opening energy
+            # (0.4) + question/exclamation (0.1) + face in the first
+            # 3s (0.1) — density/energy normalised against the best
+            # candidate's opening, question/face absolute (Batch 15;
+            # the same four signals as _hook_score).
+            hook_n = round(0.4 * min(1.0, c["hook_density"] / max_hook_density)
+                           + 0.4 * min(1.0, c["hook_energy"] / max_hook_energy)
+                           + 0.1 * c.get("hook_question", 0.0)
+                           + 0.1 * c.get("hook_face", 0.0), 4)
             # Batch 9: emotional peaks — the window's peak-second
             # count normalised against the best candidate's, like
             # density. A window with several loud moments scores
@@ -4947,22 +5240,63 @@ def zoom_moments(energy_profile: list[float], start: float, end: float,
 
 
 def zoompan_filter(moments: list[tuple[float, float]], tw: int, th: int,
-                   fps: int = 30) -> str | None:
-    """zoompan chain for a slow punch-in (1.00 -> 1.08, 0.5s ease in/out)
-    over each moment. ``in`` is the input frame number, so in/fps is
-    clip time — the render chain runs fps=30 before this filter, so
-    that conversion is exact. None when there are no moments."""
+                   fps: int = 30, zoom: float = 0.08, ease: float = 0.5) -> str | None:
+    """zoompan chain for a slow punch-in (1.00 -> 1+zoom, ``ease``s ramp
+    in/out) over each moment. ``in`` is the input frame number, so in/fps
+    is clip time — the render chain runs fps=30 before this filter, so
+    that conversion is exact. None when there are no moments. The
+    defaults (zoom 0.08, ease 0.5s) are the auto-zoom punch-in; Batch 15
+    pattern interrupts reuse this with a smaller, quicker pulse."""
     if not moments:
         return None
     envs = []
     for a, b in moments:
         envs.append(
-            f"(clip((in/{fps}-{a:.3f})/0.5,0,1)*clip(({b:.3f}-in/{fps})/0.5,0,1))")
+            f"(clip((in/{fps}-{a:.3f})/{ease:g},0,1)*clip(({b:.3f}-in/{fps})/{ease:g},0,1))")
     env = envs[0]
     for extra in envs[1:]:
         env = f"max({env},{extra})"
-    return (f"zoompan=z='1+0.08*{env}':x='iw/2-(iw/zoom/2)':"
+    return (f"zoompan=z='1+{zoom:g}*{env}':x='iw/2-(iw/zoom/2)':"
             f"y='ih/2-(ih/zoom/2)':d=1:s={tw}x{th}:fps={fps}")
+
+
+# ---------------------------------------------------------------------------
+# Batch 15 — Viral Intelligence: pattern interrupts
+# ---------------------------------------------------------------------------
+# A micro punch-in every 4s where no auto-zoom event is near, so the
+# picture never sits still long enough to scroll past. Same zoompan
+# mechanism as auto-zoom, smaller (1.05) and quicker (0.4s pulse).
+
+#: Seconds between interrupt marks inside a clip.
+PATTERN_INTERRUPT_EVERY_S = 4.0
+#: Length of one interrupt pulse (seconds).
+PATTERN_INTERRUPT_LEN_S = 0.4
+#: Peak extra scale of the pulse (1.00 -> 1.05).
+PATTERN_INTERRUPT_ZOOM = 0.05
+#: Ramp in/out at each end of the pulse (seconds).
+PATTERN_INTERRUPT_EASE_S = 0.2
+#: An auto-zoom event within this many seconds of a mark suppresses it.
+PATTERN_INTERRUPT_NEAR_S = 1.0
+
+
+def pattern_interrupt_moments(duration: float,
+                              zoom_moments: list) -> list[tuple[float, float]]:
+    """0.4s punch-in marks every 4s of a clip, skipping any mark with
+    an auto-zoom event within ±1s (the zoom already moves the picture
+    there). ``zoom_moments`` are (start, end) spans on the same
+    clip-relative timeline. [] when the clip is too short for a full
+    pulse."""
+    marks: list[tuple[float, float]] = []
+    t = PATTERN_INTERRUPT_EVERY_S
+    while t + PATTERN_INTERRUPT_LEN_S <= duration + 1e-9:
+        near_zoom = any(
+            a - PATTERN_INTERRUPT_NEAR_S <= t + PATTERN_INTERRUPT_LEN_S
+            and b + PATTERN_INTERRUPT_NEAR_S >= t
+            for (a, b) in (zoom_moments or []))
+        if not near_zoom:
+            marks.append((round(t, 3), round(t + PATTERN_INTERRUPT_LEN_S, 3)))
+        t += PATTERN_INTERRUPT_EVERY_S
+    return marks
 
 
 # ---------------------------------------------------------------------------
@@ -5597,7 +5931,12 @@ def render_clip(source: Path, clip: dict, settings: dict,
              # for, and whether its translation landed ("none" /
              # "same" / "ok" / "failed"; the job note reads these).
              "ost_language": "source",
-             "ost_translation": "none"}
+             "ost_translation": "none",
+             # Batch 15: pattern interrupts applied (count) + whether
+             # the loop audio fades were baked (the job note reads
+             # these, never the settings).
+             "pattern_interrupts": 0,
+             "loop_fades": False}
     clip["_batch1_stats"] = stats
 
     # --- Cleaning pre-pass (silence + filler removal) ---
@@ -5848,6 +6187,29 @@ def render_clip(source: Path, clip: dict, settings: dict,
             fps_applied = True
             log.info("Clip %.1f-%.1fs: auto-zoom punch-in over %d moment(s).",
                      start, end, len(render_moments))
+    # Batch 15: pattern interrupts — a 0.4s micro punch-in (1.00 ->
+    # 1.05) at every 4s mark with no auto-zoom event within ±1s, so
+    # the picture keeps moving even in a calm stretch. A second
+    # zoompan stage after auto-zoom (or the only one when auto-zoom
+    # is off); captions burn after this, so the text never zooms.
+    # Default ON (a missing key means ON, like the Batch 1
+    # enhancements — the worker also treats a missing key as ON).
+    if _feature_on(settings, "pattern_interrupts"):
+        interrupt_moments = pattern_interrupt_moments(
+            render_duration, render_moments)
+        interrupt_filter = zoompan_filter(
+            interrupt_moments, tw, th,
+            zoom=PATTERN_INTERRUPT_ZOOM, ease=PATTERN_INTERRUPT_EASE_S)
+        if interrupt_filter:
+            stats["pattern_interrupts"] = len(interrupt_moments)
+            if fps_applied:
+                chains.append(f"{video_label}{interrupt_filter}[vp]")
+            else:
+                chains.append(f"{video_label}fps=30,{interrupt_filter}[vp]")
+                fps_applied = True
+            video_label = "[vp]"
+            log.info("Clip %.1f-%.1fs: pattern interrupts over %d mark(s).",
+                     start, end, len(interrupt_moments))
     # Batch 2: mild sharpening after layout/zoom, before captions —
     # the text stays crisp because it is burned in after this.
     # Batch 13: a MILD denoise first (hqdn3d, well below its defaults
@@ -6021,6 +6383,14 @@ def render_clip(source: Path, clip: dict, settings: dict,
         stats["sfx_counts"][kind] += 1
     if bed_file is not None:
         stats["music_bed"] = bed_file.name
+    # Batch 15: loop-perfect audio fades — 0.3s in/out so the loop
+    # seam has no click. Default OFF (a missing key means OFF). The
+    # suffix is appended after loudnorm in BOTH audio paths (the
+    # bed/SFX mix below and the plain loudnorm further down); a clip
+    # with no audio at all gets no fades (nothing to fade) and
+    # stats["loop_fades"] stays False.
+    loop_fades = loop_fade_filters(render_duration) \
+        if bool(settings.get("loop_perfect", False)) else ""
     audio_chains: list[str] = []
     input_args: list[str] = [
         "-ss", str(render_start), "-i", str(render_source)]
@@ -6075,14 +6445,20 @@ def render_clip(source: Path, clip: dict, settings: dict,
             mix_inputs = ["[sil]"] + mix_inputs
         if len(mix_inputs) == 1:
             audio_chains.append(
-                f"{mix_inputs[0]}loudnorm=I=-14:TP=-1.5:LRA=11[aout]")
+                f"{mix_inputs[0]}loudnorm=I=-14:TP=-1.5:LRA=11{loop_fades}[aout]")
         else:
             audio_chains.append(
                 "".join(mix_inputs)
                 + f"amix=inputs={len(mix_inputs)}:duration=first:"
-                "dropout_transition=0,"
-                "loudnorm=I=-14:TP=-1.5:LRA=11[aout]")
+                f"dropout_transition=0,"
+                f"loudnorm=I=-14:TP=-1.5:LRA=11{loop_fades}[aout]")
+        if loop_fades:
+            stats["loop_fades"] = True
     filter_complex = ";".join(chains + audio_chains)
+    # Batch 15: the built filter graph is stashed for diagnostics and
+    # for the render tests (which assert the interrupt pulse / fades
+    # are in the chain a real job builds). It is never uploaded.
+    stats["filter_complex"] = filter_complex
 
     cmd = [FFMPEG, "-y", "-v", "error",
            *input_args,
@@ -6095,8 +6471,16 @@ def render_clip(source: Path, clip: dict, settings: dict,
         # Batch 2: loudness-normalised to -14 LUFS (the level TikTok /
         # Instagram expect) and AAC 192k. Single-pass loudnorm on the
         # trimmed clip; it does not change the duration.
+        # Batch 15: the loop fades ride after loudnorm here too. The
+        # audio filter is stashed (like filter_complex) so the render
+        # tests can assert the fades are in the chain a real job
+        # builds; it is never uploaded.
         cmd += ["-map", "0:a"]
-        cmd += ["-af", "loudnorm=I=-14:TP=-1.5:LRA=11"]
+        audio_filter = "loudnorm=I=-14:TP=-1.5:LRA=11" + loop_fades
+        cmd += ["-af", audio_filter]
+        stats["audio_filter"] = audio_filter
+        if loop_fades:
+            stats["loop_fades"] = True
         cmd += ["-c:a", "aac", "-b:a", "192k"]
     # Batch 2: CRF 18 (was 20) with a bitrate ceiling — visibly
     # cleaner on busy gameplay, same preset so render time barely
@@ -7269,6 +7653,47 @@ def process_job(api: JobApi, job: dict) -> None:
                 log.info("Job %s beat sync: no clear beat in this audio; "
                          "clips cut as usual.", job_id)
 
+        # Batch 15: loop-perfect — move each window's end (within
+        # ±1s, clamped to the duration-mode bounds) to the frame
+        # whose mean luma best matches the start frame, so the clip
+        # loops smoothly. Runs AFTER beat snap so the matched end is
+        # the final one; a window that cannot be matched keeps its
+        # bounds and renders with fades only. Default OFF.
+        loop_on = bool(settings.get("loop_perfect", False))
+        loop_matched = 0
+        if loop_on:
+            for clip in clips:
+                new_end, matched = match_loop_end(
+                    source, clip["start"], clip["end"], settings,
+                    source_info["duration"], job_dir)
+                if matched:
+                    clip["end"] = new_end
+                    clip["duration"] = round(new_end - clip["start"], 3)
+                    clip["_loop_matched"] = True
+                    loop_matched += 1
+                    log.info("Job %s: clip window %.1f-%.1fs loop-matched "
+                             "to end %.2fs.",
+                             job_id, clip["start"], clip["end"], new_end)
+                else:
+                    clip["_loop_matched"] = False
+                    log.info("Job %s: clip window %.1f-%.1fs could not be "
+                             "loop-matched; end unchanged.",
+                             job_id, clip["start"], clip["end"])
+
+        # Batch 15: hook score + retention curve per window, from the
+        # FINAL bounds (after cleaning, beat snap and loop matching)
+        # so the measured first 3s are the first 3s that render.
+        for clip in clips:
+            hook_score, hook_reason = _hook_score(
+                segments, energy, face_prof, clip["start"], clip["end"])
+            clip["hook_score"] = hook_score
+            clip["hook_reason"] = hook_reason
+            clip["retention_curve"] = _retention_curve(
+                segments, energy, face_prof, clip["start"], clip["end"])
+            log.info("Job %s: clip %.1f-%.1fs hook %d/100 (%s).",
+                     job_id, clip["start"], clip["end"],
+                     hook_score, hook_reason)
+
         # Batch 1: high-energy moments for the auto-zoom punch-in, from
         # the same RMS profile the selector already uses. Stashed on the
         # clip dict in source time; render_clip re-maps them through any
@@ -7475,6 +7900,21 @@ def process_job(api: JobApi, job: dict) -> None:
                 clip_fields["colour_grade_applied"] = clip_stats["colour_grade"]
             if clip_stats.get("colour_grade_reason"):
                 clip_fields["colour_grade_reason"] = clip_stats["colour_grade_reason"]
+            # Batch 15 — Viral Intelligence: the hook score + reason
+            # and the retention curve measured from the final window,
+            # sent only when measured (an absent field means "none",
+            # never a guess). loop_ready is true only when the end
+            # was actually matched AND the render baked the audio
+            # fades — or the clip has no audio to fade.
+            if clip.get("hook_score") is not None:
+                clip_fields["hook_score"] = clip["hook_score"]
+            if clip.get("hook_reason"):
+                clip_fields["hook_reason"] = clip["hook_reason"]
+            if clip.get("retention_curve"):
+                clip_fields["retention_curve"] = json.dumps(clip["retention_curve"])
+            clip_fields["loop_ready"] = bool(
+                clip.get("_loop_matched")
+                and (clip_stats.get("loop_fades") or not info["has_audio"]))
             log.info("Job %s clip %d campaign: title=%r caption_source=%s "
                      "hashtags=%s ost_burned=%r applied=%s",
                      job_id, i, clip_title, campaign["caption_source"],
@@ -7538,6 +7978,24 @@ def process_job(api: JobApi, job: dict) -> None:
         # the other ratios repeat the same cuts, and counting them twice
         # would double-report the trimmed seconds.
         primary_rendered = [c for _, c, _, _, r, _, _ in rendered if r == ratios[0]]
+        # Batch 15: pattern interrupts + loop-perfect — stated from
+        # the renders' stats, never from the settings alone. Lives
+        # here (not in the extra_notes block above) because it needs
+        # primary_rendered, which is defined on the line above.
+        if _feature_on(settings, "pattern_interrupts"):
+            _pi_total = sum((c.get("_batch1_stats") or {}).get("pattern_interrupts", 0)
+                            for c in primary_rendered)
+            extra_notes.append(f"Pattern interrupts: {_pi_total} applied.")
+        if loop_on:
+            _loop_n = sum(1 for c in primary_rendered if c.get("_loop_matched"))
+            if _loop_n:
+                extra_notes.append(
+                    f"Loop-perfect: {_loop_n} of {len(primary_rendered)} clip(s) "
+                    f"matched end to start (0.3s audio fades).")
+            else:
+                extra_notes.append(
+                    "Loop-perfect: no clip end could be matched to its "
+                    "start — fades applied, ends unchanged.")
         # Batch 9: OST language — from the renders' stats (never the
         # settings alone): the headline was translated only when a
         # render actually translated one. Aggregated over the primary

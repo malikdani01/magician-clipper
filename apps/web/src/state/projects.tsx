@@ -44,6 +44,9 @@ export interface ClipSpec {
   faceTracking: boolean
   silenceRemoval: boolean
   fillerRemoval: boolean
+  /** Batch 15 loop-perfect clips (2026-11-28); default OFF — the
+   * end is matched to the start frame so the clip loops smoothly. */
+  loopPerfect: boolean
   /** Batch 2 headline look + caption position (2026-11-25); defaults
    * bold_bar / bottom (the pre-Batch-2 behaviour). */
   headlineStyle: 'bold_bar' | 'lower_third' | 'big_centre'
@@ -139,6 +142,7 @@ export function defaultClipSpec(): ClipSpec {
     faceTracking: true,
     silenceRemoval: true,
     fillerRemoval: true,
+    loopPerfect: false,
     headlineStyle: 'bold_bar',
     captionPosition: 'bottom',
     ostPosition: 'top',

@@ -169,13 +169,16 @@ class ScoreBreakdownTests(unittest.TestCase):
         # covers 29.5 of the 30s (Coverage 98); both silence gaps are
         # long (Silence 100); flat energy is the max (Energy 100);
         # no face profile means neutral gameplay/stability (50 each);
-        # the lone candidate is its own best opening (Hook 100); flat
-        # energy means every second is >= 70% of the max, so every
-        # second in the window is a peak (Peaks 100).
+        # the lone candidate is its own best opening (Hook 80 — Batch
+        # 15: the hook term is now density 0.4 + energy 0.4 +
+        # question 0.1 + face 0.1, and this opening has no question
+        # and no face, so it caps at 80); flat energy means every
+        # second is >= 70% of the max, so every second in the window
+        # is a peak (Peaks 100).
         self.assertEqual(breakdown, {
             "Speech": 100, "Coverage": 98, "Completeness": 40,
             "Silence": 100, "Energy": 100, "Gameplay": 50, "Stability": 50,
-            "Hook": 100, "Peaks": 100,
+            "Hook": 80, "Peaks": 100,
         })
 
     def test_visual_moment_window_carries_only_visual_signals(self):
@@ -1670,11 +1673,15 @@ class Batch2Tests(unittest.TestCase):
         self.assertAlmostEqual(a["start"], 4.5, delta=0.01)
         self.assertAlmostEqual(b["start"], 34.5, delta=0.01)
         self.assertGreater(a["score"], b["score"])
-        self.assertGreaterEqual(a["hook"], 0.9)
+        # Batch 15: the hook term is now density 0.4 + energy 0.4 +
+        # question 0.1 + face 0.1. A opens dense + loud (0.8) but has
+        # no question and no face, so it caps at 0.8 — still a strong
+        # opening, still out-scores B (0.14).
+        self.assertGreaterEqual(a["hook"], 0.8)
         self.assertLess(b["hook"], 0.3)
         self.assertIn("strong_opening", a["signals"])
         self.assertNotIn("strong_opening", b["signals"])
-        self.assertEqual(a["score_breakdown"]["Hook"], 100)
+        self.assertEqual(a["score_breakdown"]["Hook"], 80)
         self.assertIn("opening hook", a["reason"])
 
     # --- Caption auto-fit ---
@@ -5115,6 +5122,246 @@ class Batch14CampaignParsedTests(unittest.TestCase):
         self.assertIn("error", out)
         self.assertIsInstance(out["error"], str)
         self.assertTrue(out["error"])
+
+
+class Batch15ViralIntelligenceTests(unittest.TestCase):
+    """Batch 15 (2026-11-28): Hook Score, Retention curve, Pattern
+    interrupts, Loop-perfect clips, Clip performance tracking
+    (worker side). Scores here are estimates from measured signals —
+    the tests pin the measurement, never a claim about virality."""
+
+    def _manual_segment(self, start, end, pairs):
+        words = [{"start": s, "end": e, "word": w} for s, e, w in pairs]
+        return {"start": start, "end": end,
+                "text": " ".join(w[2] for w in pairs), "words": words}
+
+    def _make_clip(self, path, duration=12, freq=440):
+        """A real MP4: green frames + a sine tone (no silence gaps)."""
+        cmd = [muse_worker.FFMPEG, "-y", "-v", "error",
+               "-f", "lavfi", "-i",
+               f"color=c=green:s=640x360:d={duration}:r=30",
+               "-f", "lavfi", "-i", f"sine=frequency={freq}:duration={duration}",
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+               "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+               "-shortest", str(path)]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(Path(path).exists())
+
+    # --- Hook score ---
+
+    def test_hook_score_dense_question_face_scores_100(self):
+        # 9 words in the first 3s, a question, a loud opening, a face
+        # in the first frames: every hook signal maxed out.
+        segments = [_segment(
+            0.0, 3.0, "Did you know this changes everything right now today?")]
+        energy = [0.9] * 3 + [0.3] * 30
+        face = [(t, 0.05) for t in range(0, 60, 3)]
+        score, reason = muse_worker._hook_score(
+            segments, energy, face, 0.0, 20.0)
+        self.assertEqual(score, 100)
+        self.assertIn("9 word(s) in first 3s", reason)
+        self.assertIn("opens with a question", reason)
+        self.assertIn("face on screen", reason)
+        self.assertIn("opening louder than clip average", reason)
+
+    def test_hook_score_silent_window_is_zero_and_honest(self):
+        score, reason = muse_worker._hook_score(
+            [], [0.0] * 30, [], 0.0, 20.0)
+        self.assertEqual(score, 0)
+        self.assertIn("no speech in first 3s", reason)
+        self.assertIn("no audio to measure", reason)
+
+    def test_hook_score_question_worth_fifteen_points(self):
+        # Same dense loud opening, same face — the only difference is
+        # the question mark, worth exactly the 0.15 question weight.
+        q = [_segment(
+            0.0, 3.0, "Did you know this changes everything right now today?")]
+        s = [_segment(
+            0.0, 3.0, "Did you know this changes everything right now today.")]
+        energy = [0.9] * 3 + [0.3] * 30
+        face = [(t, 0.05) for t in range(0, 60, 3)]
+        q_score, _ = muse_worker._hook_score(q, energy, face, 0.0, 20.0)
+        s_score, _ = muse_worker._hook_score(s, energy, face, 0.0, 20.0)
+        self.assertEqual(q_score - s_score, 15)
+
+    # --- Retention curve ---
+
+    def test_retention_curve_length_matches_clip_duration(self):
+        segments = [_segment(0.0, 60.0, " ".join(["word"] * 60))]
+        curve = muse_worker._retention_curve(
+            segments, [0.5] * 60, [(t, 0.01) for t in range(0, 60)],
+            10.0, 40.0)
+        self.assertEqual(len(curve), 30)
+        for value in curve:
+            self.assertIsInstance(value, int)
+            self.assertGreaterEqual(value, 0)
+            self.assertLessEqual(value, 100)
+        short = muse_worker._retention_curve(
+            segments, [0.5] * 60, [(t, 0.01) for t in range(0, 60)],
+            5.4, 25.4)
+        self.assertEqual(len(short), 20)
+
+    def test_retention_curve_speech_second_beats_silent_second(self):
+        # 12 words packed into seconds 12-14 of the window; flat
+        # energy and a still face everywhere else. The speech second
+        # is 0.40 speech + 0.30 energy = 70; a silent second is 0.30
+        # energy alone = 30.
+        segments = [_segment(
+            10.0, 13.0,
+            "one two three four five six seven eight nine ten eleven twelve")]
+        curve = muse_worker._retention_curve(
+            segments, [0.5] * 60, [(t, 0.01) for t in range(0, 60)],
+            10.0, 40.0)
+        self.assertEqual(curve[2], 70)
+        self.assertEqual(curve[10], 30)
+
+    # --- Hook term in ranking ---
+
+    def test_hook_term_in_ranking_prefers_question_opening(self):
+        # Two 30s speech stretches, same density/energy, no face: the
+        # only difference is the question in the first window's
+        # opening 3s. The question window must win the single slot.
+        seg1 = _segment(0.0, 30.0, "Why now? " + " ".join(["filler"] * 22))
+        seg2 = _segment(60.0, 90.0, "This now. " + " ".join(["filler"] * 22))
+        clips = muse_worker.select_highlights(
+            [seg1, seg2], 200.0, _settings(clip_count=1, duration_seconds=30),
+            [0.05] * 200, [])
+        self.assertEqual(len(clips), 1)
+        self.assertLess(clips[0]["start"], 1.0)
+
+    # --- Pattern interrupts ---
+
+    def test_pattern_interrupt_moments_skips_zoom_covered_marks(self):
+        # A zoom event [5,7] covers the 4s mark (expanded ±1s) and the
+        # 8s mark sits exactly 1.0s after it ends, which still counts
+        # as "within ±1s" (the boundary is inclusive).
+        self.assertEqual(
+            muse_worker.pattern_interrupt_moments(20.0, [(5.0, 7.0)]),
+            [(12.0, 12.4), (16.0, 16.4)])
+        self.assertEqual(
+            muse_worker.pattern_interrupt_moments(10.0, []),
+            [(4.0, 4.4), (8.0, 8.4)])
+        self.assertEqual(muse_worker.pattern_interrupt_moments(4.0, []), [])
+        self.assertEqual(
+            muse_worker.pattern_interrupt_moments(4.4, []), [(4.0, 4.4)])
+
+    def test_zoompan_filter_custom_zoom_and_ease(self):
+        custom = muse_worker.zoompan_filter(
+            [(2.0, 2.4)], 1080, 1920, zoom=0.05, ease=0.2)
+        self.assertIn("1+0.05*", custom)
+        self.assertIn("/0.2", custom)
+        default = muse_worker.zoompan_filter([(2.0, 2.4)], 1080, 1920)
+        self.assertIn("1+0.08*", default)
+        self.assertIn("/0.5", default)
+
+    # --- Loop-perfect ---
+
+    def test_loop_fade_filters(self):
+        self.assertEqual(
+            muse_worker.loop_fade_filters(20.0),
+            ",afade=t=in:st=0:d=0.3,afade=t=out:st=19.700:d=0.3")
+        self.assertEqual(muse_worker.loop_fade_filters(0.5), "")
+
+    def test_match_loop_end_picks_closest_luma_in_bounds(self):
+        # Fake luma peaks at t=5.2 (far from the start frame's luma
+        # at t=0); the closest in-bounds candidate is 4.4.
+        with mock.patch.object(
+                muse_worker, "_frame_luma",
+                side_effect=lambda _s, t, _d: 100 - abs(t - 5.2) * 10):
+            end, matched = muse_worker.match_loop_end(
+                Path("clip.mp4"), 0.0, 5.0,
+                _settings(duration_mode="exact", duration_seconds=5),
+                10.0, Path("/tmp"))
+        self.assertEqual((end, matched), (4.4, True))
+
+    def test_match_loop_end_returns_end_when_frames_unreadable(self):
+        with mock.patch.object(muse_worker, "_frame_luma",
+                               return_value=None):
+            end, matched = muse_worker.match_loop_end(
+                Path("clip.mp4"), 0.0, 5.0,
+                _settings(duration_mode="exact", duration_seconds=5),
+                10.0, Path("/tmp"))
+        self.assertEqual((end, matched), (5.0, False))
+
+    def test_match_loop_end_never_leaves_mode_bounds(self):
+        # Fake luma pulls hardest at t=9.9 — far outside the exact
+        # ±0.6s search range — so the match must stop at the edge.
+        with mock.patch.object(
+                muse_worker, "_frame_luma",
+                side_effect=lambda _s, t, _d: abs(t - 9.9)):
+            end, matched = muse_worker.match_loop_end(
+                Path("clip.mp4"), 0.0, 5.0,
+                _settings(duration_mode="exact", duration_seconds=5),
+                10.0, Path("/tmp"))
+        self.assertTrue(matched)
+        self.assertGreaterEqual(end, 4.4)
+        self.assertLessEqual(end, 5.6)
+
+    # --- Render integration (real ffmpeg) ---
+
+    def test_render_with_pattern_interrupts_bakes_pulse_in_filter_chain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "src.mp4"
+            self._make_clip(src, duration=12)
+            info = muse_worker.probe_summary(src)
+            out = tmp / "pi.mp4"
+            clip = {"start": 0.0, "end": 10.0}
+            # pattern_interrupts absent = default ON; auto-zoom off so
+            # the interrupt stage is the only zoompan in the chain.
+            settings = _settings(duration_seconds=10, clip_count=1,
+                                 layout="center_crop", captions_enabled=False,
+                                 auto_zoom=False)
+            muse_worker.render_clip(src, clip, settings, [], out, info, tmp)
+            stats = clip["_batch1_stats"]
+            self.assertEqual(stats["pattern_interrupts"], 2)
+            self.assertIn("1+0.05*", stats["filter_complex"])
+            self.assertTrue(out.exists())
+            validated = muse_worker.validate_clip(
+                out, {"settings": settings}, info)
+            self.assertAlmostEqual(validated["duration"], 10.0, delta=0.5)
+
+    def test_render_with_loop_perfect_bakes_fades_and_validates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "src.mp4"
+            self._make_clip(src, duration=12)
+            info = muse_worker.probe_summary(src)
+            out = tmp / "loop.mp4"
+            clip = {"start": 0.0, "end": 10.0}
+            settings = _settings(duration_seconds=10, clip_count=1,
+                                 layout="center_crop", captions_enabled=False,
+                                 auto_zoom=False, pattern_interrupts=False,
+                                 loop_perfect=True)
+            muse_worker.render_clip(src, clip, settings, [], out, info, tmp)
+            stats = clip["_batch1_stats"]
+            self.assertTrue(stats["loop_fades"])
+            # The plain audio path puts the fades in the -af argument
+            # (stashed as audio_filter), not in filter_complex.
+            self.assertIn("afade=t=in:st=0:d=0.3", stats["audio_filter"])
+            self.assertIn("afade=t=out:st=9.700:d=0.3",
+                          stats["audio_filter"])
+            self.assertTrue(out.exists())
+            validated = muse_worker.validate_clip(
+                out, {"settings": settings}, info)
+            self.assertAlmostEqual(validated["duration"], 10.0, delta=0.5)
+
+    def test_render_pattern_interrupts_off_adds_no_pulse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "src.mp4"
+            self._make_clip(src, duration=12)
+            info = muse_worker.probe_summary(src)
+            out = tmp / "off.mp4"
+            clip = {"start": 0.0, "end": 10.0}
+            settings = _settings(duration_seconds=10, clip_count=1,
+                                 layout="center_crop", captions_enabled=False,
+                                 auto_zoom=False, pattern_interrupts=False)
+            muse_worker.render_clip(src, clip, settings, [], out, info, tmp)
+            stats = clip["_batch1_stats"]
+            self.assertEqual(stats["pattern_interrupts"], 0)
+            self.assertNotIn("zoompan", stats["filter_complex"])
 
 
 if __name__ == "__main__":

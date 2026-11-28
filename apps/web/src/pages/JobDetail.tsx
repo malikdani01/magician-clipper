@@ -46,6 +46,7 @@ import {
   OST_POSITION_LABELS,
   requestClipRerender,
   retryJob,
+  saveClipPerformance,
   SELECTION_MODE_LABELS,
   SFX_LABELS,
   type CampaignParsed,
@@ -112,6 +113,11 @@ function settingRows(job: Job): Array<[string, string]> {
     ['Face tracking', s.face_tracking === false ? 'Off' : 'On'],
     ['Silence removal', s.silence_removal === false ? 'Off' : 'On'],
     ['Filler removal', s.filler_removal === false ? 'Off' : 'On'],
+    // Batch 15 (2026-11-28) — pattern interrupts are always ON
+    // (no wizard toggle); loop-perfect is the Step 2 toggle
+    // (default OFF). Absent on older jobs means ON / OFF.
+    ['Pattern interrupts', s.pattern_interrupts === false ? 'Off' : 'On'],
+    ['Loop-perfect clip', s.loop_perfect ? 'On' : 'Off'],
     // Batch 2 (2026-11-25) — absent on older jobs means the defaults
     // (bold bar, bottom), which is what the worker renders for them.
     [
@@ -702,6 +708,293 @@ function PostCaptionCard({ clip }: { clip: JobClip }) {
       <div className="mt-3 flex justify-end">
         <CopyButton text={allText} label="Copy all" />
       </div>
+    </div>
+  )
+}
+
+/**
+ * Batch 15: hook score badge (0–100, measured from the clip's first
+ * 3 seconds — an estimate, never a promise of virality) + the
+ * Loop-ready chip when the end was matched to the start frame.
+ * Nothing renders for clips made before Batch 15.
+ */
+function hookBand(score: number): { label: string; className: string } {
+  if (score >= 75) {
+    return { label: 'Strong', className: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' }
+  }
+  if (score >= 50) {
+    return { label: 'OK', className: 'border-amber-500/40 bg-amber-500/10 text-amber-300' }
+  }
+  return { label: 'Weak', className: 'border-red-500/40 bg-red-500/10 text-red-300' }
+}
+
+function HookBadge({ clip }: { clip: JobClip }) {
+  if (clip.hook_score == null) return null
+  const band = hookBand(clip.hook_score)
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2">
+      <span className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${band.className}`}>
+        Hook {clip.hook_score}/100 · {band.label}
+      </span>
+      {clip.loop_ready ? (
+        <span className="rounded-full border border-cyan-500/40 bg-cyan-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-cyan-300">
+          Loop-ready
+        </span>
+      ) : null}
+      <span className="text-[11px] text-[var(--color-text-muted)]">
+        estimate — measured from the clip&apos;s first 3 seconds
+      </span>
+      {clip.hook_reason ? (
+        <span className="w-full text-xs text-[var(--color-text-muted)]">{clip.hook_reason}</span>
+      ) : null}
+    </div>
+  )
+}
+
+/** Start seconds of every attention dip: score below 40 for 2+
+ * consecutive seconds (max 3 listed). */
+function retentionDropoffs(curve: number[]): number[] {
+  const starts: number[] = []
+  let run = 0
+  for (let i = 0; i < curve.length; i++) {
+    if (curve[i] < 40) {
+      run += 1
+      if (run === 2) starts.push(i - 1)
+    } else {
+      run = 0
+    }
+  }
+  return starts.slice(0, 3)
+}
+
+/**
+ * Batch 15: retention curve sparkline (plain SVG, no new
+ * dependency) + drop-off list. Per-second scores are estimates
+ * from speech, audio energy and visual change — labelled as such.
+ * Nothing renders for clips made before Batch 15.
+ */
+function RetentionSparkline({ curve }: { curve: number[] | null | undefined }) {
+  if (!Array.isArray(curve) || curve.length === 0) return null
+  const width = 240
+  const height = 36
+  const points = curve
+    .map((v, i) => {
+      const x = curve.length === 1 ? 0 : (i / (curve.length - 1)) * width
+      const y = height - (Math.min(100, Math.max(0, v)) / 100) * height
+      return `${x.toFixed(1)},${y.toFixed(1)}`
+    })
+    .join(' ')
+  const dropoffs = retentionDropoffs(curve)
+  return (
+    <div className="mt-2">
+      <p className="text-xs font-medium text-white">Retention (estimated)</p>
+      <svg
+        width="100%"
+        viewBox={`0 0 ${width} ${height}`}
+        className="mt-1 block max-w-[240px]"
+        role="img"
+        aria-label="Estimated retention curve, one score per second"
+      >
+        <polyline points={points} fill="none" stroke="#34d399" strokeWidth="2" />
+      </svg>
+      {dropoffs.length > 0 ? (
+        <ul className="mt-1 space-y-0.5">
+          {dropoffs.map((s) => (
+            <li key={s} className="text-xs text-[var(--color-text-muted)]">
+              {formatDuration(s)} — attention dip
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * Batch 15: posted results — the user's own real numbers for this
+ * clip, entered after posting. Every Save posts a new row; the
+ * latest row is the current one. Empty state is honest: no numbers
+ * are shown until the user types them in.
+ */
+function PostedResultsForm({ clip, onSaved }: { clip: JobClip; onSaved: () => void }) {
+  const saved = clip.performance ?? null
+  const [editing, setEditing] = useState(false)
+  const [platform, setPlatform] = useState<'tiktok' | 'instagram'>('tiktok')
+  const [views, setViews] = useState('')
+  const [likes, setLikes] = useState('')
+  const [comments, setComments] = useState('')
+  const [shares, setShares] = useState('')
+  const [postedAt, setPostedAt] = useState('')
+  const [notes, setNotes] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const startEdit = () => {
+    setPlatform(saved?.platform ?? 'tiktok')
+    setViews(saved ? String(saved.views) : '')
+    setLikes(saved ? String(saved.likes) : '')
+    setComments(saved ? String(saved.comments) : '')
+    setShares(saved ? String(saved.shares) : '')
+    setPostedAt(saved?.posted_at ?? '')
+    setNotes(saved?.notes ?? '')
+    setError(null)
+    setEditing(true)
+  }
+
+  const count = (v: string): number | null => {
+    if (v.trim() === '') return 0
+    if (!/^\d+$/.test(v.trim())) return null
+    return Number(v.trim())
+  }
+
+  const save = async () => {
+    const parsed = [count(views), count(likes), count(comments), count(shares)]
+    if (parsed.some((n) => n === null)) {
+      setError('Counts must be whole numbers (0 or more).')
+      return
+    }
+    setSaving(true)
+    setError(null)
+    const result = await saveClipPerformance(clip.id, {
+      platform,
+      views: parsed[0] as number,
+      likes: parsed[1] as number,
+      comments: parsed[2] as number,
+      shares: parsed[3] as number,
+      posted_at: postedAt || null,
+      notes: notes.trim() || null,
+    })
+    setSaving(false)
+    if (!result.ok) {
+      setError(result.error)
+      return
+    }
+    setEditing(false)
+    onSaved()
+  }
+
+  const inputClass =
+    'w-full rounded-xl border border-ink-border bg-ink-panel px-3 py-2 text-sm text-white'
+
+  return (
+    <div className="w-full rounded-xl border border-ink-border bg-ink-panel p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-white">Posted results</h3>
+        {saved && !editing ? (
+          <button
+            type="button"
+            onClick={startEdit}
+            className="rounded-lg border border-ink-border px-3 py-1.5 text-xs font-semibold text-white hover:bg-ink-panel2"
+          >
+            Edit
+          </button>
+        ) : null}
+      </div>
+      {editing ? (
+        <div className="mt-3 space-y-3">
+          <label className="block">
+            <span className="text-xs text-[var(--color-text-muted)]">Platform</span>
+            <select
+              value={platform}
+              onChange={(e) => setPlatform(e.target.value as 'tiktok' | 'instagram')}
+              className={inputClass}
+            >
+              <option value="tiktok">TikTok</option>
+              <option value="instagram">Instagram</option>
+            </select>
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            {(
+              [
+                ['Views', views, setViews],
+                ['Likes', likes, setLikes],
+                ['Comments', comments, setComments],
+                ['Shares', shares, setShares],
+              ] as const
+            ).map(([label, value, setValue]) => (
+              <label key={label} className="block">
+                <span className="text-xs text-[var(--color-text-muted)]">{label}</span>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={value}
+                  onChange={(e) => setValue(e.target.value)}
+                  placeholder="0"
+                  className={inputClass}
+                />
+              </label>
+            ))}
+          </div>
+          <label className="block">
+            <span className="text-xs text-[var(--color-text-muted)]">Posted date (optional)</span>
+            <input
+              type="date"
+              value={postedAt}
+              onChange={(e) => setPostedAt(e.target.value)}
+              className={inputClass}
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-[var(--color-text-muted)]">Notes (optional)</span>
+            <input
+              type="text"
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="e.g. posted in the evening"
+              maxLength={500}
+              className={inputClass}
+            />
+          </label>
+          {error ? (
+            <p role="alert" className="text-sm text-red-300">{error}</p>
+          ) : null}
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => void save()}
+              disabled={saving}
+              className="rounded-xl btn-aurora px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditing(false)}
+              disabled={saving}
+              className="rounded-xl border border-ink-border px-4 py-2 text-sm font-semibold text-white hover:bg-ink-panel2 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : saved ? (
+        <div className="mt-3 space-y-1 text-sm text-white">
+          <p>
+            <span className="text-[var(--color-text-muted)]">
+              {saved.platform === 'tiktok' ? 'TikTok' : 'Instagram'}
+              {saved.posted_at ? ` · posted ${saved.posted_at}` : ''} —{' '}
+            </span>
+            {saved.views.toLocaleString()} views · {saved.likes.toLocaleString()} likes ·{' '}
+            {saved.comments.toLocaleString()} comments · {saved.shares.toLocaleString()} shares
+          </p>
+          {saved.notes ? (
+            <p className="text-xs text-[var(--color-text-muted)]">{saved.notes}</p>
+          ) : null}
+        </div>
+      ) : (
+        <div className="mt-3">
+          <p className="text-sm text-[var(--color-text-muted)]">
+            No posted results yet — add the real numbers after you post this clip.
+          </p>
+          <button
+            type="button"
+            onClick={startEdit}
+            className="mt-3 rounded-xl border border-ink-border px-4 py-2 text-sm font-semibold text-white hover:bg-ink-panel2"
+          >
+            Add results
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -1566,6 +1859,10 @@ export function JobDetailPage() {
                         </p>
                       ) : null}
                       <ScoreBreakdown breakdown={clip.score_breakdown} />
+                      {/* Batch 15: hook score + retention curve (both
+                          estimates) and the loop-ready chip. */}
+                      <HookBadge clip={clip} />
+                      <RetentionSparkline curve={clip.retention_curve} />
                       <ViralChecklist clip={clip} job={job} />
                       {/* Batch 13: the grade this clip actually
                           rendered with. Auto carries the picker's
@@ -1662,6 +1959,8 @@ export function JobDetailPage() {
                     )}
                     {/* Batch 12: per-clip attached post caption. */}
                     <PostCaptionCard clip={clip} />
+                    {/* Batch 15: user-entered posted results. */}
+                    <PostedResultsForm clip={clip} onSaved={() => void fetchJob()} />
                   </li>
                     )
                   })}

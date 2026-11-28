@@ -27,6 +27,11 @@ export interface PresetSettings {
   face_tracking: boolean
   silence_removal: boolean
   filler_removal: boolean
+  /** Batch 15 (2026-11-28): pattern interrupts (no wizard toggle —
+   * always ON) and loop-perfect clips (Step 2 toggle, default OFF).
+   * Absent on old presets, where the wizard keeps ON / OFF. */
+  pattern_interrupts?: boolean
+  loop_perfect?: boolean
   /** Batch 2 headline look + caption position (2026-11-25); defaults
    * bold_bar / bottom. */
   headline_style: HeadlineStyle

@@ -690,6 +690,9 @@ export function ClipperPage() {
     if (typeof s.face_tracking === 'boolean') patch.faceTracking = s.face_tracking
     if (typeof s.silence_removal === 'boolean') patch.silenceRemoval = s.silence_removal
     if (typeof s.filler_removal === 'boolean') patch.fillerRemoval = s.filler_removal
+    // Batch 15: loop-perfect (pattern interrupts have no wizard
+    // toggle — always ON, so there is nothing to restore).
+    if (typeof s.loop_perfect === 'boolean') patch.loopPerfect = s.loop_perfect
     // Batch 2 (2026-11-25): headline look + caption position.
     if (s.headline_style === 'bold_bar' || s.headline_style === 'lower_third' || s.headline_style === 'big_centre') {
       patch.headlineStyle = s.headline_style
@@ -885,6 +888,10 @@ export function ClipperPage() {
     face_tracking: spec.faceTracking ?? true,
     silence_removal: spec.silenceRemoval ?? true,
     filler_removal: spec.fillerRemoval ?? true,
+    // Batch 15: pattern interrupts are always ON (no wizard toggle);
+    // loop-perfect comes from the Step 2 toggle (default OFF).
+    pattern_interrupts: true,
+    loop_perfect: spec.loopPerfect ?? false,
     headline_style: spec.headlineStyle ?? 'bold_bar',
     caption_position: spec.captionPosition ?? 'bottom',
     ost_position: spec.ostPosition ?? defaultOstPosition(spec.headlineStyle ?? 'bold_bar'),
@@ -995,6 +1002,8 @@ export function ClipperPage() {
       faceTracking: spec.faceTracking ?? true,
       silenceRemoval: spec.silenceRemoval ?? true,
       fillerRemoval: spec.fillerRemoval ?? true,
+      patternInterrupts: true,
+      loopPerfect: spec.loopPerfect ?? false,
       headlineStyle: spec.headlineStyle ?? 'bold_bar',
       captionPosition: spec.captionPosition ?? 'bottom',
       ostPosition: spec.ostPosition ?? defaultOstPosition(spec.headlineStyle ?? 'bold_bar'),
@@ -2551,6 +2560,19 @@ export function ClipperPage() {
                     />
                     <span className="text-sm text-[var(--color-text-muted)]">
                       Remove filler words — cut um, uh, hmm, erm
+                    </span>
+                  </div>
+                  {/* Batch 15: loop-perfect clips — the only new
+                      wizard toggle in this batch (parity rule: add
+                      only this one). Default OFF. */}
+                  <div className="flex items-center gap-3">
+                    <Toggle
+                      checked={spec.loopPerfect ?? false}
+                      onChange={(v) => updateSpec({ loopPerfect: v })}
+                      label="Loop-perfect clip on or off"
+                    />
+                    <span className="text-sm text-[var(--color-text-muted)]">
+                      Loop-perfect clip — end matches the start so it loops smoothly on TikTok
                     </span>
                   </div>
                 </div>

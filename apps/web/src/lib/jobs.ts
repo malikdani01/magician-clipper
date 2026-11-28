@@ -314,6 +314,12 @@ export interface JobSettings {
   face_tracking?: boolean
   silence_removal?: boolean
   filler_removal?: boolean
+  /** Batch 15 (2026-11-28): pattern interrupts (default ON — no
+   * wizard toggle, like auto colour grade) and loop-perfect clips
+   * (default OFF — the wizard's Step 2 toggle). Absent on older
+   * jobs, where the worker treats them as ON / OFF. */
+  pattern_interrupts?: boolean
+  loop_perfect?: boolean
   /** Batch 2 headline look + caption position (2026-11-25); absent on
    * older jobs, where the worker uses bold_bar / bottom. */
   headline_style?: string
@@ -436,7 +442,46 @@ export interface JobClip {
    * clip; null on clips rendered before this batch). */
   colour_grade_applied?: string | null
   colour_grade_reason?: string | null
+  /** Batch 15 — Viral Intelligence (2026-11-28). Hook score 0–100
+   * + reason, measured from the clip's first 3s by the worker
+   * (an estimate, never a promise); per-second retention curve
+   * (0–100, one entry per second, also estimated); loop_ready
+   * true when the end was matched to the start frame for a smooth
+   * loop. Null / false on clips rendered before this batch. */
+  hook_score?: number | null
+  hook_reason?: string | null
+  retention_curve?: number[] | null
+  loop_ready?: boolean
+  /** Batch 15: the latest user-entered posted results for this
+   * clip (null = none yet — never fabricated). */
+  performance?: ClipPerformance | null
   created_at: string
+}
+
+/** Batch 15: one user-entered posted-results row for a clip
+ * (TikTok / Instagram only — real numbers the user typed in). */
+export interface ClipPerformance {
+  id: number
+  clip_id: number
+  platform: 'tiktok' | 'instagram'
+  views: number
+  likes: number
+  comments: number
+  shares: number
+  posted_at: string | null
+  notes: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ClipPerformanceInput {
+  platform: 'tiktok' | 'instagram'
+  views: number
+  likes: number
+  comments: number
+  shares: number
+  posted_at?: string | null
+  notes?: string | null
 }
 
 export interface CampaignChecklistItem {
@@ -551,6 +596,11 @@ export interface CreateJobInput {
   faceTracking: boolean
   silenceRemoval: boolean
   fillerRemoval: boolean
+  /** Batch 15 (2026-11-28): pattern interrupts (no wizard toggle —
+   * always ON, like auto colour grade) and loop-perfect clips
+   * (Step 2 toggle, default OFF). */
+  patternInterrupts?: boolean
+  loopPerfect: boolean
   /** Batch 2 headline look (see HEADLINE_STYLE_LABELS); default 'bold_bar'. */
   headlineStyle: HeadlineStyle
   /** Batch 2 caption position; default 'bottom'. */
@@ -734,6 +784,8 @@ function appendSettingsForm(form: FormData, input: CreateJobInput): void {
   form.append('face_tracking', String(input.faceTracking))
   form.append('silence_removal', String(input.silenceRemoval))
   form.append('filler_removal', String(input.fillerRemoval))
+  form.append('pattern_interrupts', String(input.patternInterrupts ?? true))
+  form.append('loop_perfect', String(input.loopPerfect))
   form.append('headline_style', input.headlineStyle)
   form.append('caption_position', input.captionPosition)
   form.append('ost_position', input.ostPosition)
@@ -1137,6 +1189,51 @@ export async function getJob(id: number): Promise<JobResult> {
 
 export async function cancelJob(id: number): Promise<JobResult> {
   return postJobAction(id, 'cancel')
+}
+
+/**
+ * Batch 15: save posted results for one clip
+ * (POST /api/v1/clips/{clip}/performance). Every save posts a new
+ * row; the latest row is the current one. Counts are the user's own
+ * numbers — the client never fills them in.
+ */
+export async function saveClipPerformance(
+  clipId: number,
+  input: ClipPerformanceInput,
+): Promise<{ ok: true; performance: ClipPerformance } | { ok: false; error: string }> {
+  if (!getToken()) {
+    return { ok: false, error: 'Sign in to do that.' }
+  }
+  const { signal, cancel } = timeoutSignal(15000)
+  try {
+    const res = await fetch(`${API_URL}/clips/${clipId}/performance`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        platform: input.platform,
+        views: input.views,
+        likes: input.likes,
+        comments: input.comments,
+        shares: input.shares,
+        posted_at: input.posted_at ?? null,
+        notes: input.notes ?? null,
+      }),
+      signal,
+    })
+    const body: unknown = await res.json().catch(() => null)
+    if (!res.ok) {
+      return { ok: false, error: serverMessage(body, 'Could not save the posted results.') }
+    }
+    const performance = (body as { performance?: ClipPerformance } | null)?.performance
+    if (!performance) {
+      return { ok: false, error: 'The server did not return the saved results.' }
+    }
+    return { ok: true, performance }
+  } catch (err) {
+    return { ok: false, error: isUnreachable(err) ? unreachableMessage() : 'Could not save the posted results.' }
+  } finally {
+    cancel()
+  }
 }
 
 export async function retryJob(id: number): Promise<JobResult> {

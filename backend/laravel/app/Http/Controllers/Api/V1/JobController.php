@@ -102,7 +102,8 @@ class JobController extends Controller
                   'face_tracking', 'silence_removal', 'filler_removal',
                   'beat_sync', 'logo_overlay', 'caption_safe_zone',
                   'ost_persistent', 'end_card', 'keyword_popups',
-                  'progress_bar', 'campaign_caption_required',
+                  'progress_bar', 'pattern_interrupts', 'loop_perfect',
+                  'campaign_caption_required',
                   'campaign_hashtags_required',
                   'campaign_ost_required'] as $boolField) {
             if ($request->has($boolField) && is_string($request->input($boolField))) {
@@ -635,6 +636,12 @@ class JobController extends Controller
             'campaign_ost_required' => $campaignOstRequired,
             'ost_hint' => $validated['ost_hint'] ?? null,
             'notes' => $validated['notes'] ?? null,
+            // Batch 15 — Viral Intelligence: pattern interrupts
+            // ON unless explicitly off (the worker treats a missing
+            // key as ON too — like auto colour grade, no wizard
+            // toggle); loop-perfect OFF unless explicitly on.
+            'pattern_interrupts' => $validated['pattern_interrupts'] ?? true,
+            'loop_perfect' => $validated['loop_perfect'] ?? false,
             'layout' => $validated['layout'] ?? 'center_crop',
             'content_type' => $validated['content_type'] ?? 'general',
             'quality' => $validated['quality'] ?? 'standard',

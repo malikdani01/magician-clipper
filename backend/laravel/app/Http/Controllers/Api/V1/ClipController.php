@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Models\Clip;
+use App\Models\ClipPerformance;
 use App\Models\ClipRerender;
 use App\Models\Project;
 use App\Models\UserSetting;
@@ -534,6 +535,46 @@ class ClipController extends Controller
                 fn (ClipRerender $r) => $r->toUserArray()
             )->all(),
         ]);
+    }
+
+    /**
+     * POST /api/v1/clips/{clip}/performance — save a posted result
+     * for one clip (Batch 15 — Viral Intelligence).
+     *
+     * The numbers are USER-ENTERED ONLY: views / likes / comments /
+     * shares the clip actually got after the user posted it. The
+     * system never measures or invents them. Each save is a new row;
+     * the latest row per clip is the current result (the job page
+     * shows it, "Edit" just saves a corrected row). Ownership is
+     * enforced (ClipPolicy::update — another user's clip is a 403);
+     * negative counts are rejected (422).
+     */
+    public function storePerformance(Request $request, Clip $clip)
+    {
+        $this->authorize('update', $clip);
+
+        $validated = $request->validate([
+            'platform' => ['required', 'string', Rule::in(ClipPerformance::PLATFORMS)],
+            'views' => ['sometimes', 'nullable', 'integer', 'min:0'],
+            'likes' => ['sometimes', 'nullable', 'integer', 'min:0'],
+            'comments' => ['sometimes', 'nullable', 'integer', 'min:0'],
+            'shares' => ['sometimes', 'nullable', 'integer', 'min:0'],
+            'posted_at' => ['sometimes', 'nullable', 'date'],
+            'notes' => ['sometimes', 'nullable', 'string', 'max:500'],
+        ]);
+
+        $performance = ClipPerformance::create([
+            'clip_id' => $clip->id,
+            'platform' => $validated['platform'],
+            'views' => $validated['views'] ?? 0,
+            'likes' => $validated['likes'] ?? 0,
+            'comments' => $validated['comments'] ?? 0,
+            'shares' => $validated['shares'] ?? 0,
+            'posted_at' => $validated['posted_at'] ?? null,
+            'notes' => $validated['notes'] ?? null,
+        ]);
+
+        return response()->json(['performance' => $performance->fresh()], 201);
     }
 
     /**

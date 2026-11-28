@@ -182,6 +182,16 @@ class JobSettingsRules
             // streamer_full, stacked) apply to 9:16 and 4:5 only — the
             // worker falls back to centre crop for those off-portrait,
             // and the wizard only offers layouts that apply.
+            // Batch 15 — Viral Intelligence (2026-11-28):
+            // pattern_interrupts (default ON — a micro punch-in
+            // every 4s where no auto-zoom event is near, like the
+            // auto colour grade it has no wizard toggle) and
+            // loop_perfect (default OFF — the end is matched to the
+            // start so the clip loops smoothly; wizard toggle).
+            // The worker treats a missing key as the default, so
+            // jobs made before this batch render exactly as before.
+            'pattern_interrupts' => ['sometimes', 'boolean'],
+            'loop_perfect' => ['sometimes', 'boolean'],
             'layout' => ['sometimes', 'string', Rule::in(['center_crop', 'split', 'pip_facecam', 'blur_fill', 'streamer_full', 'gradient_fill', 'stacked', 'letterbox', 'face_closeup', 'framed'])],
             'content_type' => ['sometimes', 'string', Rule::in(Project::CONTENT_TYPES)],
             'quality' => ['sometimes', 'string', Rule::in(['draft', 'standard', 'high'])],

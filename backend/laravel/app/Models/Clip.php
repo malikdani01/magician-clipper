@@ -68,6 +68,14 @@ class Clip extends Model
         // the auto picker's reason (null for a manual look).
         'colour_grade_applied',
         'colour_grade_reason',
+        // Batch 15 — Viral Intelligence: the worker-measured
+        // opening-hook score (0–100) + reason, the per-second
+        // retention curve, and whether the clip was rendered
+        // loop-perfect (end matched to start + audio fades).
+        'hook_score',
+        'hook_reason',
+        'retention_curve',
+        'loop_ready',
     ];
 
     protected function casts(): array
@@ -86,6 +94,10 @@ class Clip extends Model
             // Batch 12: per-clip campaign attachment.
             'hashtags' => 'array',
             'required_items_applied' => 'array',
+            // Batch 15: per-second retention curve (array of ints).
+            'retention_curve' => 'array',
+            'hook_score' => 'integer',
+            'loop_ready' => 'boolean',
         ];
     }
 
@@ -114,6 +126,18 @@ class Clip extends Model
     public function rerenders()
     {
         return $this->hasMany(ClipRerender::class);
+    }
+
+    /** Batch 15: user-entered posted results for this clip (newest first). */
+    public function performances()
+    {
+        return $this->hasMany(ClipPerformance::class)->orderByDesc('id');
+    }
+
+    /** Batch 15: the latest posted-result row, or null when never posted. */
+    public function latestPerformance()
+    {
+        return $this->hasOne(ClipPerformance::class)->latestOfMany();
     }
 
     /**

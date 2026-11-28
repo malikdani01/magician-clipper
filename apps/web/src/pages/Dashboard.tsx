@@ -21,7 +21,7 @@ import { formatBytes } from '../lib/format'
 import { formatDuration } from '../lib/format'
 import { API_URL, engineHealth, getToken, laravelHealth, type EngineHealth, type LaravelHealth } from '../lib/api'
 import { listJobs, type Job, type JobClip } from '../lib/jobs'
-import { fetchSettingsInsights, type SettingsInsights } from '../lib/insights'
+import { fetchPerformanceInsights, fetchSettingsInsights, type PerformanceInsights, type SettingsInsights } from '../lib/insights'
 import { getCaptionStyle } from '../lib/captionStyles'
 import { LAYOUT_LABELS } from '../lib/jobs'
 import { usePlatform } from '../lib/platform'
@@ -102,6 +102,9 @@ export function DashboardPage() {
   // Batch 4: "What works best" — real aggregation of the user's own
   // Ready jobs (only values with ≥3 jobs qualify).
   const [insights, setInsights] = useState<SettingsInsights | null>(null)
+  // Batch 15: "Real results" — the same card, but from posted
+  // results the user entered (only values with ≥3 clips qualify).
+  const [performanceInsights, setPerformanceInsights] = useState<PerformanceInsights | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -116,6 +119,9 @@ export function DashboardPage() {
     })
     fetchSettingsInsights().then((rows) => {
       if (!cancelled) setInsights(rows)
+    })
+    fetchPerformanceInsights().then((rows) => {
+      if (!cancelled) setPerformanceInsights(rows)
     })
     const token = getToken()
     if (token) {
@@ -598,6 +604,57 @@ export function DashboardPage() {
                         <span className="min-w-0 truncate font-medium text-white">{name(r.value)}</span>
                         <span className="shrink-0 text-[var(--color-text-muted)] tabular-nums">
                           {r.average_score} avg · {r.job_count} jobs
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {/* Batch 15: "Real results" — best caption style and duration
+            band by average views, from posted results the user typed
+            in on job pages. Only values with at least 3 clips with
+            posted results qualify; with none, the honest empty state
+            below — never invented numbers. */}
+        <h3 className="mt-6 text-sm font-semibold text-white">Real results</h3>
+        <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+          Average views from posted results you entered — only clips with real posted numbers count.
+        </p>
+        {performanceInsights === null ? (
+          <p className="mt-4 text-sm text-[var(--color-text-muted)]">Loading…</p>
+        ) : performanceInsights.total_clips === 0 ? (
+          <p className="mt-4 text-sm text-[var(--color-text-muted)]">
+            No posted results yet — add them on a job page.
+          </p>
+        ) : (
+          <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+            {[
+              {
+                label: 'Caption style',
+                rows: performanceInsights.caption_style,
+                name: (v: string) => getCaptionStyle(v).name,
+              },
+              {
+                label: 'Duration band',
+                rows: performanceInsights.duration_band,
+                name: (v: string) => v,
+              },
+            ].map(({ label, rows, name }) => (
+              <div key={label} className="rounded-xl bg-ink-panel2 p-4">
+                <p className="text-xs font-medium text-[var(--color-text-muted)]">{label}</p>
+                {rows.length === 0 ? (
+                  <p className="mt-2 text-sm text-[var(--color-text-muted)]">
+                    Not enough data yet — needs 3 clips with posted results.
+                  </p>
+                ) : (
+                  <ul className="mt-2 space-y-2">
+                    {rows.slice(0, 3).map((r) => (
+                      <li key={r.value} className="flex items-baseline justify-between gap-2 text-sm">
+                        <span className="min-w-0 truncate font-medium text-white">{name(r.value)}</span>
+                        <span className="shrink-0 text-[var(--color-text-muted)] tabular-nums">
+                          {r.average_views.toLocaleString()} avg views · {r.clip_count} clips
                         </span>
                       </li>
                     ))}

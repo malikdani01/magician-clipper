@@ -257,7 +257,8 @@ class ProcessingJob extends Model
         // carry null — the job's own style is what the worker burned in,
         // so it is the honest fallback for display and re-render checks.
         $jobStyle = $this->settings['caption_style'] ?? null;
-        $clips = $this->clips()->orderBy('id')->get()->map(function ($clip) use ($jobStyle) {
+        $clips = $this->clips()->with('latestPerformance')->orderBy('id')->get()->map(function ($clip) use ($jobStyle) {
+            $performance = $clip->latestPerformance;
             return [
                 'id' => $clip->id,
                 'title' => $clip->title,
@@ -300,6 +301,28 @@ class ProcessingJob extends Model
                 // rendered before this batch.
                 'colour_grade_applied' => $clip->colour_grade_applied,
                 'colour_grade_reason' => $clip->colour_grade_reason,
+                // Batch 15 — Viral Intelligence: the worker-measured
+                // opening-hook score + reason, the per-second
+                // retention curve, and whether the clip was rendered
+                // loop-perfect. Null/false on clips rendered before
+                // this batch. 'performance' is the latest
+                // USER-ENTERED posted result (null = never posted —
+                // never invented).
+                'hook_score' => $clip->hook_score,
+                'hook_reason' => $clip->hook_reason,
+                'retention_curve' => $clip->retention_curve,
+                'loop_ready' => (bool) $clip->loop_ready,
+                'performance' => $performance ? [
+                    'id' => $performance->id,
+                    'platform' => $performance->platform,
+                    'views' => $performance->views,
+                    'likes' => $performance->likes,
+                    'comments' => $performance->comments,
+                    'shares' => $performance->shares,
+                    'posted_at' => $performance->posted_at?->toDateString(),
+                    'notes' => $performance->notes,
+                    'created_at' => $performance->created_at,
+                ] : null,
                 'created_at' => $clip->created_at,
             ];
         })->all();

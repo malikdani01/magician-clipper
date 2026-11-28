@@ -544,6 +544,13 @@ class MuseJobController extends Controller
                     ?? $request->input('face_tracked'),
             ]);
         }
+        // Batch 15: same normalisation for the loop-perfect flag.
+        if ($request->has('loop_ready') && is_string($request->input('loop_ready'))) {
+            $request->merge([
+                'loop_ready' => filter_var($request->input('loop_ready'), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE)
+                    ?? $request->input('loop_ready'),
+            ]);
+        }
 
         $validated = $request->validate([
             'file' => ['required', 'file', 'mimes:mp4', 'max:2097152'],
@@ -596,6 +603,16 @@ class MuseJobController extends Controller
             // field means ungraded) + the auto picker's reason.
             'colour_grade_applied' => ['sometimes', 'nullable', 'string', 'max:50'],
             'colour_grade_reason' => ['sometimes', 'nullable', 'string', 'max:255'],
+            // Batch 15 — Viral Intelligence, measured by the worker
+            // from the clip's own signals (never guessed): the
+            // opening-hook score (0–100) + the measured facts
+            // behind it, the per-second retention curve (JSON array
+            // of ints, one per second), and whether this clip was
+            // rendered loop-perfect (end matched to start + fades).
+            'hook_score' => ['sometimes', 'nullable', 'integer', 'min:0', 'max:100'],
+            'hook_reason' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'retention_curve' => ['sometimes', 'nullable', 'string'],
+            'loop_ready' => ['sometimes', 'boolean'],
         ]);
 
         $variantOf = null;
@@ -675,6 +692,34 @@ class MuseJobController extends Controller
                 ], 422);
             }
             $appliedItems = $decoded;
+        }
+
+        // Batch 15: decode the per-second retention curve with the
+        // same shape-checking as score_breakdown — a JSON array of
+        // ints 0–100, one per second of the clip (at most 1000
+        // entries; clips are at most 180s). Malformed input is a
+        // 422, never a stored guess.
+        $retentionCurve = null;
+        if ($request->filled('retention_curve')) {
+            $decoded = json_decode($request->input('retention_curve'), true);
+            $valid = is_array($decoded) && array_is_list($decoded)
+                && json_last_error() === JSON_ERROR_NONE
+                && count($decoded) <= 1000;
+            if ($valid) {
+                foreach ($decoded as $value) {
+                    if (! is_int($value) || $value < 0 || $value > 100) {
+                        $valid = false;
+                        break;
+                    }
+                }
+            }
+            if (! $valid) {
+                return response()->json([
+                    'error' => 'validation_error',
+                    'message' => 'retention_curve must be a JSON array of integer scores from 0 to 100, one per second.',
+                ], 422);
+            }
+            $retentionCurve = $decoded;
         }
 
         $file = $request->file('file');
@@ -776,6 +821,12 @@ class MuseJobController extends Controller
             // worker (null = ungraded or pre-Batch 13 clip).
             'colour_grade_applied' => $validated['colour_grade_applied'] ?? null,
             'colour_grade_reason' => $validated['colour_grade_reason'] ?? null,
+            // Batch 15 — Viral Intelligence as reported by the
+            // worker (null/false = not measured or pre-Batch 15).
+            'hook_score' => $validated['hook_score'] ?? null,
+            'hook_reason' => $validated['hook_reason'] ?? null,
+            'retention_curve' => $retentionCurve,
+            'loop_ready' => $validated['loop_ready'] ?? false,
         ]);
 
         // Batch 11: one rendered clip against the job owner's
@@ -1184,6 +1235,14 @@ class MuseJobController extends Controller
             // grade carries over exactly.
             'colour_grade_applied' => $clip->colour_grade_applied,
             'colour_grade_reason' => $clip->colour_grade_reason,
+            // Batch 15: same window, so the hook score + retention
+            // curve carry over; the variant re-render runs through
+            // the same render_clip with the job's settings, so a
+            // loop-perfect original stays loop-perfect.
+            'hook_score' => $clip->hook_score,
+            'hook_reason' => $clip->hook_reason,
+            'retention_curve' => $clip->retention_curve,
+            'loop_ready' => (bool) $clip->loop_ready,
             'caption_style' => $rerender->caption_style,
             'face_tracked' => (bool) ($validated['face_tracked'] ?? false),
             'variant_of_clip_id' => $clip->id,
