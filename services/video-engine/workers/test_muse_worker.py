@@ -5364,5 +5364,312 @@ class Batch15ViralIntelligenceTests(unittest.TestCase):
             self.assertNotIn("zoompan", stats["filter_complex"])
 
 
+
+class Batch16CaptionIntelligenceTests(unittest.TestCase):
+    """Batch 16 (2026-11-28): Captions/Text Intelligence — face-aware
+    captions, speaker colours, emotion emphasis, dynamic headlines,
+    scroll-stopper first frame. All measured signal, never guessed:
+    the tests pin the measurement, never a claim about virality."""
+
+    def _sine(self, freq, seconds, rate=16000, amp=0.5):
+        import numpy as np
+        t = np.arange(0, int(seconds * rate)) / rate
+        return (amp * np.sin(2 * np.pi * freq * t)).astype(np.float64)
+
+    def _seg(self, start, end, text):
+        words = text.split()
+        span = (end - start) / max(1, len(words))
+        ws = [{"start": start + i * span, "end": start + (i + 1) * span,
+               "word": w} for i, w in enumerate(words)]
+        return {"start": start, "end": end, "text": text, "words": ws}
+
+    def _two_voice_segments(self):
+        return [self._seg(0.0, 8.0, "We climbed the tower in the morning light."),
+                self._seg(9.0, 18.0, "The view from the top was absolutely insane today.")]
+
+    def _two_voice_audio(self):
+        import numpy as np
+        return np.concatenate([self._sine(120, 8), self._sine(240, 12)])
+
+    def _make_two_voice_clip(self, path, duration=20):
+        """A real MP4: green frames + 120 Hz tone for 8s, then 240 Hz."""
+        cmd = [muse_worker.FFMPEG, "-y", "-v", "error",
+               "-f", "lavfi", "-i",
+               f"color=c=green:s=640x360:d={duration}:r=30",
+               "-f", "lavfi", "-i", "sine=frequency=120:duration=8",
+               "-f", "lavfi", "-i", "sine=frequency=240:duration=12",
+               "-filter_complex", "[1:a][2:a]concat=n=2:v=0:a=1[a]",
+               "-map", "0:v", "-map", "[a]",
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+               "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+               str(path)]
+        subprocess.run(cmd, check=True, timeout=120)
+
+    # -- pitch (F0) ---------------------------------------------------
+    def test_median_f0_recovers_sine_pitch(self):
+        self.assertAlmostEqual(muse_worker._median_f0(self._sine(120, 2.0), 16000),
+                               120, delta=5)
+        self.assertAlmostEqual(muse_worker._median_f0(self._sine(220, 2.0), 16000),
+                               220, delta=5)
+
+    def test_median_f0_silence_is_none(self):
+        import numpy as np
+        self.assertIsNone(muse_worker._median_f0(np.zeros(32000), 16000))
+
+    # -- speaker clustering -------------------------------------------
+    def test_cluster_two_clear_voices(self):
+        labels, n = muse_worker._cluster_speakers(
+            [{"f0": 120.0, "rms": 0.5}, {"f0": 240.0, "rms": 0.5}])
+        self.assertEqual(n, 2)
+        self.assertEqual(labels, {0: 0, 1: 1})
+
+    def test_cluster_close_voices_are_one(self):
+        labels, n = muse_worker._cluster_speakers(
+            [{"f0": 120.0, "rms": 0.5}, {"f0": 130.0, "rms": 0.5}])
+        self.assertEqual(n, 1)
+        self.assertEqual(labels, {})
+
+    def test_cluster_three_groups(self):
+        feats = [{"f0": f, "rms": 0.5} for f in
+                 (120.0, 121.0, 180.0, 181.0, 260.0, 261.0)]
+        labels, n = muse_worker._cluster_speakers(feats)
+        self.assertEqual(n, 3)
+        self.assertEqual(sorted(set(labels.values())), [0, 1, 2])
+
+    def test_analyse_two_voice_job(self):
+        clips = [{"start": 0.0, "end": 20.0}]
+        muse_worker._analyse_caption_intelligence(
+            self._two_voice_segments(), self._two_voice_audio(), clips)
+        self.assertEqual(clips[0]["_speaker_count"], 2)
+        self.assertEqual(clips[0]["_speaker_spans"],
+                         [(0.0, 8.0, 0), (9.0, 18.0, 1)])
+
+    # -- face-aware decision ------------------------------------------
+    def test_face_bottom_face_moves_captions_to_top(self):
+        boxes = [(0.0, (0.5, 0.85, 0.26, 0.26))]
+        self.assertEqual(
+            muse_worker._face_caption_decision(
+                boxes, 0.0, "bottom", "blur_fill", 1080, 1920, 1080, 1920),
+            "top")
+
+    def test_face_centre_face_leaves_captions(self):
+        boxes = [(0.0, (0.5, 0.5, 0.26, 0.26))]
+        self.assertIsNone(
+            muse_worker._face_caption_decision(
+                boxes, 0.0, "bottom", "blur_fill", 1080, 1920, 1080, 1920))
+
+    def test_face_tiny_face_never_moves(self):
+        boxes = [(0.0, (0.5, 0.85, 0.04, 0.04))]
+        self.assertIsNone(
+            muse_worker._face_caption_decision(
+                boxes, 0.0, "bottom", "blur_fill", 1080, 1920, 1080, 1920))
+
+    def test_face_top_face_moves_top_captions_down(self):
+        boxes = [(0.0, (0.5, 0.15, 0.26, 0.26))]
+        self.assertEqual(
+            muse_worker._face_caption_decision(
+                boxes, 0.0, "top", "blur_fill", 1080, 1920, 1080, 1920),
+            "bottom")
+
+    def test_face_nearby_none_sample_does_not_veto_a_face(self):
+        # Regression (parent-found, Batch 16): a no-face sample nearer
+        # in time than the face sample used to clobber it, so a face
+        # 0.7s from the phrase never moved the captions on fast-cut
+        # sources. The nearest FACE within 1.5s decides; only the
+        # absence of any face nearby leaves the captions put.
+        boxes = [(5.0, (0.5, 0.85, 0.26, 0.26)),
+                 (6.0, None),
+                 (7.0, (0.5, 0.85, 0.26, 0.42))]
+        self.assertEqual(
+            muse_worker._face_caption_decision(
+                boxes, 6.26, "bottom", "center_crop", 640, 360, 720, 1280),
+            "top")
+        self.assertIsNone(
+            muse_worker._face_caption_decision(
+                [(5.0, None), (6.0, None)], 6.26, "bottom",
+                "center_crop", 640, 360, 720, 1280))
+
+    # -- emotion emphasis ---------------------------------------------
+    def test_emphasis_flat_signal_picks_nothing(self):
+        spans = muse_worker._emphasis_word_spans(
+            self._two_voice_segments(), self._two_voice_audio(),
+            start=0.0, end=20.0)
+        self.assertEqual(spans, [])
+
+    def test_emphasis_loud_word_picked(self):
+        audio = self._two_voice_audio()
+        audio[int(2.0 * 16000):int(3.0 * 16000)] *= 2.0
+        spans = muse_worker._emphasis_word_spans(
+            self._two_voice_segments(), audio, start=0.0, end=20.0)
+        self.assertEqual(spans, [(2.0, 3.0)])
+
+    def test_emphasis_capped_at_twenty_percent(self):
+        import numpy as np
+        audio = self._two_voice_audio()
+        # Every word loud: double the whole track — nothing stands
+        # out, so nothing is picked (relative measure, not absolute).
+        audio = audio * 2.0
+        spans = muse_worker._emphasis_word_spans(
+            self._two_voice_segments(), audio, start=0.0, end=20.0)
+        self.assertEqual(spans, [])
+        # Half the words loud: the cap still holds at 20% of 17 words.
+        audio2 = self._two_voice_audio()
+        for i in range(0, 17, 2):
+            s = int(i * 16000)
+            audio2[s:s + 16000] *= 3.0
+        spans2 = muse_worker._emphasis_word_spans(
+            self._two_voice_segments(), audio2, start=0.0, end=20.0)
+        self.assertLessEqual(len(spans2), 3)
+        self.assertGreater(len(spans2), 0)
+
+    # -- dynamic headlines --------------------------------------------
+    def test_dynamic_headlines_two_spans(self):
+        spans = muse_worker.derive_dynamic_headlines(
+            {"start": 0.0, "end": 20.0}, self._two_voice_segments(), {})
+        self.assertIsNotNone(spans)
+        self.assertEqual(len(spans), 2)
+        self.assertNotEqual(spans[0]["text"], spans[1]["text"])
+        self.assertAlmostEqual(spans[0]["start"], 0.0)
+        self.assertAlmostEqual(spans[1]["end"], 20.0)
+
+    def test_dynamic_headlines_campaign_ost_stays_single(self):
+        spans = muse_worker.derive_dynamic_headlines(
+            {"start": 0.0, "end": 20.0}, self._two_voice_segments(),
+            {"campaign_ost": "BUY NOW", "campaign_ost_required": True})
+        self.assertIsNone(spans)
+
+    def test_dynamic_headlines_short_clip_none(self):
+        spans = muse_worker.derive_dynamic_headlines(
+            {"start": 0.0, "end": 6.0}, self._two_voice_segments(), {})
+        self.assertIsNone(spans)
+
+    # -- headline ASS (spans + scroll-stopper) -------------------------
+    def test_headline_ass_spans_and_stopper(self):
+        segments = self._two_voice_segments()
+        spans = muse_worker.derive_dynamic_headlines(
+            {"start": 0.0, "end": 20.0}, segments, {})
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "h.ass"
+            ok = muse_worker.write_headline_ass(
+                "SINGLE", 20.0, p, 1080, 1920,
+                headline_spans=spans, scroll_stopper=spans[0]["text"],
+                keyword_popups=[{"start": 0.5, "end": 1.5, "word": "ZEBRA"},
+                                {"start": 5.0, "end": 6.0, "word": "VIEW"}])
+            self.assertTrue(ok)
+            txt = p.read_text()
+            self.assertIn("Style: ScrollStopper", txt)
+            self.assertEqual(txt.count("Headline,,0,0,0,,"), 2)
+            self.assertIn("ScrollStopper,,0,0,0,,", txt)
+            self.assertNotIn("ZEBRA", txt)  # first-second pop-up dropped
+            self.assertIn("VIEW", txt)
+            # The stopper owns the first second: the first headline
+            # starts at 1.0s, never echoing the stopper's line.
+            self.assertIn("Dialogue: 0,0:00:01.00,0:00:08.00,Headline,,", txt)
+
+    def test_headline_ass_single_headline_waits_for_stopper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "h.ass"
+            muse_worker.write_headline_ass("SINGLE", 20.0, p, 1080, 1920,
+                                           scroll_stopper="SINGLE")
+            txt = p.read_text()
+            self.assertIn("Dialogue: 0,0:00:01.00,0:00:04.00,Headline,,", txt)
+            # Without a stopper the single headline starts at 0.
+            p2 = Path(tmp) / "h2.ass"
+            muse_worker.write_headline_ass("SINGLE", 20.0, p2, 1080, 1920)
+            self.assertIn("Dialogue: 0,0:00:00.00,0:00:04.00,Headline,,",
+                          p2.read_text())
+
+    def test_headline_ass_without_spans_has_no_stopper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "h.ass"
+            muse_worker.write_headline_ass("SINGLE", 20.0, p, 1080, 1920)
+            self.assertNotIn("ScrollStopper", p.read_text())
+
+    # -- caption ASS (face / speaker / emphasis) -----------------------
+    def _clip_ass_kwargs(self):
+        return dict(
+            face_boxes=[(0.0, (0.5, 0.85, 0.26, 0.26)),
+                        (4.0, (0.5, 0.85, 0.26, 0.26)),
+                        (8.0, None), (12.0, None)],
+            speaker_spans=[(0.0, 8.0, 0), (9.0, 18.0, 1)],
+            emphasis_spans=[(16.5, 17.5)],
+            source_w=1080, source_h=1920)
+
+    def test_clip_ass_speaker_colours_and_face_move(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stats = {}
+            p = Path(tmp) / "c.ass"
+            ok = muse_worker.write_clip_ass(
+                self._two_voice_segments(), 0.0, 20.0, "punchy", p,
+                None, 1080, 1920, "blur_fill",
+                stats=stats, **self._clip_ass_kwargs())
+            self.assertTrue(ok)
+            txt = p.read_text()
+            self.assertIn("00FFFF00", txt)  # voice 1 = cyan
+            self.assertIn("\\an8", txt)  # moved to the top
+            self.assertEqual(stats["speaker_coloured_words"], 5)
+            self.assertEqual(stats["face_aware_moved"], 1)
+            self.assertEqual(stats["emotion_emphasised"], 1)
+
+    def test_clip_ass_byte_identical_without_spans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p1, p2 = Path(tmp) / "a.ass", Path(tmp) / "b.ass"
+            muse_worker.write_clip_ass(
+                self._two_voice_segments(), 0.0, 20.0, "punchy", p1,
+                None, 1080, 1920, "blur_fill")
+            muse_worker.write_clip_ass(
+                self._two_voice_segments(), 0.0, 20.0, "punchy", p2,
+                None, 1080, 1920, "blur_fill",
+                face_boxes=[], speaker_spans=[], emphasis_spans=[],
+                stats={})
+            self.assertEqual(p1.read_bytes(), p2.read_bytes())
+
+    def test_clip_ass_gradient_skips_speaker_colours(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stats = {}
+            p = Path(tmp) / "g.ass"
+            muse_worker.write_clip_ass(
+                self._two_voice_segments(), 0.0, 20.0, "gradient", p,
+                None, 1080, 1920, "blur_fill",
+                stats=stats, **self._clip_ass_kwargs())
+            self.assertEqual(stats["speaker_coloured_words"], 0)
+            self.assertEqual(stats["emotion_emphasised"], 1)
+
+    # -- render_clip integration ---------------------------------------
+    def test_render_clip_batch16_stats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "src.mp4"
+            self._make_two_voice_clip(src)
+            info = muse_worker.probe_summary(src)
+            segments = self._two_voice_segments()
+            clip = {"start": 0.0, "end": 20.0}
+            muse_worker._analyse_caption_intelligence(
+                segments, self._two_voice_audio(), [clip])
+            out = tmp / "clip.mp4"
+            settings = _settings(duration_seconds=20, clip_count=1,
+                                 layout="blur_fill", captions_enabled=True,
+                                 on_screen_text=True, auto_zoom=False,
+                                 silence_removal=False, filler_removal=False)
+            muse_worker.render_clip(src, clip, settings, segments,
+                                    out, info, tmp)
+            self.assertTrue(out.exists())
+            stats = clip["_batch1_stats"]
+            self.assertEqual(stats["speaker_count"], 2)
+            self.assertGreater(stats["speaker_coloured_words"], 0)
+            self.assertGreaterEqual(stats["dynamic_headlines"], 2)
+            self.assertTrue(stats["scroll_stopper"])
+            # The headline bar follows the text: it starts at 1.0s
+            # (the stopper owns the first second alone) and runs the
+            # full 20s clip (the dynamic spans), not just the first 4s.
+            self.assertIn("between(t,1.000,20.000)",
+                          stats["filter_complex"])
+            validated = muse_worker.validate_clip(
+                out, {"settings": settings}, info)
+            self.assertAlmostEqual(validated["duration"], 20.0, delta=0.5)
+
+
+
+
 if __name__ == "__main__":
     unittest.main()

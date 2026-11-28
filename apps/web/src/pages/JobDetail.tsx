@@ -118,6 +118,13 @@ function settingRows(job: Job): Array<[string, string]> {
     // (default OFF). Absent on older jobs means ON / OFF.
     ['Pattern interrupts', s.pattern_interrupts === false ? 'Off' : 'On'],
     ['Loop-perfect clip', s.loop_perfect ? 'On' : 'Off'],
+    // Batch 16 (2026-11-28) — caption intelligence, all default ON
+    // (no wizard toggles). Absent on older jobs means ON.
+    ['Face-aware captions', s.face_aware_captions === false ? 'Off' : 'On'],
+    ['Speaker colours', s.speaker_colours === false ? 'Off' : 'On'],
+    ['Emotion emphasis', s.emotion_emphasis === false ? 'Off' : 'On'],
+    ['Dynamic headline', s.dynamic_headline === false ? 'Off' : 'On'],
+    ['Scroll-stopper first frame', s.scroll_stopper === false ? 'Off' : 'On'],
     // Batch 2 (2026-11-25) — absent on older jobs means the defaults
     // (bold bar, bottom), which is what the worker renders for them.
     [

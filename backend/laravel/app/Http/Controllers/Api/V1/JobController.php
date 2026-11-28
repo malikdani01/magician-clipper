@@ -103,6 +103,8 @@ class JobController extends Controller
                   'beat_sync', 'logo_overlay', 'caption_safe_zone',
                   'ost_persistent', 'end_card', 'keyword_popups',
                   'progress_bar', 'pattern_interrupts', 'loop_perfect',
+                  'face_aware_captions', 'speaker_colours',
+                  'emotion_emphasis', 'dynamic_headline', 'scroll_stopper',
                   'campaign_caption_required',
                   'campaign_hashtags_required',
                   'campaign_ost_required'] as $boolField) {
@@ -642,6 +644,14 @@ class JobController extends Controller
             // toggle); loop-perfect OFF unless explicitly on.
             'pattern_interrupts' => $validated['pattern_interrupts'] ?? true,
             'loop_perfect' => $validated['loop_perfect'] ?? false,
+            // Batch 16 — Captions/Text Intelligence: all five ON
+            // unless explicitly off (the worker treats a missing key
+            // as ON too — no wizard toggles).
+            'face_aware_captions' => $validated['face_aware_captions'] ?? true,
+            'speaker_colours' => $validated['speaker_colours'] ?? true,
+            'emotion_emphasis' => $validated['emotion_emphasis'] ?? true,
+            'dynamic_headline' => $validated['dynamic_headline'] ?? true,
+            'scroll_stopper' => $validated['scroll_stopper'] ?? true,
             'layout' => $validated['layout'] ?? 'center_crop',
             'content_type' => $validated['content_type'] ?? 'general',
             'quality' => $validated['quality'] ?? 'standard',

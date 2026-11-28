@@ -32,6 +32,14 @@ export interface PresetSettings {
    * Absent on old presets, where the wizard keeps ON / OFF. */
   pattern_interrupts?: boolean
   loop_perfect?: boolean
+  /** Batch 16 (2026-11-28): caption intelligence — all default ON,
+   * no wizard toggles. Absent on old presets, where the worker
+   * treats them as ON. */
+  face_aware_captions?: boolean
+  speaker_colours?: boolean
+  emotion_emphasis?: boolean
+  dynamic_headline?: boolean
+  scroll_stopper?: boolean
   /** Batch 2 headline look + caption position (2026-11-25); defaults
    * bold_bar / bottom. */
   headline_style: HeadlineStyle

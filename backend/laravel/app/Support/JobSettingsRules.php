@@ -192,6 +192,16 @@ class JobSettingsRules
             // jobs made before this batch render exactly as before.
             'pattern_interrupts' => ['sometimes', 'boolean'],
             'loop_perfect' => ['sometimes', 'boolean'],
+            // Batch 16 — Captions/Text Intelligence (2026-11-28):
+            // face-aware captions, speaker colours, emotion emphasis,
+            // dynamic headlines, scroll-stopper first frame — all
+            // default ON, no wizard toggles (pattern-interrupts
+            // precedent); the worker treats a missing key as ON too.
+            'face_aware_captions' => ['sometimes', 'boolean'],
+            'speaker_colours' => ['sometimes', 'boolean'],
+            'emotion_emphasis' => ['sometimes', 'boolean'],
+            'dynamic_headline' => ['sometimes', 'boolean'],
+            'scroll_stopper' => ['sometimes', 'boolean'],
             'layout' => ['sometimes', 'string', Rule::in(['center_crop', 'split', 'pip_facecam', 'blur_fill', 'streamer_full', 'gradient_fill', 'stacked', 'letterbox', 'face_closeup', 'framed'])],
             'content_type' => ['sometimes', 'string', Rule::in(Project::CONTENT_TYPES)],
             'quality' => ['sometimes', 'string', Rule::in(['draft', 'standard', 'high'])],

@@ -320,6 +320,14 @@ export interface JobSettings {
    * jobs, where the worker treats them as ON / OFF. */
   pattern_interrupts?: boolean
   loop_perfect?: boolean
+  /** Batch 16 (2026-11-28): caption intelligence — all default ON,
+   * no wizard toggles. Absent on older jobs, where the worker
+   * treats them as ON. */
+  face_aware_captions?: boolean
+  speaker_colours?: boolean
+  emotion_emphasis?: boolean
+  dynamic_headline?: boolean
+  scroll_stopper?: boolean
   /** Batch 2 headline look + caption position (2026-11-25); absent on
    * older jobs, where the worker uses bold_bar / bottom. */
   headline_style?: string
