@@ -129,6 +129,14 @@ function settingRows(job: Job): Array<[string, string]> {
     ['Emotion emphasis', s.emotion_emphasis ? 'On' : 'Off'],
     ['Dynamic headline', s.dynamic_headline ? 'On' : 'Off'],
     ['Scroll-stopper first frame', s.scroll_stopper ? 'On' : 'Off'],
+    // Batch 17 (2026-11-28) — quality, all default ON for new
+    // jobs (the backend stores them explicitly). Absent on older
+    // jobs means the feature did NOT run on those renders (they
+    // predate the batch), so absent shows Off — the Batch 16
+    // honest pattern, never "absent means On".
+    ['Stabilization', s.stabilization ? 'On' : 'Off'],
+    ['Denoise + voice cleanup', s.denoise_cleanup ? 'On' : 'Off'],
+    ['Speed ramps', s.speed_ramps ? 'On' : 'Off'],
     // Batch 2 (2026-11-25) — absent on older jobs means the defaults
     // (bold bar, bottom), which is what the worker renders for them.
     [

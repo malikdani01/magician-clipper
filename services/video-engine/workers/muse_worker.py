@@ -6654,6 +6654,444 @@ def build_layout_chains(source: Path, sw: int, sh: int, tw: int, th: int,
     return [f"[0:v]{centre}[v0]"]
 
 
+# ---------------------------------------------------------------------------
+# Batch 17 — Quality: stabilization, denoise + voice cleanup, speed ramps
+# ---------------------------------------------------------------------------
+# All three are automatic, default ON (auto-grade precedent), with no
+# wizard toggles. Every claim in the job note comes from the per-clip
+# stats render_clip actually records — never from the settings.
+#
+# Stabilization: two-pass vidstab when this ffmpeg has it (detect on
+# the laid-out frames, transform right after the layout), deshake as
+# the single-pass fallback, honest skip when neither exists.
+# Denoise: the source's noise is MEASURED first (flat-area block
+# variance); only a genuinely noisy source gets the strong hqdn3d
+# pass — clean sources keep the Batch 13 light pass. Voice cleanup
+# is afftdn with a measured noise floor, guarded so it can never
+# mute speech (a pre-check on the clip's own audio; too big a drop
+# and the audio renders uncleaned instead).
+# Speed ramps: up to 2 high-energy moments per clip play at 0.5x
+# with 0.25s 0.75x ramp zones in/out; the rest of the clip speeds up
+# just enough that the total duration is unchanged.
+
+#: ffmpeg filter availability, probed once per process.
+_FFMPEG_FILTERS: set | None = None
+
+
+def _ffmpeg_filters() -> set:
+    """Filter names this ffmpeg build has (cached per process)."""
+    global _FFMPEG_FILTERS
+    if _FFMPEG_FILTERS is None:
+        found: set = set()
+        try:
+            proc = run([FFMPEG, "-hide_banner", "-filters"], timeout=60)
+            for line in (proc.stdout or "").splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] in ("TS", "T.", ".S", ".."):
+                    found.add(parts[1])
+        except Exception:  # noqa: BLE001 — no filter list, no stabilization
+            log.warning("Could not list ffmpeg filters; stabilization off.")
+        _FFMPEG_FILTERS = found
+    return _FFMPEG_FILTERS
+
+
+def stabilization_method() -> str | None:
+    """'vidstab' when both vidstab filters exist, 'deshake' as the
+    single-pass fallback, None when this ffmpeg has neither — the
+    clip then renders unstabilized and says so honestly."""
+    filters = _ffmpeg_filters()
+    if "vidstabdetect" in filters and "vidstabtransform" in filters:
+        return "vidstab"
+    if "deshake" in filters:
+        return "deshake"
+    return None
+
+
+def _vidstab_detect(source: Path, start: float, duration: float,
+                    layout_chains: list[str], trf_path: Path) -> bool:
+    """Pass 1 of vidstab: run the layout chains and extract the
+    camera-motion transforms for this clip window. The detect input
+    is exactly the render's input (-ss + layout), so the transforms
+    match the frames vidstabtransform will see. True on success."""
+    detect_chain = ";".join(
+        layout_chains
+        + [f"[v0]vidstabdetect=result={escape_ffmpeg_path(trf_path)}[vd]"])
+    # -t bounds the pass to this clip's window: without it ffmpeg
+    # would analyse the whole source file (a 514s source for a 20s
+    # clip) — the detect must see exactly the render's frames.
+    proc = run([FFMPEG, "-y", "-v", "error",
+                "-ss", str(start), "-i", str(source),
+                "-t", str(duration),
+                "-filter_complex", detect_chain,
+                "-map", "[vd]", "-f", "null", "-"], timeout=600)
+    if proc.returncode != 0 or not trf_path.exists():
+        log.warning("vidstabdetect failed (rc=%s); trying deshake.",
+                    proc.returncode)
+        return False
+    return True
+
+
+#: Noise score (flat-area block std-dev, luma 0-255) at or above which
+#: a source counts as noisy and gets the strong denoise pass. Calibrated
+#: on real frames: the job21 360p source scores 7.6-13.4, a clean
+#: rendered clip 3.3, a synthetically noised frame (sigma 8) 7.4, a
+#: busy gradient frame (content, no noise) 2.3 (see the unit tests).
+NOISE_SCORE_THRESHOLD = 6.0
+
+#: Strong hqdn3d pass for genuinely noisy sources (vs the Batch 13
+#: light 1.5:1.5:4:3, which clean sources keep).
+DENOISE_STRONG_PARAMS = "4:4:8:6"
+DENOISE_LIGHT_PARAMS = "1.5:1.5:4:3"
+
+
+def measure_noise_score(grey) -> float:
+    """Noise level of one grayscale frame (numpy 2D float array,
+    luma 0-255): the 25th percentile of the per-8x8-block std-dev.
+    Flat areas carry the sensor noise while busy detail lives in
+    the high-variance blocks, so the low quartile measures noise,
+    not content. A clean frame scores ~2-3, a noisy phone/360p
+    frame ~9-14."""
+    import numpy as np
+
+    arr = np.asarray(grey, dtype=np.float64)
+    h, w = arr.shape
+    bh, bw = (h // 8) * 8, (w // 8) * 8
+    if bh < 8 or bw < 8:
+        return 0.0
+    blocks = arr[:bh, :bw].reshape(bh // 8, 8, bw // 8, 8)
+    stds = blocks.std(axis=(1, 3)).ravel()
+    return float(np.percentile(stds, 25))
+
+
+def measure_clip_noise(source: Path, start: float, end: float,
+                       job_dir: Path) -> float | None:
+    """Mean noise score over 3 sampled frames of a clip window
+    (same sampling pattern as analyse_clip_frames). None when no
+    frame could be read — the caller then keeps the light pass and
+    says the measurement failed, never guesses."""
+    from PIL import Image
+
+    duration = max(0.0, end - start)
+    scores: list[float] = []
+    for frac in (0.25, 0.5, 0.75):
+        at = start + duration * frac
+        out = job_dir / f"noise-{uuid.uuid4().hex[:8]}.png"
+        try:
+            proc = run([FFMPEG, "-y", "-v", "error",
+                        "-ss", f"{at:.3f}", "-i", str(source),
+                        "-vframes", "1", "-vf", "scale=160:-1",
+                        str(out)], timeout=120)
+            if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
+                continue
+            with Image.open(out) as im:
+                import numpy as np
+                grey = np.asarray(im.convert("L"), dtype=np.float64)
+                scores.append(measure_noise_score(grey))
+        except Exception as exc:  # noqa: BLE001 — noise is best-effort
+            log.warning("Noise sampling failed at %.1fs: %s", at, exc)
+        finally:
+            try:
+                out.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
+    if not scores:
+        return None
+    return round(sum(scores) / len(scores), 2)
+
+
+#: Voice cleanup: the most speech-RMS loss (dB) afftdn may cause.
+#: Past this, the cleaned audio is discarded and the clip renders
+#: with its original audio instead — cleanup never mutes speech.
+VOICE_CLEANUP_MAX_DROP_DB = 3.0
+#: afftdn noise-reduction strength (dB) — mild, so speech survives.
+VOICE_CLEANUP_NR_DB = 10
+#: Noise-floor clamp (dB) for the measured quiet-segment level.
+VOICE_CLEANUP_NF_MIN_DB = -70.0
+VOICE_CLEANUP_NF_MAX_DB = -40.0
+VOICE_CLEANUP_NF_DEFAULT_DB = -50.0
+
+
+def _span_rms(arr, spans: list[tuple[float, float]],
+              rate: int = 16000) -> float:
+    """RMS over the given (start, end) second-spans of a mono float
+    array. 0.0 when the spans cover no samples."""
+    import numpy as np
+
+    vals = []
+    for a, b in spans:
+        s = max(0, int(a * rate))
+        e = min(len(arr), int(b * rate))
+        if e - s >= 160:  # >= 10ms of audio
+            vals.append(np.asarray(arr[s:e], dtype=np.float64))
+    if not vals:
+        return 0.0
+    all_s = np.concatenate(vals)
+    return float(np.sqrt(np.mean(all_s * all_s)))
+
+
+def _speech_rms_drop(before, after, speech_spans: list[tuple[float, float]],
+                     rate: int = 16000) -> float:
+    """Speech-RMS loss in dB after cleanup (positive = quieter).
+    ``before``/``after`` are mono float arrays at ``rate``; only
+    the speech spans count, so background-noise reduction alone
+    never trips the guard. 0.0 when there is no measurable speech."""
+    rms_before = _span_rms(before, speech_spans, rate)
+    rms_after = _span_rms(after, speech_spans, rate)
+    if rms_before <= 0 or rms_after <= 0:
+        return 0.0
+    return 20.0 * math.log10(rms_before / rms_after)
+
+
+def _voice_cleanup_decision(render_source: Path, render_start: float,
+                            render_duration: float,
+                            render_segments: list[dict],
+                            job_dir: Path) -> dict:
+    """Decide the voice cleanup for one clip — and prove it is safe
+    before the render uses it. The clip's own audio is extracted,
+    its quietest 0.5s sets the afftdn noise floor, and afftdn is run
+    on that same sample: if speech RMS would drop more than
+    VOICE_CLEANUP_MAX_DROP_DB the audio renders uncleaned instead.
+    Returns {apply, afftdn, nf_db, reason}. Never raises — any
+    failure means \"skip it and say why\", never a failed clip."""
+    result = {"apply": False, "afftdn": None, "nf_db": None,
+              "reason": "no audio to clean"}
+    try:
+        import numpy as np
+
+        sample = job_dir / f"vc-{uuid.uuid4().hex[:8]}.wav"
+        cleaned = job_dir / f"vc-{uuid.uuid4().hex[:8]}-clean.wav"
+        try:
+            proc = run([FFMPEG, "-y", "-v", "error",
+                        "-ss", str(render_start), "-i", str(render_source),
+                        "-t", str(render_duration), "-vn",
+                        "-ac", "1", "-ar", "16000", "-f", "wav",
+                        str(sample)], timeout=120)
+            if proc.returncode != 0 or not sample.exists():
+                return {**result, "reason": "audio sample failed"}
+            audio = load_wav_as_array(sample)
+            if len(audio) < 8000:  # < 0.5s of audio: nothing to judge
+                return {**result, "reason": "clip audio too short"}
+            # Speech spans are the transcript segments on this
+            # (cleaned) timeline; without them there is no speech to
+            # protect, so there is nothing to clean either.
+            spans = [(float(s["start"]), float(s["end"]))
+                     for s in (render_segments or [])
+                     if float(s.get("end", 0)) > float(s.get("start", 0))]
+            if not spans:
+                return {**result, "reason": "no speech in clip"}
+            # Quietest 0.5s window = the noise reference.
+            win = 8000
+            best_rms = None
+            for i in range(0, max(1, len(audio) - win), 4000):
+                chunk = audio[i:i + win]
+                rms = float(np.sqrt(np.mean(chunk * chunk)))
+                if best_rms is None or rms < best_rms:
+                    best_rms = rms
+            speech_rms = _span_rms(audio, spans)
+            if speech_rms <= 0:
+                return {**result, "reason": "no measurable speech"}
+            if best_rms is None or best_rms <= 0:
+                nf_db = VOICE_CLEANUP_NF_DEFAULT_DB
+                ref = "no quiet reference — default floor"
+            elif best_rms > 0.5 * speech_rms:
+                nf_db = VOICE_CLEANUP_NF_DEFAULT_DB
+                ref = "no quiet segment — default floor"
+            else:
+                nf_db = max(VOICE_CLEANUP_NF_MIN_DB,
+                            min(VOICE_CLEANUP_NF_MAX_DB,
+                                20.0 * math.log10(best_rms)))
+                ref = f"quiet-segment floor {nf_db:.0f}dB"
+            afftdn = f"afftdn=nr={VOICE_CLEANUP_NR_DB}:nf={nf_db:g}"
+            proc = run([FFMPEG, "-y", "-v", "error",
+                        "-i", str(sample), "-af", afftdn,
+                        str(cleaned)], timeout=120)
+            if proc.returncode != 0 or not cleaned.exists():
+                return {**result, "reason": "afftdn test run failed"}
+            cleaned_audio = load_wav_as_array(cleaned)
+            drop = _speech_rms_drop(audio, cleaned_audio, spans)
+            if drop > VOICE_CLEANUP_MAX_DROP_DB:
+                return {**result, "reason":
+                        f"speech RMS would drop {drop:.1f}dB — uncleaned"}
+            return {"apply": True, "afftdn": afftdn, "nf_db": round(nf_db, 1),
+                    "reason": f"afftdn applied ({ref}; speech drop {drop:.1f}dB)"}
+        finally:
+            for p in (sample, cleaned):
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:  # noqa: BLE001 — best-effort cleanup
+                    pass
+    except Exception as exc:  # noqa: BLE001 — cleanup never fails a clip
+        log.warning("Voice cleanup guard failed: %s", exc)
+        return {**result, "reason": f"guard failed ({exc})"}
+
+
+#: Speed ramps — slow-motion emphasis on the clip's loudest moments.
+SPEED_RAMP_SLOW = 0.5       # slow-zone playback speed
+SPEED_RAMP_SLOW_HALF_S = 1.0  # half-length of the slow zone (2s total)
+SPEED_RAMP_HALF_S = 0.5     # half-length when the full zone won't fit
+SPEED_RAMP_ZONE_S = 0.25    # ramp in/out zone at each end (0.75x)
+SPEED_RAMP_ZONE_SPEED = 0.75
+SPEED_RAMP_MAX_COMP = 1.5   # fastest the rest of the clip may run
+SPEED_RAMP_MAX_MOMENTS = 2
+SPEED_RAMP_MIN_CLIP_S = 5.0
+SPEED_RAMP_MIN_SEPARATION_S = 3.0
+
+
+def speed_ramp_centres(energy_profile: list[float], start: float, end: float,
+                       moments: list[tuple[float, float]]) -> list[float]:
+    """Ramp centres (source times): the loudest second inside each of
+    the clip's (up to 2) strongest zoom moments. [] when there is no
+    energy profile or no moment — no moment, no ramp, honestly."""
+    if not energy_profile or not moments:
+        return []
+    ranked = []
+    for a, b in moments:
+        lo = max(0, int(a))
+        hi = min(len(energy_profile), int(b) + 1)
+        if hi <= lo:
+            continue
+        peak_i = max(range(lo, hi), key=lambda i: energy_profile[i])
+        if energy_profile[peak_i] <= 0:
+            continue
+        ranked.append((energy_profile[peak_i], peak_i + 0.5))
+    ranked.sort(reverse=True)
+    centres: list[float] = []
+    for _energy, centre in ranked:
+        centre = max(start, min(end, centre))
+        if all(abs(centre - c) >= SPEED_RAMP_MIN_SEPARATION_S
+               for c in centres):
+            centres.append(centre)
+        if len(centres) >= SPEED_RAMP_MAX_MOMENTS:
+            break
+    return sorted(centres)
+
+
+def _remap_time(t: float, start: float,
+                cuts: list[tuple[float, float]]) -> float | None:
+    """One source time onto the cleaned timeline (None when the time
+    fell inside a cut — the moment was removed with the silence)."""
+    if not cuts:
+        return t - start
+    out = t - start
+    for a, b in cuts:
+        if a <= t < b:
+            return None
+        if b <= t:
+            out -= b - a
+    return out
+
+
+def plan_speed_ramps(duration: float,
+                     centres: list[float]) -> list[tuple[float, float, float]]:
+    """Segment plan [(start, end, speed)] covering [0, duration] with
+    total output duration exactly ``duration``: each centre gets a
+    slow zone (0.5x) with 0.25s 0.75x ramps in/out, and the rest of
+    the clip runs at one compensation speed (<= 1.5x) that pays for
+    the extra time. Tries (2 moments, full zone), (2, half zone),
+    (1, full), (1, half); [] when nothing fits (clip too short, or
+    the compensation would run too fast). The plan is verified
+    internally — a plan whose output is not ``duration`` is never
+    returned, so the duration promise cannot break here."""
+    if duration < SPEED_RAMP_MIN_CLIP_S or not centres:
+        return []
+    for half in (SPEED_RAMP_SLOW_HALF_S, SPEED_RAMP_HALF_S):
+        for count in (SPEED_RAMP_MAX_MOMENTS, 1):
+            picked = [c for c in sorted(centres)
+                      if half + SPEED_RAMP_ZONE_S <= c <= duration - half - SPEED_RAMP_ZONE_S]
+            picked = picked[:count]
+            if not picked:
+                continue
+            zone_in = 2 * half + 2 * SPEED_RAMP_ZONE_S
+            zone_out = (2 * half / SPEED_RAMP_SLOW
+                        + 2 * SPEED_RAMP_ZONE_S / SPEED_RAMP_ZONE_SPEED)
+            normal_in = duration - zone_in * len(picked)
+            normal_out = duration - zone_out * len(picked)
+            if normal_in <= 0 or normal_out <= 0:
+                continue
+            comp = normal_in / normal_out
+            if comp > SPEED_RAMP_MAX_COMP:
+                continue
+            zones: list[tuple[float, float, float]] = []
+            for c in picked:
+                zones.append((c - half - SPEED_RAMP_ZONE_S, c - half,
+                              SPEED_RAMP_ZONE_SPEED))
+                zones.append((c - half, c + half, SPEED_RAMP_SLOW))
+                zones.append((c + half, c + half + SPEED_RAMP_ZONE_S,
+                              SPEED_RAMP_ZONE_SPEED))
+            zones.sort()
+            plan: list[tuple[float, float, float]] = []
+            t = 0.0
+            for a, b, s in zones:
+                if a - t > 0.05:
+                    plan.append((t, a, comp))
+                plan.append((a, b, s))
+                t = b
+            if duration - t > 0.05:
+                plan.append((t, duration, comp))
+            total_out = sum((b - a) / s for a, b, s in plan)
+            if abs(total_out - duration) > 0.01:
+                continue
+            return plan
+    return []
+
+
+def speed_ramp_video_filters(plan: list[tuple[float, float, float]],
+                             video_label: str) -> tuple[list[str], str]:
+    """Video time-remap chains for a plan: split the stream, trim +
+    re-time each segment (setpts stretches 0.5x spans to 2x their
+    length), concat back. Returns (chains, new label)."""
+    n = len(plan)
+    splits = "".join(f"[vs{i}]" for i in range(n))
+    chains = [f"{video_label}split={n}{splits}"]
+    for i, (a, b, s) in enumerate(plan):
+        factor = 1.0 / s
+        chains.append(
+            f"[vs{i}]trim=start={a:.3f}:end={b:.3f},"
+            f"setpts=(PTS-STARTPTS)*{factor:g}[vseg{i}]")
+    chains.append("".join(f"[vseg{i}]" for i in range(n))
+                  + f"concat=n={n}:v=1:a=0[vramp]")
+    return chains, "[vramp]"
+
+
+def speed_ramp_audio_filters(plan: list[tuple[float, float, float]],
+                             audio_label: str) -> tuple[list[str], str]:
+    """Audio time-remap chains for a plan, same segment boundaries
+    as the video so A/V stay in sync: atrim + atempo per segment,
+    concat back. Returns (chains, new label)."""
+    n = len(plan)
+    splits = "".join(f"[as{i}]" for i in range(n))
+    chains = [f"{audio_label}asplit={n}{splits}"]
+    for i, (a, b, s) in enumerate(plan):
+        chains.append(
+            f"[as{i}]atrim=start={a:.3f}:end={b:.3f},"
+            f"asetpts=PTS-STARTPTS,atempo={s:g}[aseg{i}]")
+    chains.append("".join(f"[aseg{i}]" for i in range(n))
+                  + f"concat=n={n}:v=0:a=1[aramp]")
+    return chains, "[aramp]"
+
+
+def _append_audio_tail(audio_chains: list[str], audio_label: str,
+                       ramp_plan: list[tuple[float, float, float]],
+                       render_duration: float, loop_fades: str,
+                       stats: dict) -> str:
+    """Append the Batch 17 speed-ramp remap and the Batch 15 loop
+    fades to an audio chain that already ends at ``audio_label``
+    (the loudnorm'd mix). The fades always land on the FINAL
+    timeline — after the remap — so a loop fade never fades the
+    wrong seconds, and the remap covers the whole mix so SFX stay
+    glued to the moments they accent. Returns the final label."""
+    label = audio_label
+    if ramp_plan:
+        ramp_chains, label = speed_ramp_audio_filters(ramp_plan, label)
+        audio_chains.extend(ramp_chains)
+    if loop_fades:
+        audio_chains.append(
+            f"{label}{loop_fades.lstrip(',')}[aout2]")
+        label = "[aout2]"
+        stats["loop_fades"] = True
+    return label
+
+
 def render_clip(source: Path, clip: dict, settings: dict,
                 segments: list[dict], out_path: Path,
                 source_info: dict, job_dir: Path,
@@ -6738,7 +7176,16 @@ def render_clip(source: Path, clip: dict, settings: dict,
              "speaker_count": 0,
              "emotion_emphasised": 0,
              "dynamic_headlines": 0,
-             "scroll_stopper": False}
+             "scroll_stopper": False,
+             # Batch 17: quality actually rendered (the job note reads
+             # these, never the settings).
+             "stabilization": None,
+             "denoise_video": None,
+             "denoise_score": None,
+             "voice_cleanup": None,
+             "speed_ramps": 0,
+             "speed_ramp_centres": [],
+             "speed_ramp_comp": None}
     clip["_batch1_stats"] = stats
 
     # --- Cleaning pre-pass (silence + filler removal) ---
@@ -7026,6 +7473,48 @@ def render_clip(source: Path, clip: dict, settings: dict,
                                  face_tracking=do_track)
 
     video_label = "[v0]"
+    # Batch 17: stabilization, right after the layout (so the
+    # transform sees exactly the frames the detect pass measured)
+    # and before auto-zoom (so the punch-ins ride on steady footage).
+    # vidstab is two-pass: the detect runs on the laid-out frames
+    # with the render's own input, then the transform joins the
+    # chain. deshake is the single-pass fallback; when this ffmpeg
+    # has neither, the clip renders unstabilized and says so.
+    stab_trf: Path | None = None
+    if _feature_on(settings, "stabilization"):
+        stab_method = stabilization_method()
+        if stab_method == "vidstab":
+            stab_trf = job_dir / f"stab_{uuid.uuid4().hex[:8]}.trf"
+            if _vidstab_detect(render_source, render_start,
+                               render_duration, chains, stab_trf):
+                chains.append(
+                    f"{video_label}vidstabtransform="
+                    f"input={escape_ffmpeg_path(stab_trf)}:smoothing=10[vs]")
+                video_label = "[vs]"
+                stats["stabilization"] = "vidstab"
+                log.info("Clip %.1f-%.1fs: stabilization vidstab.",
+                         start, end)
+            else:
+                stab_trf = None
+                stab_method = ("deshake"
+                               if "deshake" in _ffmpeg_filters() else None)
+                if stab_method == "deshake":
+                    chains.append(f"{video_label}deshake[vs]")
+                    video_label = "[vs]"
+                    stats["stabilization"] = "deshake"
+                    log.info("Clip %.1f-%.1fs: stabilization deshake "
+                             "(vidstabdetect failed).", start, end)
+                else:
+                    stats["stabilization"] = "unavailable"
+        elif stab_method == "deshake":
+            chains.append(f"{video_label}deshake[vs]")
+            video_label = "[vs]"
+            stats["stabilization"] = "deshake"
+            log.info("Clip %.1f-%.1fs: stabilization deshake.", start, end)
+        else:
+            stats["stabilization"] = "unavailable"
+            log.info("Clip %.1f-%.1fs: stabilization unavailable — "
+                     "no vidstab/deshake in this ffmpeg.", start, end)
     # --- Auto-zoom: punch in over the high-energy moments (stashed by
     # process_job in source time; re-mapped through any cuts). Applied
     # after the layout and before the captions, so the text never zooms.
@@ -7067,6 +7556,37 @@ def render_clip(source: Path, clip: dict, settings: dict,
             video_label = "[vp]"
             log.info("Clip %.1f-%.1fs: pattern interrupts over %d mark(s).",
                      start, end, len(interrupt_moments))
+    # Batch 17: speed ramps — the clip's loudest moments (stashed by
+    # process_job in source time, same signal as the zoom moments)
+    # play at 0.5x with 0.25s ramps in/out; the rest compensates so
+    # the total duration is unchanged. Centres are re-mapped through
+    # any cleaning cuts; a centre that fell inside a cut is dropped.
+    ramp_plan: list[tuple[float, float, float]] = []
+    ramp_centres: list[float] = []
+    if _feature_on(settings, "speed_ramps"):
+        for centre in clip.get("_speed_ramp_centres") or []:
+            mapped = _remap_time(float(centre), start, cuts)
+            if mapped is not None:
+                ramp_centres.append(mapped)
+        ramp_plan = plan_speed_ramps(render_duration, ramp_centres)
+        if ramp_plan:
+            stats["speed_ramps"] = sum(
+                1 for _a, _b, s in ramp_plan if s == SPEED_RAMP_SLOW)
+            # Only the centres the plan actually used: a centre the
+            # planner dropped (too close to another, or too near an
+            # edge) never got a ramp, so the note must not list it.
+            stats["speed_ramp_centres"] = [
+                round((a + b) / 2, 2) for a, b, s in ramp_plan
+                if s == SPEED_RAMP_SLOW]
+            comp_speeds = {round(s, 3) for _a, _b, s in ramp_plan
+                           if s > SPEED_RAMP_SLOW}
+            stats["speed_ramp_comp"] = max(comp_speeds) if comp_speeds else None
+            log.info("Clip %.1f-%.1fs: speed ramps over %d moment(s) "
+                     "(comp %.2fx).", start, end, stats["speed_ramps"],
+                     stats["speed_ramp_comp"] or 1.0)
+        elif ramp_centres:
+            log.info("Clip %.1f-%.1fs: speed ramps skipped — no plan "
+                     "fits the duration.", start, end)
     # Batch 2: mild sharpening after layout/zoom, before captions —
     # the text stays crisp because it is burned in after this.
     # Batch 13: a MILD denoise first (hqdn3d, well below its defaults
@@ -7074,7 +7594,28 @@ def render_clip(source: Path, clip: dict, settings: dict,
     # encoder wasting bits on that noise), then the unsharp (0.7 luma,
     # up from 0.5, to put back the crispness the denoise softens).
     # Verified by frame inspection: no plastic/over-smoothed look.
-    chains.append(f"{video_label}hqdn3d=1.5:1.5:4:3,unsharp=5:5:0.7:5:5:0.0[vu]")
+    # Batch 17: the denoise strength is MEASURED now — the source's
+    # noise score decides. A genuinely noisy source gets the strong
+    # pass; a clean source keeps the Batch 13 light pass, and a
+    # failed measurement keeps it too (never guessed). The decision
+    # + score are stashed for the job note.
+    denoise_level = "light"
+    if _feature_on(settings, "denoise_cleanup"):
+        denoise_score = measure_clip_noise(
+            render_source, render_start, render_end, job_dir)
+        stats["denoise_score"] = denoise_score
+        if denoise_score is not None and denoise_score >= NOISE_SCORE_THRESHOLD:
+            denoise_level = "strong"
+        stats["denoise_video"] = (
+            f"{denoise_level} (noise score "
+            f"{denoise_score if denoise_score is not None else 'unmeasured'})")
+        log.info("Clip %.1f-%.1fs: video denoise %s (noise score %s).",
+                 start, end, denoise_level, denoise_score)
+    else:
+        stats["denoise_video"] = "light (feature off)"
+    hqdn3d_params = (DENOISE_STRONG_PARAMS if denoise_level == "strong"
+                     else DENOISE_LIGHT_PARAMS)
+    chains.append(f"{video_label}hqdn3d={hqdn3d_params},unsharp=5:5:0.7:5:5:0.0[vu]")
     video_label = "[vu]"
     # Batch 9: colour grade — after layout/zoom/sharpen, before the
     # captions burn, so the grade colours the footage and the burned
@@ -7241,6 +7782,15 @@ def render_clip(source: Path, clip: dict, settings: dict,
     # filter on this ffmpeg build that genuinely evaluates per frame;
     # drawbox `t` and crop widths do not animate here), overlaid at
     # the bottom edge. When OFF, the chain is byte-identical to before.
+    # Batch 17: speed ramps on the video — the last video stage
+    # (captions are already burned, so the text stretches with the
+    # slow motion, exactly as a viewer sees it). The plan's total
+    # output is the clip duration by construction, and validate_clip
+    # confirms it afterwards.
+    if ramp_plan:
+        ramp_chains, video_label = speed_ramp_video_filters(
+            ramp_plan, video_label)
+        chains.extend(ramp_chains)
     if progress_bar:
         chains.append(_progress_bar_source(tw, render_duration))
         chains.append(
@@ -7284,7 +7834,24 @@ def render_clip(source: Path, clip: dict, settings: dict,
     # stats["loop_fades"] stays False.
     loop_fades = loop_fade_filters(render_duration) \
         if bool(settings.get("loop_perfect", False)) else ""
+    # Batch 17: voice cleanup — the guard runs FIRST, on the clip's
+    # own audio, so the render only ever uses a cleanup that proved
+    # safe (speech RMS drop within threshold). The afftdn filter
+    # goes before loudnorm in BOTH audio paths below (the mix and
+    # the plain loudnorm), and before the music bed's sidechain
+    # split — the bed ducks under cleaned speech.
+    voice = {"apply": False, "afftdn": None, "nf_db": None,
+             "reason": "off"}
+    if source_info["has_audio"] and _feature_on(settings, "denoise_cleanup"):
+        voice = _voice_cleanup_decision(
+            render_source, render_start, render_duration,
+            render_segments, job_dir)
+    stats["voice_cleanup"] = voice["reason"]
+    log.info("Clip %.1f-%.1fs: voice cleanup: %s.",
+             start, end, voice["reason"])
+    voice_afftdn = (voice["afftdn"] + ",") if voice["apply"] else ""
     audio_chains: list[str] = []
+    audio_out_label = "[aout]"
     input_args: list[str] = [
         "-ss", str(render_start), "-i", str(render_source)]
     if bed_file is not None or sfx_events:
@@ -7306,12 +7873,19 @@ def render_clip(source: Path, clip: dict, settings: dict,
                 f"aformat=sample_rates=48000:channel_layouts=stereo{label}")
             sfx_inputs.append(label)
             next_input += 1
+        # Batch 17: the voice cleanup (when the guard passed) cleans
+        # the main audio before anything else touches it — the bed
+        # sidechain and the mix both hear cleaned speech.
+        main_label = "[0:a]"
+        if voice["apply"] and source_info["has_audio"]:
+            audio_chains.append(f"[0:a]{voice['afftdn']}[aclean]")
+            main_label = "[aclean]"
         mix_inputs: list[str] = []
         if source_info["has_audio"]:
             if bed_file is not None:
                 # Split the speech: one copy for the mix, one as the
                 # sidechain key that ducks the bed.
-                audio_chains.append("[0:a]asplit=2[amain][aside]")
+                audio_chains.append(f"{main_label}asplit=2[amain][aside]")
                 audio_chains.append(
                     f"[{bed_input}:a]volume={MUSIC_BED_VOLUME},"
                     "aformat=sample_rates=48000:channel_layouts=stereo[bedv]")
@@ -7320,7 +7894,7 @@ def render_clip(source: Path, clip: dict, settings: dict,
                     "attack=200:release=500[bedd]")
                 mix_inputs += ["[amain]", "[bedd]"]
             else:
-                mix_inputs.append("[0:a]")
+                mix_inputs.append(main_label)
         elif bed_file is not None:
             audio_chains.append(
                 f"[{bed_input}:a]volume={MUSIC_BED_SOLO_VOLUME},"
@@ -7336,15 +7910,42 @@ def render_clip(source: Path, clip: dict, settings: dict,
                 "anullsrc=r=48000:cl=stereo:"
                 f"duration={render_duration:.3f}[sil]")
             mix_inputs = ["[sil]"] + mix_inputs
+        # Batch 17: when there is a speed-ramp plan the loop fades
+        # do NOT ride inside loudnorm — they land on the final
+        # timeline, after the remap (_append_audio_tail below).
+        fades_here = "" if ramp_plan else loop_fades
         if len(mix_inputs) == 1:
             audio_chains.append(
-                f"{mix_inputs[0]}loudnorm=I=-14:TP=-1.5:LRA=11{loop_fades}[aout]")
+                f"{mix_inputs[0]}loudnorm=I=-14:TP=-1.5:LRA=11{fades_here}[aout]")
         else:
             audio_chains.append(
                 "".join(mix_inputs)
                 + f"amix=inputs={len(mix_inputs)}:duration=first:"
                 f"dropout_transition=0,"
-                f"loudnorm=I=-14:TP=-1.5:LRA=11{loop_fades}[aout]")
+                f"loudnorm=I=-14:TP=-1.5:LRA=11{fades_here}[aout]")
+        if ramp_plan:
+            audio_out_label = _append_audio_tail(
+                audio_chains, "[aout]", ramp_plan, render_duration,
+                loop_fades, stats)
+        if loop_fades:
+            stats["loop_fades"] = True
+    elif source_info["has_audio"] and (voice_afftdn or ramp_plan):
+        # Batch 17: the plain path needs a filter graph when the
+        # voice cleanup or a speed ramp applies — same loudnorm as
+        # the plain path, then the remap, then the fades on the
+        # final timeline. When neither applies this branch is never
+        # taken and the render is byte-identical to before.
+        audio_chains.append(
+            f"[0:a]{voice_afftdn}loudnorm=I=-14:TP=-1.5:LRA=11[aout]")
+        if ramp_plan:
+            audio_out_label = _append_audio_tail(
+                audio_chains, "[aout]", ramp_plan, render_duration,
+                loop_fades, stats)
+        elif loop_fades:
+            audio_chains.append(
+                f"[aout]{loop_fades.lstrip(',')}[aout2]")
+            audio_out_label = "[aout2]"
+        stats["audio_filter"] = ";".join(audio_chains)
         if loop_fades:
             stats["loop_fades"] = True
     filter_complex = ";".join(chains + audio_chains)
@@ -7358,7 +7959,7 @@ def render_clip(source: Path, clip: dict, settings: dict,
            "-filter_complex", filter_complex,
            "-map", "[vout]"]
     if audio_chains:
-        cmd += ["-map", "[aout]"]
+        cmd += ["-map", audio_out_label]
         cmd += ["-c:a", "aac", "-b:a", "192k"]
     elif source_info["has_audio"]:
         # Batch 2: loudness-normalised to -14 LUFS (the level TikTok /
@@ -7394,6 +7995,13 @@ def render_clip(source: Path, clip: dict, settings: dict,
             f"FFmpeg render failed for clip {start:.1f}-{end:.1f}s: "
             f"{(proc.stderr or '').strip()[:300]}"
         )
+    # Batch 17: the vidstab transforms file was only needed for this
+    # render — remove it now so job dirs stay clean.
+    if stab_trf is not None:
+        try:
+            stab_trf.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            pass
     return out_path
 
 
@@ -8117,6 +8725,66 @@ def _ready_note(clips: list[dict], requested: int, failed: list[str],
             notes.append(
                 "Scroll-stopper first frame: the strongest line shown "
                 "large for the first second of each clip.")
+        # Batch 17: quality — claimed only from what the renders
+        # actually did (the stats), never the settings.
+        _stab = [_stats(c).get("stabilization") for c in rendered]
+        _stab_vidstab = sum(1 for s in _stab if s == "vidstab")
+        _stab_deshake = sum(1 for s in _stab if s == "deshake")
+        _stab_unavail = sum(1 for s in _stab if s == "unavailable")
+        if _stab_vidstab:
+            notes.append(
+                f"Stabilization: two-pass vidstab on {_stab_vidstab} "
+                f"clip(s).")
+        if _stab_deshake:
+            notes.append(
+                f"Stabilization: deshake on {_stab_deshake} clip(s) "
+                f"(vidstab not available in this ffmpeg).")
+        if _stab_unavail:
+            notes.append(
+                "Stabilization unavailable: no vidstab/deshake in this "
+                f"ffmpeg — {_stab_unavail} clip(s) rendered unstabilized.")
+        _denoise = [_stats(c).get("denoise_video") for c in rendered]
+        _strong = sum(1 for d in _denoise
+                      if d and d.startswith("strong"))
+        _scores = [_stats(c).get("denoise_score") for c in rendered
+                   if _stats(c).get("denoise_score") is not None]
+        if _strong:
+            notes.append(
+                f"Denoise: strong pass on {_strong} clip(s) — source "
+                f"measured noisy (noise score "
+                f"{max(_scores):.1f} vs threshold "
+                f"{NOISE_SCORE_THRESHOLD:g}); clean clips kept the "
+                f"light pass.")
+        elif _scores:
+            notes.append(
+                f"Denoise: source measured clean (noise score "
+                f"{max(_scores):.1f} vs threshold "
+                f"{NOISE_SCORE_THRESHOLD:g}) — light pass on all "
+                f"clips.")
+        _voice = [_stats(c).get("voice_cleanup") for c in rendered]
+        _voice_on = sum(1 for v in _voice
+                        if v and v.startswith("afftdn applied"))
+        _voice_skipped = [v for v in _voice
+                          if v and not v.startswith("afftdn applied")
+                          and v != "off"]
+        if _voice_on:
+            notes.append(
+                f"Voice cleanup: afftdn on {_voice_on} clip(s) "
+                f"(speech protected — RMS drop within "
+                f"{VOICE_CLEANUP_MAX_DROP_DB:g}dB).")
+        if _voice_skipped:
+            notes.append(
+                "Voice cleanup skipped: "
+                + "; ".join(sorted(set(_voice_skipped))) + ".")
+        _ramps = sum(_stats(c).get("speed_ramps", 0) for c in rendered)
+        if _ramps:
+            _centres = sorted(
+                {c for clip in rendered
+                 for c in (_stats(clip).get("speed_ramp_centres") or [])})
+            notes.append(
+                f"Speed ramps: {_ramps} slow-motion moment(s) "
+                f"at {', '.join(f'{c:.1f}s' for c in _centres)} (0.5x, "
+                f"total duration unchanged).")
         # Batch 13: colour grade + quality — claimed only from what
         # the renders actually did (the stats), never the settings.
         # Auto grades carry their reason ("dark — brightened and
@@ -8236,19 +8904,27 @@ def process_rerender(api: JobApi, rerender: dict) -> None:
             # (Silence/filler cleaning is computed inside render_clip
             # for the fixed window; it renders uncleaned rather than
             # breaking the clip's duration.)
-            if _feature_on(settings, "auto_zoom"):
+            # Batch 17: the speed-ramp centres come from the same
+            # energy profile (unsnapped — the ramp is about the peak).
+            if (_feature_on(settings, "auto_zoom")
+                    or _feature_on(settings, "speed_ramps")):
                 energy = wav_rms_profile(wav_path)
                 if energy:
-                    moments = zoom_moments(
-                        energy, clip["start"], clip["end"])
-                    # Batch 3: snap the zoom moments to beats, as a
-                    # fresh job does.
-                    if _feature_on(settings, "beat_sync"):
-                        beats = detect_beats(energy)
-                        if beats:
-                            moments, _n = snap_zoom_moments_to_beats(
-                                moments, beats, clip["start"], clip["end"])
-                    clip["_zoom_moments"] = moments
+                    if _feature_on(settings, "auto_zoom"):
+                        moments = zoom_moments(
+                            energy, clip["start"], clip["end"])
+                        # Batch 3: snap the zoom moments to beats, as a
+                        # fresh job does.
+                        if _feature_on(settings, "beat_sync"):
+                            beats = detect_beats(energy)
+                            if beats:
+                                moments, _n = snap_zoom_moments_to_beats(
+                                    moments, beats, clip["start"], clip["end"])
+                        clip["_zoom_moments"] = moments
+                    if _feature_on(settings, "speed_ramps"):
+                        clip["_speed_ramp_centres"] = speed_ramp_centres(
+                            energy, clip["start"], clip["end"],
+                            zoom_moments(energy, clip["start"], clip["end"]))
         out_path = job_dir / "clip.mp4"
         render_clip(source, clip, settings, segments, out_path,
                     source_info, job_dir, music_bed_path=music_bed_path)
@@ -8688,6 +9364,18 @@ def process_job(api: JobApi, job: dict) -> None:
             if beats:
                 log.info("Job %s beat sync: %d of %d zoom moment(s) snapped "
                          "to beats.", job_id, zoom_snapped, zoom_total)
+
+        # Batch 17: speed-ramp centres — the loudest second inside
+        # each of the clip's strongest zoom moments, in source time;
+        # render_clip re-maps them through any cleaning cuts and
+        # plans the ramps so the total duration is unchanged. The
+        # moments come from the same energy profile, unsnapped —
+        # the ramp is about the peak, not the beat-snapped start.
+        if _feature_on(settings, "speed_ramps") and energy:
+            for clip in clips:
+                clip["_speed_ramp_centres"] = speed_ramp_centres(
+                    energy, clip["start"], clip["end"],
+                    zoom_moments(energy, clip["start"], clip["end"]))
 
         api.set_status(job_id, "Processing", stage="rendering", progress=60)
         # Batch 3 multi-ratio: the SAME windows render once per ratio.

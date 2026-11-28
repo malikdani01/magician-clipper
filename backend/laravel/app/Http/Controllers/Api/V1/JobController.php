@@ -105,6 +105,7 @@ class JobController extends Controller
                   'progress_bar', 'pattern_interrupts', 'loop_perfect',
                   'face_aware_captions', 'speaker_colours',
                   'emotion_emphasis', 'dynamic_headline', 'scroll_stopper',
+                  'stabilization', 'denoise_cleanup', 'speed_ramps',
                   'campaign_caption_required',
                   'campaign_hashtags_required',
                   'campaign_ost_required'] as $boolField) {
@@ -652,6 +653,12 @@ class JobController extends Controller
             'emotion_emphasis' => $validated['emotion_emphasis'] ?? true,
             'dynamic_headline' => $validated['dynamic_headline'] ?? true,
             'scroll_stopper' => $validated['scroll_stopper'] ?? true,
+            // Batch 17 — Quality: all three ON unless explicitly
+            // off (the worker treats a missing key as ON too — no
+            // wizard toggles).
+            'stabilization' => $validated['stabilization'] ?? true,
+            'denoise_cleanup' => $validated['denoise_cleanup'] ?? true,
+            'speed_ramps' => $validated['speed_ramps'] ?? true,
             'layout' => $validated['layout'] ?? 'center_crop',
             'content_type' => $validated['content_type'] ?? 'general',
             'quality' => $validated['quality'] ?? 'standard',

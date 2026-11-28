@@ -5671,5 +5671,401 @@ class Batch16CaptionIntelligenceTests(unittest.TestCase):
 
 
 
+class Batch17QualityTests(unittest.TestCase):
+    """Batch 17 (2026-11-28): Quality — stabilization, denoise +
+    voice cleanup, speed ramps. All measured signal, never guessed:
+    the tests pin the measurement, the filter chain a real render
+    builds, and the output duration — never a claim about quality."""
+
+    def _make_clip(self, path, duration=10, freq=440):
+        """A real MP4: green frames + a sine tone (no silence gaps)."""
+        cmd = [muse_worker.FFMPEG, "-y", "-v", "error",
+               "-f", "lavfi", "-i",
+               f"color=c=green:s=640x360:d={duration}:r=30",
+               "-f", "lavfi", "-i", f"sine=frequency={freq}:duration={duration}",
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+               "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+               "-shortest", str(path)]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(Path(path).exists())
+
+    def _seg(self, start, end, text):
+        words = text.split()
+        span = (end - start) / max(1, len(words))
+        ws = [{"start": start + i * span, "end": start + (i + 1) * span,
+               "word": w} for i, w in enumerate(words)]
+        return {"start": start, "end": end, "text": text, "words": ws}
+
+    def _two_voice_segments(self):
+        return [self._seg(0.0, 8.0, "We climbed the tower in the morning light."),
+                self._seg(9.0, 18.0, "The view from the top was absolutely insane today.")]
+
+    def _make_two_voice_clip(self, path, duration=20):
+        """A real MP4: green frames + 120 Hz tone for 8s, then 240 Hz."""
+        cmd = [muse_worker.FFMPEG, "-y", "-v", "error",
+               "-f", "lavfi", "-i",
+               f"color=c=green:s=640x360:d={duration}:r=30",
+               "-f", "lavfi", "-i", "sine=frequency=120:duration=8",
+               "-f", "lavfi", "-i", "sine=frequency=240:duration=12",
+               "-filter_complex", "[1:a][2:a]concat=n=2:v=0:a=1[a]",
+               "-map", "0:v", "-map", "[a]",
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+               "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+               str(path)]
+        subprocess.run(cmd, check=True, timeout=120)
+
+    # -- stabilization -------------------------------------------
+    def test_stabilization_method_detects_vidstab(self):
+        # This ffmpeg (8.1.2) ships vidstab — the two-pass path is
+        # the one a real render takes. If a future ffmpeg drops it,
+        # this test fails loudly instead of silently degrading.
+        self.assertEqual(muse_worker.stabilization_method(), "vidstab")
+
+    def test_render_clip_vidstab_in_chain_when_on(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "src.mp4"
+            self._make_clip(src, duration=10)
+            info = muse_worker.probe_summary(src)
+            clip = {"start": 0.0, "end": 10.0}
+            out = tmp / "clip.mp4"
+            settings = _settings(duration_seconds=10, clip_count=1,
+                                 layout="center_crop", captions_enabled=False,
+                                 auto_zoom=False, silence_removal=False,
+                                 filler_removal=False)
+            muse_worker.render_clip(src, clip, settings, [], out, info, tmp)
+            self.assertTrue(out.exists())
+            stats = clip["_batch1_stats"]
+            self.assertEqual(stats["stabilization"], "vidstab")
+            self.assertIn("vidstabtransform", stats["filter_complex"])
+            # The transforms file was only needed for this render.
+            self.assertEqual(list(tmp.glob("*.trf")), [])
+
+    def test_render_clip_no_stabilization_when_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "src.mp4"
+            self._make_clip(src, duration=10)
+            info = muse_worker.probe_summary(src)
+            clip = {"start": 0.0, "end": 10.0}
+            out = tmp / "clip.mp4"
+            settings = _settings(duration_seconds=10, clip_count=1,
+                                 layout="center_crop", captions_enabled=False,
+                                 stabilization=False,
+                                 auto_zoom=False, silence_removal=False,
+                                 filler_removal=False)
+            muse_worker.render_clip(src, clip, settings, [], out, info, tmp)
+            stats = clip["_batch1_stats"]
+            self.assertIsNone(stats["stabilization"])
+            self.assertNotIn("vidstabtransform", stats["filter_complex"])
+            self.assertNotIn("deshake", stats["filter_complex"])
+
+    # -- noise measurement ----------------------------------------
+    def test_measure_noise_score_clean_vs_noisy(self):
+        import numpy as np
+        rng = np.random.default_rng(0)
+        clean = np.full((90, 160), 128.0)
+        noisy = np.clip(clean + rng.normal(0, 8, clean.shape), 0, 255)
+        gradient = np.tile(np.arange(160, dtype=float), (90, 1))
+        clean_score = muse_worker.measure_noise_score(clean)
+        noisy_score = muse_worker.measure_noise_score(noisy)
+        gradient_score = muse_worker.measure_noise_score(gradient)
+        # A flat clean frame scores ~0, a noised one ~7.4, and busy
+        # content without noise stays low — the metric measures
+        # noise, not detail. The threshold sits between clean and
+        # noisy, so the decision flips on noise alone.
+        self.assertLess(clean_score, 1.0)
+        self.assertGreater(noisy_score,
+                           muse_worker.NOISE_SCORE_THRESHOLD)
+        self.assertLess(gradient_score,
+                        muse_worker.NOISE_SCORE_THRESHOLD)
+        self.assertLess(clean_score, muse_worker.NOISE_SCORE_THRESHOLD)
+
+    def test_measure_clip_noise_job21_source_is_noisy(self):
+        src = Path("/home/hatch/workspace/clipper-job21/job21-source.mp4")
+        with tempfile.TemporaryDirectory() as tmp:
+            score = muse_worker.measure_clip_noise(src, 0, 20, Path(tmp))
+        self.assertIsNotNone(score)
+        # Calibrated 2026-11-28: the 360p source scores 7.57 here
+        # (13.43 at 400-420s), a clean rendered clip 3.28.
+        self.assertGreaterEqual(score, muse_worker.NOISE_SCORE_THRESHOLD)
+
+    def test_render_clip_strong_denoise_on_noisy_source(self):
+        src = Path("/home/hatch/workspace/clipper-job21/job21-source.mp4")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            info = muse_worker.probe_summary(src)
+            clip = {"start": 0.0, "end": 20.0}
+            out = tmp / "clip.mp4"
+            settings = _settings(duration_seconds=20, clip_count=1,
+                                 layout="center_crop", captions_enabled=False,
+                                 auto_zoom=False, silence_removal=False,
+                                 filler_removal=False)
+            muse_worker.render_clip(src, clip, settings, [], out, info, tmp)
+            self.assertTrue(out.exists())
+            stats = clip["_batch1_stats"]
+            self.assertTrue(
+                (stats["denoise_video"] or "").startswith("strong"),
+                stats["denoise_video"])
+            self.assertIn(
+                f"hqdn3d={muse_worker.DENOISE_STRONG_PARAMS}",
+                stats["filter_complex"])
+            self.assertGreaterEqual(
+                stats["denoise_score"], muse_worker.NOISE_SCORE_THRESHOLD)
+
+    def test_render_clip_light_denoise_on_clean_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "src.mp4"
+            self._make_clip(src, duration=10)
+            info = muse_worker.probe_summary(src)
+            clip = {"start": 0.0, "end": 10.0}
+            out = tmp / "clip.mp4"
+            settings = _settings(duration_seconds=10, clip_count=1,
+                                 layout="center_crop", captions_enabled=False,
+                                 auto_zoom=False, silence_removal=False,
+                                 filler_removal=False)
+            muse_worker.render_clip(src, clip, settings, [], out, info, tmp)
+            stats = clip["_batch1_stats"]
+            self.assertTrue(
+                (stats["denoise_video"] or "").startswith("light"),
+                stats["denoise_video"])
+            self.assertIn(
+                f"hqdn3d={muse_worker.DENOISE_LIGHT_PARAMS}",
+                stats["filter_complex"])
+            self.assertLess(stats["denoise_score"],
+                            muse_worker.NOISE_SCORE_THRESHOLD)
+
+    def test_render_clip_light_denoise_when_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "src.mp4"
+            self._make_clip(src, duration=10)
+            info = muse_worker.probe_summary(src)
+            clip = {"start": 0.0, "end": 10.0}
+            out = tmp / "clip.mp4"
+            settings = _settings(duration_seconds=10, clip_count=1,
+                                 layout="center_crop", captions_enabled=False,
+                                 denoise_cleanup=False,
+                                 auto_zoom=False, silence_removal=False,
+                                 filler_removal=False)
+            muse_worker.render_clip(src, clip, settings, [], out, info, tmp)
+            stats = clip["_batch1_stats"]
+            self.assertEqual(stats["denoise_video"], "light (feature off)")
+            self.assertIn(
+                f"hqdn3d={muse_worker.DENOISE_LIGHT_PARAMS}",
+                stats["filter_complex"])
+
+    # -- voice cleanup --------------------------------------------
+    def test_speech_rms_drop_measures_loss(self):
+        import numpy as np
+        rate = 16000
+        t = np.arange(0, 2 * rate) / rate
+        before = (0.5 * np.sin(2 * np.pi * 220 * t)).astype(np.float64)
+        after = (0.25 * np.sin(2 * np.pi * 220 * t)).astype(np.float64)
+        drop = muse_worker._speech_rms_drop(before, after, [(0.0, 2.0)])
+        # Halving the amplitude is -6.02 dB.
+        self.assertAlmostEqual(drop, 6.02, delta=0.05)
+        self.assertAlmostEqual(
+            muse_worker._speech_rms_drop(before, before, [(0.0, 2.0)]),
+            0.0, delta=0.01)
+        # Silence is not speech: no measurable speech, no drop.
+        self.assertEqual(
+            muse_worker._speech_rms_drop(np.zeros(2 * rate), after,
+                                         [(0.0, 2.0)]), 0.0)
+
+    def test_voice_cleanup_decision_applies_on_speech(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "src.mp4"
+            self._make_two_voice_clip(src)
+            decision = muse_worker._voice_cleanup_decision(
+                src, 0.0, 20.0, self._two_voice_segments(), tmp)
+            self.assertTrue(decision["apply"], decision)
+            self.assertTrue(
+                (decision["afftdn"] or "").startswith("afftdn=nr=10"),
+                decision["afftdn"])
+            self.assertTrue(decision["reason"].startswith("afftdn applied"))
+
+    def test_voice_cleanup_decision_skips_silent_clip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "src.mp4"
+            self._make_clip(src, duration=10)
+            decision = muse_worker._voice_cleanup_decision(
+                src, 0.0, 10.0, [], tmp)
+            self.assertFalse(decision["apply"])
+            self.assertEqual(decision["reason"], "no speech in clip")
+
+    def test_render_clip_voice_cleanup_in_chain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "src.mp4"
+            self._make_two_voice_clip(src)
+            info = muse_worker.probe_summary(src)
+            segments = self._two_voice_segments()
+            clip = {"start": 0.0, "end": 20.0}
+            out = tmp / "clip.mp4"
+            settings = _settings(duration_seconds=20, clip_count=1,
+                                 layout="blur_fill", captions_enabled=False,
+                                 auto_zoom=False, silence_removal=False,
+                                 filler_removal=False)
+            muse_worker.render_clip(src, clip, settings, segments,
+                                    out, info, tmp)
+            stats = clip["_batch1_stats"]
+            self.assertIn("afftdn=nr=10", stats["filter_complex"])
+            self.assertTrue(
+                (stats["voice_cleanup"] or "").startswith("afftdn applied"),
+                stats["voice_cleanup"])
+
+    def test_render_clip_no_voice_cleanup_when_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "src.mp4"
+            self._make_two_voice_clip(src)
+            info = muse_worker.probe_summary(src)
+            segments = self._two_voice_segments()
+            clip = {"start": 0.0, "end": 20.0}
+            out = tmp / "clip.mp4"
+            settings = _settings(duration_seconds=20, clip_count=1,
+                                 layout="blur_fill", captions_enabled=False,
+                                 denoise_cleanup=False,
+                                 auto_zoom=False, silence_removal=False,
+                                 filler_removal=False)
+            muse_worker.render_clip(src, clip, settings, segments,
+                                    out, info, tmp)
+            stats = clip["_batch1_stats"]
+            self.assertNotIn("afftdn", stats["filter_complex"])
+
+    # -- speed ramps ------------------------------------------------
+    def test_plan_speed_ramps_math(self):
+        plan = muse_worker.plan_speed_ramps(20.0, [5.0, 15.0])
+        # Two slow zones, contiguous coverage of [0, 20], output
+        # exactly 20s: the compensation speed pays for the slow
+        # time — (20-5)/(20-9.333) = 1.40625.
+        slows = [s for _a, _b, s in plan
+                 if s == muse_worker.SPEED_RAMP_SLOW]
+        self.assertEqual(len(slows), 2)
+        self.assertAlmostEqual(plan[0][0], 0.0)
+        self.assertAlmostEqual(plan[-1][1], 20.0)
+        for (_a, _b, _s), (c, _d, _e) in zip(plan, plan[1:]):
+            self.assertAlmostEqual(_b, c)
+        total_out = sum((b - a) / s for a, b, s in plan)
+        self.assertAlmostEqual(total_out, 20.0, delta=0.01)
+        comp = max(s for _a, _b, s in plan)
+        self.assertAlmostEqual(comp, 1.40625, delta=0.01)
+
+    def test_plan_speed_ramps_single_moment(self):
+        plan = muse_worker.plan_speed_ramps(10.0, [5.0])
+        slows = [s for _a, _b, s in plan
+                 if s == muse_worker.SPEED_RAMP_SLOW]
+        self.assertEqual(len(slows), 1)
+        total_out = sum((b - a) / s for a, b, s in plan)
+        self.assertAlmostEqual(total_out, 10.0, delta=0.01)
+
+    def test_plan_speed_ramps_too_short_clip(self):
+        self.assertEqual(muse_worker.plan_speed_ramps(4.0, [2.0]), [])
+        self.assertEqual(muse_worker.plan_speed_ramps(20.0, []), [])
+
+    def test_plan_speed_ramps_overlapping_centres_fall_back(self):
+        # Centres 0.5s apart would overlap their slow zones — the
+        # planner falls back to a single ramp rather than building
+        # an overlapping (invalid) plan.
+        plan = muse_worker.plan_speed_ramps(20.0, [5.0, 5.5])
+        slows = [s for _a, _b, s in plan
+                 if s == muse_worker.SPEED_RAMP_SLOW]
+        self.assertEqual(len(slows), 1)
+        total_out = sum((b - a) / s for a, b, s in plan)
+        self.assertAlmostEqual(total_out, 20.0, delta=0.01)
+
+    def test_plan_speed_ramps_edge_centres_dropped(self):
+        # A centre needs its whole zone (slow + ramps) inside the
+        # clip — 0.5s and 19.8s of a 20s clip cannot hold one.
+        self.assertEqual(muse_worker.plan_speed_ramps(20.0, [0.5, 19.8]),
+                         [])
+        plan = muse_worker.plan_speed_ramps(20.0, [1.5, 18.5])
+        slows = [s for _a, _b, s in plan
+                 if s == muse_worker.SPEED_RAMP_SLOW]
+        self.assertEqual(len(slows), 2)
+
+    def test_speed_ramp_centres_from_energy(self):
+        energy = [0.1] * 20
+        energy[7] = 0.9   # loudest second inside the first moment
+        energy[16] = 0.7  # loudest second inside the second moment
+        centres = muse_worker.speed_ramp_centres(
+            energy, 0.0, 20.0, [(5.0, 9.0), (14.0, 18.0)])
+        self.assertEqual(centres, [7.5, 16.5])
+        self.assertEqual(muse_worker.speed_ramp_centres([], 0.0, 20.0,
+                                                        [(5.0, 9.0)]), [])
+
+    def test_remap_time_through_cuts(self):
+        self.assertAlmostEqual(
+            muse_worker._remap_time(5.0, 0.0, []), 5.0)
+        cuts = [(2.0, 4.0), (8.0, 9.0)]
+        # Inside a cut: the moment is gone with the silence.
+        self.assertIsNone(muse_worker._remap_time(3.0, 0.0, cuts))
+        # After the first cut: shifted by its length.
+        self.assertAlmostEqual(
+            muse_worker._remap_time(6.0, 0.0, cuts), 4.0)
+        # After both cuts: shifted by both lengths.
+        self.assertAlmostEqual(
+            muse_worker._remap_time(12.0, 0.0, cuts), 9.0)
+
+    def test_render_clip_speed_ramps_duration_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "src.mp4"
+            self._make_two_voice_clip(src)
+            info = muse_worker.probe_summary(src)
+            segments = self._two_voice_segments()
+            clip = {"start": 0.0, "end": 20.0,
+                    "_speed_ramp_centres": [5.0, 15.0]}
+            out = tmp / "clip.mp4"
+            settings = _settings(duration_seconds=20, clip_count=1,
+                                 layout="blur_fill", captions_enabled=False,
+                                 auto_zoom=False, silence_removal=False,
+                                 filler_removal=False)
+            muse_worker.render_clip(src, clip, settings, segments,
+                                    out, info, tmp)
+            self.assertTrue(out.exists())
+            stats = clip["_batch1_stats"]
+            self.assertEqual(stats["speed_ramps"], 2)
+            # Only the centres the plan actually used are recorded —
+            # a dropped centre must never be listed in the note.
+            self.assertEqual(stats["speed_ramp_centres"], [5.0, 15.0])
+            self.assertIn("setpts=(PTS-STARTPTS)*2", stats["filter_complex"])
+            self.assertIn("atempo=0.5", stats["filter_complex"])
+            self.assertAlmostEqual(stats["speed_ramp_comp"], 1.40625,
+                                   delta=0.01)
+            validated = muse_worker.validate_clip(
+                out, {"settings": settings}, info)
+            # The duration promise holds: exactly 20s, ramps included.
+            self.assertAlmostEqual(validated["duration"], 20.0, delta=0.5)
+
+    def test_render_clip_no_ramps_when_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "src.mp4"
+            self._make_two_voice_clip(src)
+            info = muse_worker.probe_summary(src)
+            segments = self._two_voice_segments()
+            clip = {"start": 0.0, "end": 20.0,
+                    "_speed_ramp_centres": [5.0, 15.0]}
+            out = tmp / "clip.mp4"
+            settings = _settings(duration_seconds=20, clip_count=1,
+                                 layout="blur_fill", captions_enabled=False,
+                                 speed_ramps=False,
+                                 auto_zoom=False, silence_removal=False,
+                                 filler_removal=False)
+            muse_worker.render_clip(src, clip, settings, segments,
+                                    out, info, tmp)
+            stats = clip["_batch1_stats"]
+            self.assertEqual(stats["speed_ramps"], 0)
+            self.assertNotIn("atempo=0.5", stats["filter_complex"])
+            self.assertNotIn("setpts=(PTS-STARTPTS)*2",
+                             stats["filter_complex"])
+
+
 if __name__ == "__main__":
     unittest.main()

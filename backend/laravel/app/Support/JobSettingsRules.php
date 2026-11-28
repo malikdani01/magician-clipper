@@ -202,6 +202,16 @@ class JobSettingsRules
             'emotion_emphasis' => ['sometimes', 'boolean'],
             'dynamic_headline' => ['sometimes', 'boolean'],
             'scroll_stopper' => ['sometimes', 'boolean'],
+            // Batch 17 — Quality (2026-11-28): stabilization (two-pass
+            // vidstab, deshake fallback), denoise + voice cleanup
+            // (measured per clip — a noisy source gets the strong
+            // denoise, clean audio gets afftdn under a speech guard),
+            // speed ramps (0.5x on up to 2 high-energy moments,
+            // duration unchanged) — all default ON, no wizard
+            // toggles; the worker treats a missing key as ON too.
+            'stabilization' => ['sometimes', 'boolean'],
+            'denoise_cleanup' => ['sometimes', 'boolean'],
+            'speed_ramps' => ['sometimes', 'boolean'],
             'layout' => ['sometimes', 'string', Rule::in(['center_crop', 'split', 'pip_facecam', 'blur_fill', 'streamer_full', 'gradient_fill', 'stacked', 'letterbox', 'face_closeup', 'framed'])],
             'content_type' => ['sometimes', 'string', Rule::in(Project::CONTENT_TYPES)],
             'quality' => ['sometimes', 'string', Rule::in(['draft', 'standard', 'high'])],

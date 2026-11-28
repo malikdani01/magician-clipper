@@ -328,6 +328,13 @@ export interface JobSettings {
   emotion_emphasis?: boolean
   dynamic_headline?: boolean
   scroll_stopper?: boolean
+  /** Batch 17 (2026-11-28): quality — stabilization, denoise +
+   * voice cleanup, speed ramps — all default ON, no wizard
+   * toggles. Absent on older jobs, where the worker treats them
+   * as ON. */
+  stabilization?: boolean
+  denoise_cleanup?: boolean
+  speed_ramps?: boolean
   /** Batch 2 headline look + caption position (2026-11-25); absent on
    * older jobs, where the worker uses bold_bar / bottom. */
   headline_style?: string
